@@ -1,0 +1,35 @@
+#cloud-config
+kernel:
+  package: linux-image-6.17.0-29-generic
+  flavor: hwe
+
+debconf_selections:
+ maas: |
+  {{for line in str(curtin_preseed).splitlines()}}
+  {{line}}
+  {{endfor}}
+
+write_files:
+  blacklist_nouveau:
+    path: /etc/modprobe.d/blacklist-nouveau.conf
+    content: |
+      blacklist nouveau
+      blacklist lbm-nouveau
+      options nouveau modeset=0
+      alias nouveau off
+      alias lbm-nouveau off
+    permissions: '0644'
+  disable_offload_proxmox:
+    path: /usr/lib/networkd-dispatcher/routable.d/10-disable-offloading
+    content: |
+      #!/bin/sh
+      ethtool --offload $IFACE tx off
+    permissions: '0755'
+
+late_commands:
+  1_maas: [wget, '--no-proxy', {{node_disable_pxe_url|escape.json}}, '--post-data', {{node_disable_pxe_data|escape.json}}, '-O', '/dev/null']
+  2_extra_modules: ["curtin", "in-target", "--", "apt", "install", "-y", "--allow-change-held-packages", "linux-modules-extra-6.17.0-29-generic"]
+  3_clean_sources: ["curtin", "in-target", "--", "rm", "-f", "/etc/apt/sources.list.d/ubuntu.sources"]
+  4_no_proxmox: curtin in-target -- /bin/bash -c 'if [ "$(cat /sys/class/dmi/id/chassis_vendor)" != "QEMU" ]; then rm /usr/lib/networkd-dispatcher/routable.d/10-disable-offloading; fi'
+  5_change_maas_ip_1: curtin in-target -- sh -c 'set -x ; sed -i "s/192.168.10.1[0|1]/10.0.20.30/g" /etc/cloud/cloud.cfg.d/*'
+  6_change_maas_ip_2: curtin in-target -- sh -c 'set -x ; sed -i "s/192.168.10.1[0|1]/10.0.20.30/g" /etc/apt/apt.conf.d/*
