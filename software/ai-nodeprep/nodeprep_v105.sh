@@ -352,7 +352,7 @@ fn_init_sw_stage() {
   do_log "INFO Configure LLDP"
   mkdir -p /etc/lldpd.d
   echo "configure system hostname ." > /etc/lldpd.d/rcp-lldpd.conf
-  echo "configure lldp portidsubtype iframe" >> /etc/lldpd.d/rcp-lldpd.conf
+  echo "configure lldp portidsubtype ifname" >> /etc/lldpd.d/rcp-lldpd.conf
   chmod 644 /etc/lldpd.d/rcp-lldpd.conf
   systemctl enable lldpd
   fn_process_result $? "Configure LLDP"
