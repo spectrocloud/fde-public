@@ -8,6 +8,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +29,22 @@ var machineGVR = schema.GroupVersionResource{
 	Group:    "cluster.x-k8s.io",
 	Version:  "v1beta1",
 	Resource: "machines",
+}
+
+func machineCRDExists(ctx context.Context, dyn dynamic.Interface) bool {
+	_, err := dyn.Resource(machineGVR).List(ctx, metav1.ListOptions{Limit: 1})
+	if err == nil {
+		log.Println("[nodeprep] Machine CRD detected")
+		return true
+	}
+
+	if errors.IsNotFound(err) {
+		log.Println("[nodeprep] Machine CRD not found; skipping Machine pause annotation logic")
+		return false
+	}
+
+	log.Printf("[nodeprep] unable to check Machine CRD, skipping Machine pause annotation logic: %v", err)
+	return false
 }
 
 func findMachineForNode(ctx context.Context, dyn dynamic.Interface, nodeName string) (*unstructured.Unstructured, bool) {
@@ -213,8 +230,17 @@ func removeTaintIfComplete(ctx context.Context, c kubernetes.Interface, node *v1
 	}
 }
 
-func handleNode(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, node *v1.Node) {
-	reconcileMachinePauseAnnotation(ctx, dyn, node)
+func handleNode(
+	ctx context.Context,
+	client kubernetes.Interface,
+	dyn dynamic.Interface,
+	node *v1.Node,
+	machineCRDAvailable bool,
+) {
+	if machineCRDAvailable {
+		reconcileMachinePauseAnnotation(ctx, dyn, node)
+	}
+
 	removeTaintIfComplete(ctx, client, node)
 }
 
@@ -239,20 +265,22 @@ func main() {
 
 	ctx := context.Background()
 
+	machineCRDAvailable := machineCRDExists(ctx, dynClient)
+
 	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			node, ok := obj.(*v1.Node)
 			if !ok {
 				return
 			}
-			handleNode(ctx, client, dynClient, node)
+			handleNode(ctx, client, dynClient, node, machineCRDAvailable)
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			node, ok := newObj.(*v1.Node)
 			if !ok {
 				return
 			}
-			handleNode(ctx, client, dynClient, node)
+			handleNode(ctx, client, dynClient, node, machineCRDAvailable)
 		},
 	})
 
