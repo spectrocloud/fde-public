@@ -213,7 +213,7 @@ fn_inventory_hw() {
       arrBF[$n,11]="dpu"
       if [ "${pci/*\./}" == "0" ]; then arrBF[$n,14]="true"; else arrBF[$n,14]="false"; fi
     elif echo "$DESCR" | grep "ConnectX" >/dev/null; then
-      arrBF[$n,4]=$(echo "$DESCR" | awk '{print $2}')
+      arrBF[$n,4]=$(echo "$DESCR" | awk -F ':' '{print $2}' | awk '{$1=$1};1')
       arrBF[$n,14]="true"
       for i in $(seq 0 $((num_rails - 1))); do
         if [ "${arrBF[$n,13]}" -eq 1 ]; then
