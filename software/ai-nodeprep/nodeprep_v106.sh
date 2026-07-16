@@ -116,6 +116,11 @@ fn_ensure_state() {
   systemctl start kubelet
   sleep 5
   do_log "OK Cleared previous Kubelet CPU Manager and Memory Manager states..."
+  do_log "INFO Wait until communication with the Kubernetes API Server is established..."
+  until kubectl api-versions > /dev/null; do
+    do_log "INFO Kubernetes API Server not yet available, will retry in 5s"
+    sleep 5
+  done
   do_log "INFO Detecting node name in Kubernetes..."
   if kubectl get node $(hostname) >/dev/null 2>&1; then
     k8s_node=$(hostname)
