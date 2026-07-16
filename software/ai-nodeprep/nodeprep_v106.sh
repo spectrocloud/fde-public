@@ -579,8 +579,13 @@ fn_config_stage(){
       fn_process_result $? "Configure ${arrBF[$i,4]} adapter firmware for ${arrBF[$i,0]}"
     fi
     if [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
-      do_log "INFO Generate netplan file for ${arrBF[$i,6]} to ignore carrier changes"
-      echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: true\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      if [ "$ESWITCH_MODE" == "switchdev" ]; then
+        do_log "INFO Generate netplan file for ${arrBF[$i,6]} to set the MTU and ignore carrier changes"
+        echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: true\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      else
+        do_log "INFO Generate netplan file for ${arrBF[$i,6]} to set the MTU"
+        echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: false\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      fi
       chmod 0600 "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
     fi
   done
