@@ -1,9 +1,15 @@
 #!/bin/bash
+# Version 1.0.6
+# Changelog:
+# - 1.0.6: Now writing out and using /tmp/bf.cfg during DPU BFB flash to include firmware update of BMC controller
+# - 1.0.5: Handle multi-plane SuperNIC/ConnectX adapters
+# - 1.0.4: Support Spectrum-X 2.1 architecture based on Spectrum-X Operator (OVS with NICs in switchdev mode)
+# - 1.0.3: Initial public version
+
 source /opt/spectrocloud/nodeprep.env
 LOG_FILE="/var/log/sc-nodeprep.log"
 exec > >(tee -a ${LOG_FILE}) 2>&1
 export KUBECONFIG=/etc/kubernetes/kubelet.conf
-
 declare -A arrBF
 k8s_node=""
 total_amount=0
@@ -11,6 +17,7 @@ IFS=',' read -r -a rail_map <<< "$rails_pciaddr"
 num_rails="${#rail_map[@]}"
 
 if [ -z "$MTU_EW" ]; then MTU_EW=9216; fi
+if [ -z "$DPU_BMC_PWD" ]; then DPU_BMC_PWD="0penBmc"; fi
 
 do_log(){
   print_ok() {
@@ -88,11 +95,17 @@ fn_ensure_nodeprep() {
       do_log "OK Ensured that nodeprep is called at system startup."
     fi
   fi
-  if [ -f /usr/bin/mlnx_interface_mgr.sh ]; then
+  if [ -f /usr/bin/mlnx_interface_mgr.sh ] && [ $(lspci -d 15b3:* | wc -l) -gt 0 ]; then
     do_log "INFO Mellanox Interface Manager detected, waiting for it to complete initialization..."
-    while ! systemctl status system-mlnx_interface_mgr.slice > /dev/null; do
+    EXPIRED=$(( SECONDS + 600 ))
+    while ! systemctl status system-mlnx_interface_mgr.slice > /dev/null && (( SECONDS < EXPIRED )); do
       sleep 2
     done
+    if ! systemctl status system-mlnx_interface_mgr.slice > /dev/null; then
+      do_log "WARNING Mellanox Interface Manager did not initialize after 10 minutes, assuming we should stop waiting for it."
+    else
+      do_log "OK Mellanox Interface Manager successfully initialized, continuing..."
+    fi
     sleep 5
   fi
   if [ -x /usr/sbin/netplan ]; then
@@ -109,6 +122,11 @@ fn_ensure_state() {
   systemctl start kubelet
   sleep 5
   do_log "OK Cleared previous Kubelet CPU Manager and Memory Manager states..."
+  do_log "INFO Wait until communication with the Kubernetes API Server is established..."
+  until kubectl api-versions > /dev/null; do
+    do_log "INFO Kubernetes API Server not yet available, will retry in 5s"
+    sleep 5
+  done
   do_log "INFO Detecting node name in Kubernetes..."
   if kubectl get node $(hostname) >/dev/null 2>&1; then
     k8s_node=$(hostname)
@@ -213,7 +231,7 @@ fn_inventory_hw() {
       arrBF[$n,11]="dpu"
       if [ "${pci/*\./}" == "0" ]; then arrBF[$n,14]="true"; else arrBF[$n,14]="false"; fi
     elif echo "$DESCR" | grep "ConnectX" >/dev/null; then
-      arrBF[$n,4]=$(echo "$DESCR" | awk '{print $2}')
+      arrBF[$n,4]=$(echo "$DESCR" | awk -F ':' '{print $2}' | awk '{$1=$1};1')
       arrBF[$n,14]="true"
       for i in $(seq 0 $((num_rails - 1))); do
         if [ "${arrBF[$n,13]}" -eq 1 ]; then
@@ -475,7 +493,16 @@ fn_init_hw_stage() {
           do_log "INFO Starting Bluefield-3 firmware flash to ${arrBF[$i,2]} in background..."
           NEEDREBOOT=true
           local rshim_addr="${arrBF[$i,5]/\/dev\//}"
-          bfb-install --rshim $rshim_addr --bfb /opt/spectrocloud/spcx/bfb/$BFB --verbose & pids+=("$!")
+          echo -e "BMC_USER=\"root\"\nBMC_PASSWORD=\"$DPU_BMC_PWD\"\nUPDATE_BMC_FW=\"yes\"\nBMC_REBOOT=\"yes\"\nBMC_RESET=\"yes\"\nUPDATE_CEC_FW=\"yes\"" > "/tmp/bf.cfg"
+          if [ -n "$DPU_BMC_NEW_PWD" ]; then
+            if [ ${#DPU_BMC_NEW_PWD} -ge 12 ]; then
+              do_log "INFO DPU_BMC_NEW_PWD variable is set and meets minimum length, adding parameter to DPU flash configuration"
+              echo -e "NEW_BMC_PASSWORD=\"$DPU_BMC_NEW_PWD\"\n" >> "/tmp/bf.cfg"
+            else
+              do_log "WARN DPU_BMC_NEW_PWD variable is set but is less than 12 characters, skipping this parameter as it will be denied by the BMC"
+            fi
+          fi
+          bfb-install -c /tmp/bf.cfg --rshim $rshim_addr --bfb /opt/spectrocloud/spcx/bfb/$BFB --verbose & pids+=("$!")
         fi
       else
         do_log "INFO Control of DPUs is not allowed by policy, skipping DPU ${arrBF[$i,2]}"
@@ -536,7 +563,8 @@ fn_config_stage(){
       FLASHCONFIG=true
     elif [[ "${arrBF[$i,4]}" =~ ConnectX ]] && [ "${arrBF[$i,10]}" == "Air" ]; then
       FLASH+=("LINK_TYPE_P1=$LINKTYPE_EW")
-      FLASH+=("NUM_OF_VFS=$CNX_NUM_OF_VFS")
+      #FLASH+=("NUM_OF_VFS=$CNX_NUM_OF_VFS")
+      FLASH+=("NUM_OF_VFS=0") # Currently DSX Air is not allowing NUM_OF_VFS > 0
       if [ "$LINKTYPE_EW" == "2" ]; then FLASH+=("ROCE_CC_RTT_TIMESTAMP_FORMAT=0"); fi
       FLASHCONFIG=true
     elif [ "${arrBF[$i,4]}" == "DPU" ]; then
@@ -563,8 +591,13 @@ fn_config_stage(){
       fn_process_result $? "Configure ${arrBF[$i,4]} adapter firmware for ${arrBF[$i,0]}"
     fi
     if [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
-      do_log "INFO Generate netplan file for ${arrBF[$i,6]} to ignore carrier changes"
-      echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: true\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      if [ "$ESWITCH_MODE" == "switchdev" ]; then
+        do_log "INFO Generate netplan file for ${arrBF[$i,6]} to set the MTU and ignore carrier changes"
+        echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: true\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      else
+        do_log "INFO Generate netplan file for ${arrBF[$i,6]} to set the MTU"
+        echo -e "network:\n  version: 2\n  ethernets:\n    eth_${arrBF[$i,11]}:\n      ignore-carrier: false\n      mtu: ${MTU_EW}" > "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
+      fi
       chmod 0600 "/etc/netplan/gpu_fabric_eth_${arrBF[$i,11]}.yaml"
     fi
   done
