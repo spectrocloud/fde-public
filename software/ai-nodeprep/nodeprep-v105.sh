@@ -90,9 +90,15 @@ fn_ensure_nodeprep() {
   fi
   if [ -f /usr/bin/mlnx_interface_mgr.sh ] && [ $(lspci -d 15b3:* | wc -l) -gt 0 ]; then
     do_log "INFO Mellanox Interface Manager detected, waiting for it to complete initialization..."
-    while ! systemctl status system-mlnx_interface_mgr.slice > /dev/null; do
+    EXPIRED=$(( SECONDS + 600 ))
+    while ! systemctl status system-mlnx_interface_mgr.slice > /dev/null && (( SECONDS < EXPIRED )); do
       sleep 2
     done
+    if ! systemctl status system-mlnx_interface_mgr.slice > /dev/null; then
+      do_log "WARNING Mellanox Interface Manager did not initialize after 10 minutes, assuming we should stop waiting for it."
+    else
+      do_log "OK Mellanox Interface Manager successfully initialized, continuing..."
+    fi
     sleep 5
   fi
   if [ -x /usr/sbin/netplan ]; then
