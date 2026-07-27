@@ -88,7 +88,7 @@ fn_ensure_nodeprep() {
       do_log "OK Ensured that nodeprep is called at system startup."
     fi
   fi
-  if [ -f /usr/bin/mlnx_interface_mgr.sh ]; then
+  if [ -f /usr/bin/mlnx_interface_mgr.sh ] && [ $(lspci -d 15b3:* | wc -l) -gt 0 ]; then
     do_log "INFO Mellanox Interface Manager detected, waiting for it to complete initialization..."
     while ! systemctl status system-mlnx_interface_mgr.slice > /dev/null; do
       sleep 2
