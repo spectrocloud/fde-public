@@ -830,9 +830,9 @@ fn_rename_devices(){
 }
 
 fn_set_lossless_roce(){
-  if [ "$LINKTYPE_EW" == "2" ] && ([[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]] || [ "${arrBF[$i,4]}" == "SuperNIC" ]); then
+  for i in $(seq 1 $total_amount); do
+    if [ "$LINKTYPE_EW" == "2" ] && ([[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]] || [ "${arrBF[$i,4]}" == "SuperNIC" ]); then
     # Enable lossless RoCE mode for RDMA devices
-    for i in $(seq 1 $total_amount); do
       if [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
         if [ $NUMVF_EW -gt 0 ]; then
           for vf in $(seq 0 $((NUMVF_EW - 1))); do
@@ -866,8 +866,8 @@ fn_set_lossless_roce(){
         mlxreg -d "${arrBF[$i,2]}" -y --reg_id 0x5006 --set "0x0.8:4=2,0x0.16:8=1,0x4.8:1=1,0x4.31:1=1" --reg_len 16
         mlxreg -d "${arrBF[$i,2]}" -y --reg_id 0x5006 --set "0x0.8:4=1,0x0.16:8=1,0x4.8:1=1,0x4.31:1=1" --reg_len 16
       fi
-    done
-  fi
+    fi
+  done
 }
 
 fn_add_pfs_to_rail_bridges(){
