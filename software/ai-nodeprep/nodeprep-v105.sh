@@ -547,8 +547,7 @@ fn_config_stage(){
       FLASHCONFIG=true
     elif [[ "${arrBF[$i,4]}" =~ ConnectX ]] && [ "${arrBF[$i,10]}" == "Air" ]; then
       FLASH+=("LINK_TYPE_P1=$LINKTYPE_EW")
-      #FLASH+=("NUM_OF_VFS=$CNX_NUM_OF_VFS")
-      FLASH+=("NUM_OF_VFS=0") # Currently DSX Air is not allowing NUM_OF_VFS > 0
+      FLASH+=("NUM_OF_VFS=$CNX_NUM_OF_VFS")
       if [ "$LINKTYPE_EW" == "2" ]; then FLASH+=("ROCE_CC_RTT_TIMESTAMP_FORMAT=0"); fi
       FLASHCONFIG=true
     elif [ "${arrBF[$i,4]}" == "DPU" ]; then
