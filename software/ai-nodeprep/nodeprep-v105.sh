@@ -513,7 +513,7 @@ fn_config_stage(){
     if [ "$LINKTYPE_EW" == "2" ]; then
       FLASH+=("ROCE_RTT_RESP_DSCP_P1=48")
       FLASH+=("ROCE_RTT_RESP_DSCP_MODE_P1=1")
-      if [ "${arrBF[$i,4]}" == "SuperNIC" ] || [[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]]; then
+      if [ "${arrBF[$i,4]}" == "SuperNIC" ] || [[ "${arrBF[$i,4]}" =~ ConnectX[-]?[7-9] ]]; then
         FLASH+=("ROCE_ADAPTIVE_ROUTING_EN=$ROCECC")
         FLASH+=("USER_PROGRAMMABLE_CC=$ROCECC")
         FLASH+=("TX_SCHEDULER_LOCALITY_MODE=2")
@@ -536,7 +536,7 @@ fn_config_stage(){
     elif [[ "${arrBF[$i,4]}" =~ ConnectX ]] && [ "${arrBF[$i,10]}" == "Physical" ]; then
       if /usr/bin/mlxconfig -d "${arrBF[$i,2]}" q LINK_TYPE_P1 >/dev/null; then FLASH+=("LINK_TYPE_P1=$LINKTYPE_EW"); fi
       FLASH+=("NUM_OF_VFS=$CNX_NUM_OF_VFS")
-      if [ "$LINKTYPE_EW" == "2" ] && [[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]]; then FLASH+=("MULTIPATH_DSCP=0"); fi
+      if [ "$LINKTYPE_EW" == "2" ] && [[ "${arrBF[$i,4]}" =~ ConnectX[-]?[7-9] ]]; then FLASH+=("MULTIPATH_DSCP=0"); fi
       if /usr/bin/mlxconfig -d "${arrBF[$i,2]}" q LINK_TYPE_P2 >/dev/null; then
         FLASH+=("LINK_TYPE_P2=$LINKTYPE_EW")
         if [ "$LINKTYPE_EW" == "2" ]; then
@@ -830,7 +830,7 @@ fn_rename_devices(){
 
 fn_set_lossless_roce(){
   for i in $(seq 1 $total_amount); do
-    if [ "$LINKTYPE_EW" == "2" ] && ([[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]] || [ "${arrBF[$i,4]}" == "SuperNIC" ]); then
+    if [ "$LINKTYPE_EW" == "2" ] && ([[ "${arrBF[$i,4]}" =~ ConnectX[-]?[7-9] ]] || [ "${arrBF[$i,4]}" == "SuperNIC" ]); then
     # Enable lossless RoCE mode for RDMA devices
       if [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
         if [ $NUMVF_EW -gt 0 ]; then
