@@ -23,6 +23,7 @@ const (
 	labelKey        = "spectrocloud.com/nodeprep"
 	taintKey        = "spectrocloud.com/nodeprep"
 	pauseAnnotation = "cluster.x-k8s.io/paused"
+	workerRoleLabel = "node-role.kubernetes.io/worker"
 )
 
 var machineGVR = schema.GroupVersionResource{
@@ -230,6 +231,78 @@ func removeTaintIfComplete(ctx context.Context, c kubernetes.Interface, node *v1
 	}
 }
 
+func removeWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if _, exists := node.Labels[workerRoleLabel]; !exists {
+		return
+	}
+
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": map[string]interface{}{
+				workerRoleLabel: nil,
+			},
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.Printf("[nodeprep] failed marshaling worker-role removal patch for node %s: %v", node.Name, err)
+		return
+	}
+
+	_, err = c.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		log.Printf("[nodeprep] failed removing worker-role label from node %s: %v", node.Name, err)
+		return
+	}
+
+	log.Printf("[nodeprep] removed worker-role label from node %s", node.Name)
+}
+
+func addWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if _, exists := node.Labels[workerRoleLabel]; exists {
+		return
+	}
+
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": map[string]interface{}{
+				workerRoleLabel: "",
+			},
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.Printf("[nodeprep] failed marshaling worker-role addition patch for node %s: %v", node.Name, err)
+		return
+	}
+
+	_, err = c.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		log.Printf("[nodeprep] failed adding worker-role label to node %s: %v", node.Name, err)
+		return
+	}
+
+	log.Printf("[nodeprep] added worker-role label to node %s", node.Name)
+}
+
+func reconcileWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	labelValue, labelExists := node.Labels[labelKey]
+
+	// Important: do nothing unless the nodeprep label key exists.
+	if !labelExists {
+		return
+	}
+
+	switch labelValue {
+	case "precomplete":
+		removeWorkerRoleLabel(ctx, c, node)
+	case "complete":
+		addWorkerRoleLabel(ctx, c, node)
+	}
+}
+
 func handleNode(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -242,6 +315,7 @@ func handleNode(
 	}
 
 	removeTaintIfComplete(ctx, client, node)
+	reconcileWorkerRoleLabel(ctx, client, node)
 }
 
 func main() {
