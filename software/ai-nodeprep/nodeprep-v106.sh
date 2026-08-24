@@ -969,6 +969,7 @@ case "$STATE" in
     ;&
   "complete")
     do_log "INFO Complete stage: inventory HW and set VFs if requested..."
+    fn_update_state precomplete
     if $DISABLE_ACS; then fn_disable_acs; fi
     fn_inventory_hw
     fn_set_vfs
