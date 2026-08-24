@@ -775,6 +775,7 @@ fn_set_vfs(){
             if [ "$LINKTYPE" == "ETH" ] && [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
               echo "ACTION==\"add\", KERNELS==\"$VF_PCI_ADDR\", SUBSYSTEM==\"net\", NAME=\"nic_vf${vf}_${arrBF[$i,11]}\"" >> /etc/udev/rules.d/71-persistent-net-vf.rules
               echo "ACTION==\"add\", KERNELS==\"$VF_PCI_ADDR\", SUBSYSTEM==\"infiniband\", PROGRAM=\"rdma_rename %k NAME_FIXED roce_vf${vf}_${arrBF[$i,11]}\"" >> /etc/udev/rules.d/61-persistent-rdma-vf.rules
+              echo "ACTION==\"add\", KERNELS==\"$VF_PCI_ADDR\", SUBSYSTEM==\"infiniband\", RUN+=\"/bin/sh -c 'cma_roce_tos -d roce_vf${vf}_${arrBF[$i,11]} -t 96 > /dev/null && echo 96 > /sys/class/infiniband/roce_vf${vf}_${arrBF[$i,11]}/tc/1/traffic_class'\"" >> /etc/udev/rules.d/61-persistent-rdma-vf.rules
               local VF_REP=$(devlink port show | grep "pci/${arrBF[$i,2]}" | grep pcivf | awk '{print $5}')
               local VF_REP_PORTNAME=$(cat /sys/class/net/$VF_REP/phys_port_name)
               local VF_REP_SWITCHID=$(cat /sys/class/net/$VF_REP/phys_switch_id)
@@ -817,6 +818,7 @@ fn_rename_devices(){
         ip link set dev "${arrBF[$i,6]}" down
         echo "ACTION==\"add\", KERNELS==\"${arrBF[$i,2]}\", SUBSYSTEM==\"net\", NAME=\"eth_${arrBF[$i,11]}\"" >> /etc/udev/rules.d/70-persistent-net.rules
         echo "ACTION==\"add\", KERNELS==\"${arrBF[$i,2]}\", SUBSYSTEM==\"infiniband\", PROGRAM=\"rdma_rename %k NAME_FIXED roce_${arrBF[$i,11]}\"" >> /etc/udev/rules.d/60-persistent-rdma.rules
+        echo "ACTION==\"add\", KERNELS==\"${arrBF[$i,2]}\", SUBSYSTEM==\"infiniband\", RUN+=\"/bin/sh -c 'cma_roce_tos -d roce_${arrBF[$i,11]} -t 96 > /dev/null && echo 96 > /sys/class/infiniband/roce_${arrBF[$i,11]}/tc/1/traffic_class'\"" >> /etc/udev/rules.d/60-persistent-rdma.rules
       fi
     done
     do_log "INFO Trigger udev rules reload and run triggers"
@@ -849,17 +851,6 @@ fn_set_lossless_roce(){
     if [ "$LINKTYPE_EW" == "2" ] && ([[ "${arrBF[$i,4]}" =~ ConnectX-[7-9] ]] || [ "${arrBF[$i,4]}" == "SuperNIC" ]); then
     # Enable lossless RoCE mode for RDMA devices
       if [[ "${arrBF[$i,11]}" =~ ^r[0-9]+ ]]; then
-        if [ $NUMVF_EW -gt 0 ]; then
-          for vf in $(seq 0 $((NUMVF_EW - 1))); do
-            do_log "INFO Enable lossless RoCE mode for roce_vf${vf}_${arrBF[$i,11]}"
-            cma_roce_tos -d "roce_vf${vf}_${arrBF[$i,11]}" -t 96
-            echo 96 > "/sys/class/infiniband/roce_vf${vf}_${arrBF[$i,11]}/tc/1/traffic_class"
-          done
-        else
-          do_log "INFO Enable lossless RoCE mode for roce_${arrBF[$i,11]}"
-          cma_roce_tos -d "roce_${arrBF[$i,11]}" -t 96
-          echo 96 > "/sys/class/infiniband/roce_${arrBF[$i,11]}/tc/1/traffic_class"
-        fi
         do_log "INFO Set PFC priority 3 for ${arrBF[$i,6]}"
         mlnx_qos -i "${arrBF[$i,6]}" --pfc=0,0,0,1,0,0,0,0 --trust=dscp > "/var/log/spcx_log_${arrBF[$i,6]}.log"
         do_log "INFO Set ECN for RoCE traffic for ${arrBF[$i,6]}"
