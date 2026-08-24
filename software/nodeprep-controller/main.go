@@ -7,8 +7,8 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -232,74 +232,71 @@ func removeTaintIfComplete(ctx context.Context, c kubernetes.Interface, node *v1
 }
 
 func removeWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if node.Labels[labelKey] != "precomplete" {
+		return
+	}
+
 	if _, exists := node.Labels[workerRoleLabel]; !exists {
 		return
 	}
 
-	patch := map[string]interface{}{
-		"metadata": map[string]interface{}{
-			"labels": map[string]interface{}{
-				workerRoleLabel: nil,
-			},
-		},
-	}
+	for i := 0; i < 3; i++ {
+		n, err := c.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[nodeprep] failed getting node %s: %v", node.Name, err)
+			return
+		}
 
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		log.Printf("[nodeprep] failed marshaling worker-role removal patch for node %s: %v", node.Name, err)
-		return
-	}
+		if _, exists := n.Labels[workerRoleLabel]; !exists {
+			return
+		}
 
-	_, err = c.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
-	if err != nil {
-		log.Printf("[nodeprep] failed removing worker-role label from node %s: %v", node.Name, err)
-		return
-	}
+		delete(n.Labels, workerRoleLabel)
 
-	log.Printf("[nodeprep] removed worker-role label from node %s", node.Name)
+		_, err = c.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		if err == nil {
+			log.Printf("[nodeprep] removed worker-role label from node %s", n.Name)
+			return
+		}
+
+		log.Printf("[nodeprep] failed updating node %s, retrying: %v", n.Name, err)
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func addWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if node.Labels[labelKey] != "complete" {
+		return
+	}
+
 	if _, exists := node.Labels[workerRoleLabel]; exists {
 		return
 	}
 
-	patch := map[string]interface{}{
-		"metadata": map[string]interface{}{
-			"labels": map[string]interface{}{
-				workerRoleLabel: "",
-			},
-		},
-	}
+	for i := 0; i < 3; i++ {
+		n, err := c.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[nodeprep] failed getting node %s: %v", node.Name, err)
+			return
+		}
 
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		log.Printf("[nodeprep] failed marshaling worker-role addition patch for node %s: %v", node.Name, err)
-		return
-	}
+		if _, exists := n.Labels[workerRoleLabel]; exists {
+			return
+		}
 
-	_, err = c.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
-	if err != nil {
-		log.Printf("[nodeprep] failed adding worker-role label to node %s: %v", node.Name, err)
-		return
-	}
+		if n.Labels == nil {
+			n.Labels = make(map[string]string)
+		}
+		n.Labels[workerRoleLabel] = ""
 
-	log.Printf("[nodeprep] added worker-role label to node %s", node.Name)
-}
+		_, err = c.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		if err == nil {
+			log.Printf("[nodeprep] added worker-role label to node %s", n.Name)
+			return
+		}
 
-func reconcileWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
-	labelValue, labelExists := node.Labels[labelKey]
-
-	// Important: do nothing unless the nodeprep label key exists.
-	if !labelExists {
-		return
-	}
-
-	switch labelValue {
-	case "precomplete":
-		removeWorkerRoleLabel(ctx, c, node)
-	case "complete":
-		addWorkerRoleLabel(ctx, c, node)
+		log.Printf("[nodeprep] failed updating node %s, retrying: %v", n.Name, err)
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -315,7 +312,8 @@ func handleNode(
 	}
 
 	removeTaintIfComplete(ctx, client, node)
-	reconcileWorkerRoleLabel(ctx, client, node)
+	removeWorkerRoleLabel(ctx, client, node)
+	addWorkerRoleLabel(ctx, client, node)
 }
 
 func main() {
