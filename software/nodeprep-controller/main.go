@@ -7,8 +7,8 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -23,6 +23,7 @@ const (
 	labelKey        = "spectrocloud.com/nodeprep"
 	taintKey        = "spectrocloud.com/nodeprep"
 	pauseAnnotation = "cluster.x-k8s.io/paused"
+	workerRoleLabel = "node-role.kubernetes.io/worker"
 )
 
 var machineGVR = schema.GroupVersionResource{
@@ -230,6 +231,75 @@ func removeTaintIfComplete(ctx context.Context, c kubernetes.Interface, node *v1
 	}
 }
 
+func removeWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if node.Labels[labelKey] != "precomplete" {
+		return
+	}
+
+	if _, exists := node.Labels[workerRoleLabel]; !exists {
+		return
+	}
+
+	for i := 0; i < 3; i++ {
+		n, err := c.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[nodeprep] failed getting node %s: %v", node.Name, err)
+			return
+		}
+
+		if _, exists := n.Labels[workerRoleLabel]; !exists {
+			return
+		}
+
+		delete(n.Labels, workerRoleLabel)
+
+		_, err = c.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		if err == nil {
+			log.Printf("[nodeprep] removed worker-role label from node %s", n.Name)
+			return
+		}
+
+		log.Printf("[nodeprep] failed updating node %s, retrying: %v", n.Name, err)
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func addWorkerRoleLabel(ctx context.Context, c kubernetes.Interface, node *v1.Node) {
+	if node.Labels[labelKey] != "complete" {
+		return
+	}
+
+	if _, exists := node.Labels[workerRoleLabel]; exists {
+		return
+	}
+
+	for i := 0; i < 3; i++ {
+		n, err := c.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[nodeprep] failed getting node %s: %v", node.Name, err)
+			return
+		}
+
+		if _, exists := n.Labels[workerRoleLabel]; exists {
+			return
+		}
+
+		if n.Labels == nil {
+			n.Labels = make(map[string]string)
+		}
+		n.Labels[workerRoleLabel] = ""
+
+		_, err = c.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		if err == nil {
+			log.Printf("[nodeprep] added worker-role label to node %s", n.Name)
+			return
+		}
+
+		log.Printf("[nodeprep] failed updating node %s, retrying: %v", n.Name, err)
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func handleNode(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -242,6 +312,8 @@ func handleNode(
 	}
 
 	removeTaintIfComplete(ctx, client, node)
+	removeWorkerRoleLabel(ctx, client, node)
+	addWorkerRoleLabel(ctx, client, node)
 }
 
 func main() {

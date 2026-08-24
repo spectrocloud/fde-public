@@ -71,7 +71,7 @@ spec:
           operator: Exists
       containers:
         - name: controller
-          image: kreeuwijk/nodeprep-controller:v1.1.1
+          image: kreeuwijk/nodeprep-controller:v1.2.0
           imagePullPolicy: IfNotPresent
           resources:
             requests: { cpu: "50m", memory: "64Mi" }
