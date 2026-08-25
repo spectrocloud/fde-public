@@ -306,14 +306,23 @@ func handleNode(
 	dyn dynamic.Interface,
 	node *v1.Node,
 	machineCRDAvailable bool,
+	nodeprepChanged bool,
 ) {
 	if machineCRDAvailable {
 		reconcileMachinePauseAnnotation(ctx, dyn, node)
 	}
 
 	removeTaintIfComplete(ctx, client, node)
-	removeWorkerRoleLabel(ctx, client, node)
-	addWorkerRoleLabel(ctx, client, node)
+
+	// The worker-role label is reconciled only when the nodeprep label value
+	// transitions, not on every informer event. Unlike the taint (which no
+	// other component re-applies), the worker-role label can be re-added by an
+	// external component, so acting on every event fights it and removes the
+	// label repeatedly. Gating on the transition makes each adjustment one-shot.
+	if nodeprepChanged {
+		removeWorkerRoleLabel(ctx, client, node)
+		addWorkerRoleLabel(ctx, client, node)
+	}
 }
 
 func main() {
@@ -345,14 +354,18 @@ func main() {
 			if !ok {
 				return
 			}
-			handleNode(ctx, client, dynClient, node, machineCRDAvailable)
+			// Treat the first sighting as a state change so labels are
+			// reconciled on startup and when a node is newly observed.
+			handleNode(ctx, client, dynClient, node, machineCRDAvailable, true)
 		},
-		UpdateFunc: func(_, newObj interface{}) {
-			node, ok := newObj.(*v1.Node)
-			if !ok {
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldNode, ok1 := oldObj.(*v1.Node)
+			newNode, ok2 := newObj.(*v1.Node)
+			if !ok1 || !ok2 {
 				return
 			}
-			handleNode(ctx, client, dynClient, node, machineCRDAvailable)
+			nodeprepChanged := oldNode.Labels[labelKey] != newNode.Labels[labelKey]
+			handleNode(ctx, client, dynClient, newNode, machineCRDAvailable, nodeprepChanged)
 		},
 	})
 
