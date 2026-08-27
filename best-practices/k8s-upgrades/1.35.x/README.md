@@ -1,10 +1,10 @@
-# Upgrading to Kubernetes 1.35.x
+# Upgrading to Kubernetes 1.33.12, 1.34.8, 1.34.5, 1.36.1 or newer
 
 ## Cluster API
-Upgrading to Kubernetes 1.35.x with Cluster API requires CAPI version 1.13.2 to work smoothly.
-In order to get this CAPI version, Palette must be upgraded to version 4.10.x, which comes with CAPI 1.13.3
+Upgrading to the latest patch release of Kubernetes 1.33/1.34/1.35/1.36 with Cluster API requires a fix from CAPI version 1.13.2 to work smoothly.
+In order to get this CAPI fix, Palette must be upgraded to version 4.9.44.
 
-A workaround to upgrade to Kubernetes 1.35.x with Palette 4.9.x is to create the following to manually create the following resource in the cluster prior to upgrading:
+A workaround to upgrade to Kubernetes to these patch releases with older versions of Palette is to manually create the following resource in the cluster prior to upgrading:
 ```
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
