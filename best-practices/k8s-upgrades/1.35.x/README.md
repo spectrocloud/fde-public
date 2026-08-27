@@ -28,21 +28,28 @@ On Edge clusters deployed in airgap mode at Kubernetes v1.35.x or later, on all 
 
 The workaround for PXK-E is to include the following content in the Kubernetes layer:
 ```
-kubeadmconfig:
-  kubeletExtraArgs:
-    config-dir: "/etc/kubernetes/kubelet.conf.d"
-
-stages:
-  initramfs:
-    - files:
-        - path: /etc/kubernetes/kubelet.conf.d/10-image-pull-creds.conf
-          permissions: 0600
-          content: |
-            apiVersion: kubelet.config.k8s.io/v1beta1
-            kind: KubeletConfiguration
-            featureGates:
-              KubeletEnsureSecretPulledImages: true
-            imagePullCredentialsVerificationPolicy: NeverVerify
+cluster:
+  config: |
+    files:
+      - targetPath: /etc/kubernetes/kubelet.conf.d/10-image-pull-creds.conf
+        targetOwner: "root:root"
+        targetPermissions: "0600"
+        content: |
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          kind: KubeletConfiguration
+          featureGates:
+            KubeletEnsureSecretPulledImages: true
+          imagePullCredentialsVerificationPolicy: NeverVerify
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - name: config-dir
+            value: "/etc/kubernetes/kubelet.conf.d"
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - name: config-dir
+            value: "/etc/kubernetes/kubelet.conf.d"
 ```
 
 More info here: https://docs.spectrocloud.com/troubleshooting/edge/#scenario---intermittent-imagepullbackoff-errors-on-airgap-edge-clusters-with-kubernetes-v135x
