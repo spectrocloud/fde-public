@@ -49,6 +49,10 @@ type Agent struct {
 
 	// rebootIssued guards the one-shot reboot execution per boot.
 	rebootIssued bool
+
+	// noPrepLogged keeps the "no NodePrep yet" line to one occurrence
+	// instead of one per poll cycle.
+	noPrepLogged bool
 }
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations bool, rebootCommand string) *Agent {
@@ -153,8 +157,16 @@ func (a *Agent) setPhase(ctx context.Context, phase v1alpha1.Phase, reason, mess
 func (a *Agent) cycle(ctx context.Context, bootID string) {
 	np, err := a.fetchNodePrep(ctx)
 	if err != nil {
-		return // no NodePrep for this node: nothing to do
+		// Almost always "not adopted yet": the controller creates the
+		// NodePrep only when a profile's nodeSelector matches this node.
+		// Log once so an idle agent is explainable from its logs alone.
+		if !a.noPrepLogged {
+			a.noPrepLogged = true
+			fmt.Printf("[nodeprep-agent] no NodePrep object for node %s yet (%v); waiting for the controller to adopt it\n", a.nodeName, err)
+		}
+		return
 	}
+	a.noPrepLogged = false
 	profile, err := a.fetchProfile(ctx, np)
 	if err != nil {
 		a.emit(ctx, corev1.EventTypeWarning, "ProfileMissing", fmt.Sprintf("profile %s unavailable: %v", np.Spec.ProfileRef.Name, err))

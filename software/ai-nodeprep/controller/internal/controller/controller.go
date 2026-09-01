@@ -41,10 +41,13 @@ type Controller struct {
 	ns         string
 	nodeIndexer cache.Indexer
 	machineCRD bool
+	// noProfileLogged remembers nodes already reported as matching no
+	// profile, so the 30s informer resync does not repeat the line forever.
+	noProfileLogged map[string]bool
 }
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, ns string) *Controller {
-	return &Controller{client: client, dyn: dyn, ns: ns}
+	return &Controller{client: client, dyn: dyn, ns: ns, noProfileLogged: map[string]bool{}}
 }
 
 // Run starts the node informer and reconciles on every add/update/resync.
@@ -162,9 +165,16 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 			// De-adopted: leave the object for the operator (design §10);
 			// it stays as the audit record of what ran.
 			fmt.Printf("[nodeprep] node %s no longer matches any profile; NodePrep retained\n", nodeName)
+		} else if !c.noProfileLogged[nodeName] {
+			// The most common "nothing happens" state: the controller is up
+			// but no profile claims this node, so no NodePrep is created and
+			// the agent idles. Say so once.
+			c.noProfileLogged[nodeName] = true
+			fmt.Printf("[nodeprep] node %s matches no NodePrepProfile nodeSelector; not adopting (label the node or widen the selector)\n", nodeName)
 		}
 		return
 	}
+	delete(c.noProfileLogged, nodeName)
 
 	isCP := isControlPlane(node)
 	if isCP && !profile.Spec.Policy.ControlPlanePrep {
