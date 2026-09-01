@@ -4,6 +4,11 @@ metadata:
   name: nodeprep-system
   labels:
     app.kubernetes.io/part-of: nodeprep
+    # The agent DaemonSet is privileged with hostPID and hostPath mounts by
+    # design (host mutations, nsenter reboots), so the namespace must opt out
+    # of baseline/restricted enforcement.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
 ---
 apiVersion: v1
 kind: ServiceAccount

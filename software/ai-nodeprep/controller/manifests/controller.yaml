@@ -24,6 +24,10 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
+            # The image has no USER directive; pin an explicit non-root UID so
+            # runAsNonRoot is satisfied deterministically (nobody).
+            runAsUser: 65534
+            runAsGroup: 65534
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
