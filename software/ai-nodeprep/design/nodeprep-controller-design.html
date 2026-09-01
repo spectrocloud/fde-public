@@ -1,0 +1,1023 @@
+<title>NodePrep Controller</title>
+<style>
+  :root {
+    --bg:#F2F3EE; --surface:#FAFAF7; --surface2:#E9EBE2; --ink:#1F241E; --muted:#59614F;
+    --line:#D9DCD0; --line-strong:#B8BEAC;
+    --accent:#44700F; --accent-soft:rgba(88,132,20,.12);
+    --ok:#20713F; --warn:#96660A; --err:#B3382E; --info:#2E5F8A;
+    --code-bg:#E7E9DF; --code-ink:#23291F;
+    --sans:'IBM Plex Sans',-apple-system,'Segoe UI',sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+    --cond:'IBM Plex Sans Condensed','IBM Plex Sans',sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#14170F; --surface:#1B2015; --surface2:#242B1C; --ink:#E4E8DA; --muted:#9BA48C;
+      --line:#2E3524; --line-strong:#454E37;
+      --accent:#A5CE48; --accent-soft:rgba(165,206,72,.12);
+      --ok:#66C489; --warn:#DCAC50; --err:#E07E72; --info:#83B4DF;
+      --code-bg:#202617; --code-ink:#DCE2CE;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#14170F; --surface:#1B2015; --surface2:#242B1C; --ink:#E4E8DA; --muted:#9BA48C;
+    --line:#2E3524; --line-strong:#454E37;
+    --accent:#A5CE48; --accent-soft:rgba(165,206,72,.12);
+    --ok:#66C489; --warn:#DCAC50; --err:#E07E72; --info:#83B4DF;
+    --code-bg:#202617; --code-ink:#DCE2CE;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:400 16px/1.65 var(--sans);
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 28px 96px; }
+  p, li { max-width: 76ch; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  h1,h2,h3,h4 { line-height: 1.2; text-wrap: balance; }
+
+  /* Masthead */
+  .mast { padding: 56px 0 8px; border-bottom: 1px solid var(--line-strong); }
+  .docline {
+    font: 500 11.5px/1.5 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 22px; margin-bottom: 26px;
+  }
+  .docline b { color: var(--accent); font-weight: 600; }
+  h1 {
+    font: 700 54px/1.02 var(--cond); letter-spacing: -.015em; margin: 0 0 14px;
+  }
+  .dek { font-size: 19px; line-height: 1.55; color: var(--muted); max-width: 66ch; margin: 0 0 22px; }
+  .replaces { font: 500 13px var(--mono); color: var(--ink); }
+  .replaces code { color: var(--accent); }
+
+  /* TOC */
+  nav.toc {
+    display: flex; flex-wrap: wrap; gap: 4px 20px;
+    padding: 14px 0 0; margin: 14px 0 0;
+    font: 500 12px/1.9 var(--mono); letter-spacing: .02em;
+  }
+  nav.toc a { color: var(--muted); }
+  nav.toc a:hover { color: var(--accent); text-decoration: none; }
+  nav.toc .n { color: var(--accent); margin-right: 5px; }
+
+  /* Parts */
+  section.part { margin-top: 76px; }
+  .phead { display: flex; align-items: baseline; gap: 18px; border-top: 2px solid var(--ink); padding-top: 14px; }
+  .pnum { font: 700 30px/1 var(--cond); color: var(--accent); font-variant-numeric: tabular-nums; }
+  .phead h2 { font: 600 28px/1.15 var(--cond); margin: 0; letter-spacing: -.01em; }
+  .plead { font-size: 17px; color: var(--muted); margin: 14px 0 8px; }
+  h3 { font: 600 20px/1.3 var(--sans); margin: 40px 0 10px; }
+  h3 .hn { font: 600 13px var(--mono); color: var(--accent); margin-right: 10px; }
+  h4 { font: 600 16px/1.4 var(--sans); margin: 28px 0 8px; }
+  code {
+    font: 500 13.5px var(--mono); background: var(--surface2);
+    padding: 1px 5px; border-radius: 3px; color: var(--ink);
+  }
+  strong { font-weight: 600; }
+
+  /* Tables */
+  .tblwrap { overflow-x: auto; margin: 22px 0; border: 1px solid var(--line); border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; line-height: 1.5; }
+  th {
+    font: 600 10.5px/1.4 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line-strong);
+    background: var(--surface);
+  }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+  td .mut { color: var(--muted); }
+  tbody tr:nth-child(even) { background: var(--surface); }
+
+  /* Code */
+  pre.code {
+    background: var(--code-bg); color: var(--code-ink);
+    font: 400 12.8px/1.62 var(--mono);
+    padding: 18px 20px; border-radius: 6px; overflow-x: auto;
+    margin: 18px 0; border: 1px solid var(--line);
+  }
+  pre.code .c { color: var(--muted); font-style: italic; }
+  pre.code .k { color: var(--accent); font-weight: 500; }
+  pre.code .s { color: var(--ok); }
+
+  /* Callouts + chips */
+  .note {
+    border-left: 3px solid var(--accent); background: var(--surface);
+    padding: 14px 18px; margin: 24px 0; border-radius: 0 6px 6px 0;
+  }
+  .note .ntag {
+    display: inline-block; font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 6px;
+  }
+  .note p { margin: 4px 0; }
+  .chip {
+    display: inline-block; font: 600 10px var(--mono); letter-spacing: .09em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--accent); padding: 1px 7px; border-radius: 3px;
+    margin-left: 8px; white-space: nowrap; vertical-align: 2px;
+  }
+
+  ul.tight, ol.tight { padding-left: 22px; }
+  ul.tight li, ol.tight li { margin: 7px 0; }
+
+  /* Figures */
+  figure.fig { margin: 30px 0; }
+  figure.fig svg { width: 100%; height: auto; display: block; }
+  figure.fig figcaption { font-size: 13.5px; color: var(--muted); margin-top: 12px; max-width: 80ch; }
+  figure.fig figcaption b { color: var(--ink); font-weight: 600; }
+  svg .box { fill: var(--surface); stroke: var(--line-strong); }
+  svg .boxa { fill: var(--surface); stroke: var(--accent); }
+  svg .dashb { fill: none; stroke: var(--line-strong); stroke-dasharray: 4 4; }
+  svg .solid { fill: none; stroke: var(--muted); }
+  svg .dash { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+  svg .rail { fill: none; stroke: var(--accent); stroke-dasharray: 5 4; }
+  svg text { font-family: var(--mono); fill: var(--ink); }
+  svg .tt { font-size: 13px; font-weight: 600; }
+  svg .sub { font-size: 10.5px; fill: var(--muted); }
+  svg .it { font-size: 12px; }
+  svg .im { font-size: 11px; fill: var(--muted); }
+  svg .lbl { font-size: 11px; fill: var(--muted); font-style: italic; }
+  svg .lbla { font-size: 11px; fill: var(--accent); font-style: italic; }
+  svg .cap { font-size: 12px; font-weight: 600; letter-spacing: .08em; fill: var(--muted); }
+  svg .mkh { fill: var(--muted); }
+  svg .mka { fill: var(--accent); }
+
+  footer { margin-top: 90px; border-top: 1px solid var(--line-strong); padding-top: 18px;
+    font: 400 12.5px/1.7 var(--mono); color: var(--muted); }
+  @media (max-width: 720px) { h1 { font-size: 40px; } .wrap { padding: 0 18px 72px; } }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="docline">
+    <span><b>NP-CTRL-001</b> · Design draft</span>
+    <span>2026-08-31</span>
+    <span>API <b>nodeprep.spectrocloud.com/v1alpha1</b></span>
+    <span>Status: for review</span>
+  </div>
+  <h1>NodePrep Controller</h1>
+  <p class="dek">A Go controller and privileged node agent that turn the <code>nodeprep</code> bash state machine into declarative Kubernetes objects — same hardware outcomes for BlueField-3, ConnectX and Spectrum-X fabrics, with resumable progress, bounded failure, fleet-level control, and the legacy controller's CAPI-pause, taint and worker-identity duties absorbed.</p>
+  <div class="replaces">Replaces: <code>nodeprep-v105.sh</code> · <code>nodeprep-v106.sh</code> (incl. DPU BMC/CEC flash config) · the <code>/etc/rc.local</code> re-exec hack · <code>spectrocloud.com/nodeprep</code> label state · the legacy <code>nodeprep-controller</code> Deployment (untaint · CAPI pause · worker-role label)</div>
+  <nav class="toc">
+    <a href="#s1"><span class="n">01</span>The incumbent</a>
+    <a href="#s2"><span class="n">02</span>Design principles</a>
+    <a href="#s3"><span class="n">03</span>API design</a>
+    <a href="#s4"><span class="n">04</span>Architecture</a>
+    <a href="#s5"><span class="n">05</span>Reconciliation model</a>
+    <a href="#s6"><span class="n">06</span>Taint contract &amp; control plane</a>
+    <a href="#s7"><span class="n">07</span>Coverage of the bash script</a>
+    <a href="#s8"><span class="n">08</span>Hardware &amp; rail identification</a>
+    <a href="#s9"><span class="n">09</span>Safety &amp; policy</a>
+    <a href="#s10"><span class="n">10</span>Repo, RBAC, rollout</a>
+    <a href="#s11"><span class="n">11</span>Open questions</a>
+  </nav>
+</header>
+
+<!-- ==================== PART 1 ==================== -->
+<section class="part" id="s1">
+  <div class="phead"><span class="pnum">01</span><h2>The incumbent</h2></div>
+  <p class="plead">What nodeprep-v105.sh actually does, and where its architecture stops scaling — ten specific pains, each of which the controller design answers in a later part.</p>
+
+  <p>The script runs at every boot on each AI-capable Kubernetes node. It sources <code>/opt/spectrocloud/nodeprep.env</code>, guarantees its own re-execution via an <code>/etc/rc.local</code> entry (unless Palette's stylus-agent owns the node), then walks a five-state machine persisted as the <code>spectrocloud.com/nodeprep</code> label on its Node object:</p>
+
+  <ol class="tight">
+    <li><strong>init</strong> — install prerequisites: download BFB and DOCA repo deb from the MAAS TFTP server, apt upgrade, kernel headers (held), gcc-12, <code>doca-all</code> + MFT + lldpd; write GRUB cmdline (IOMMU per CPU vendor, <code>iommu=pt</code>, hugepages), <code>ib_core netns_mode=0</code>, lldpd config; enable rshim; reboot.</li>
+    <li><strong>inithw</strong> — hardware inventory via <code>mst</code>/<code>mlxconfig</code>/<code>flint</code>, published as <code>spectrocloud.com/nic-N-*</code> and <code>gpu-N-*</code> labels; flash BlueField-3 SuperNICs (and DPUs, policy permitting) with <code>bfb-install</code> over rshim in parallel, version-gated by <code>vercomp</code>; reboot.</li>
+    <li><strong>config</strong> — <code>mlxconfig reset</code> + set per device class: link types (east-west / north-south), SR-IOV enable, VF counts, RoCE CNP DSCP 48, adaptive routing &amp; congestion-control keys for Spectrum-X, <code>INTERNAL_CPU_OFFLOAD_ENGINE</code> for DPUs; per-rail netplan files; reboot.</li>
+    <li><strong>precomplete</strong> — disable ACS on PCIe switches (optional), create VFs on sysfs, synthesize and write VF node/port GUIDs and MACs (unbind/rebind to activate), write udev rename rules (<code>eth_rN</code>, <code>roce_rN</code>, <code>nic_vfN_*</code>, VF representors), trigger udev, configure lossless RoCE (PFC 3, DSCP trust, ECN, <code>ROCE_ACCL</code>, <code>doca_spcx_cc</code>, IPG), reset OVS with DOCA options and build <code>br-rail-rN</code> DPDK bridges, add PFs to bridges, restart the SRIOV device plugin, uncordon, remove the nodeprep taint on control planes.</li>
+    <li><strong>complete</strong> — and because <code>precomplete</code> falls through to <code>complete</code> in the same case branch, <em>every subsequent boot re-runs the entire finalization sequence</em> as a crude converge mechanism.</li>
+  </ol>
+
+  <figure class="fig">
+  <svg viewBox="0 0 960 176" role="img" aria-label="Bash label state machine: init, inithw, config, precomplete, complete with reboots between stages">
+    <defs>
+      <marker id="ah1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkh" d="M0,0L8,4L0,8z"/></marker>
+    </defs>
+    <rect class="box" x="12" y="36" width="130" height="56" rx="4"/>
+    <text class="tt" x="77" y="60" text-anchor="middle">init</text>
+    <text class="sub" x="77" y="78" text-anchor="middle">packages, grub</text>
+    <rect class="box" x="188" y="36" width="130" height="56" rx="4"/>
+    <text class="tt" x="253" y="60" text-anchor="middle">inithw</text>
+    <text class="sub" x="253" y="78" text-anchor="middle">inventory, BFB flash</text>
+    <rect class="box" x="364" y="36" width="130" height="56" rx="4"/>
+    <text class="tt" x="429" y="60" text-anchor="middle">config</text>
+    <text class="sub" x="429" y="78" text-anchor="middle">mlxconfig</text>
+    <rect class="box" x="540" y="36" width="150" height="56" rx="4"/>
+    <text class="tt" x="615" y="60" text-anchor="middle">precomplete</text>
+    <text class="sub" x="615" y="78" text-anchor="middle">VFs, udev, OVS, RoCE</text>
+    <rect class="box" x="736" y="36" width="130" height="56" rx="4"/>
+    <text class="tt" x="801" y="60" text-anchor="middle">complete</text>
+    <text class="sub" x="801" y="78" text-anchor="middle">re-verified each boot</text>
+    <line class="solid" marker-end="url(#ah1)" x1="142" y1="64" x2="184" y2="64"/>
+    <text class="lbl" x="163" y="52" text-anchor="middle">reboot</text>
+    <line class="solid" marker-end="url(#ah1)" x1="318" y1="64" x2="360" y2="64"/>
+    <text class="lbl" x="339" y="52" text-anchor="middle">reboot</text>
+    <line class="solid" marker-end="url(#ah1)" x1="494" y1="64" x2="536" y2="64"/>
+    <text class="lbl" x="515" y="52" text-anchor="middle">reboot</text>
+    <line class="solid" marker-end="url(#ah1)" x1="690" y1="64" x2="732" y2="64"/>
+    <line class="dash" marker-end="url(#ah1)" d="M 801 92 C 801 130, 77 130, 77 96" />
+    <text class="lbl" x="440" y="146" text-anchor="middle">every boot re-enters at precomplete and re-runs all of finalization (case fall-through)</text>
+    <text class="im" x="12" y="168">state = node label spectrocloud.com/nodeprep · a crash mid-stage looks identical to a completed stage</text>
+  </svg>
+  <figcaption><b>Figure 1</b> — The label state machine as it exists today. One string on the Node object carries the entire progress model; reboot timing lives inside <code>shutdown -r +1</code> calls scattered through the stages.</figcaption>
+  </figure>
+
+  <h3><span class="hn">1.1</span>Configuration surface</h3>
+  <p>Everything the operator can influence arrives as environment variables in <code>nodeprep.env</code>:</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Variable</th><th>Meaning</th><th>Used by</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">rails_pciaddr</td><td>Comma-separated PCI functions (e.g. <code>05:00,06:00</code>); index = rail number</td><td class="mono">fn_inventory_hw</td></tr>
+      <tr><td class="mono">LINKTYPE_EW / LINKTYPE_NS</td><td>East-west / north-south link type: 1=InfiniBand, 2=Ethernet</td><td class="mono">config, set_vfs, rename, lossless</td></tr>
+      <tr><td class="mono">NUMVF_EW / NUMVF_NS</td><td>VF count on rail NICs / on DPU</td><td class="mono">grub, config, set_vfs</td></tr>
+      <tr><td class="mono">MTU_EW</td><td>Rail MTU (default 9216); bridges/VFs run at MTU−50</td><td class="mono">netplan, rename, OVS</td></tr>
+      <tr><td class="mono">ESWITCH_MODE</td><td><code>switchdev</code> (Spectrum-X 2.x OVS) or legacy</td><td class="mono">config, set_vfs, bridges</td></tr>
+      <tr><td class="mono">ROCECC</td><td>Adaptive routing + user-programmable CC (Spectrum-X)</td><td class="mono">config, lossless</td></tr>
+      <tr><td class="mono">HP2M / HP1G / HPDEFAULT</td><td>Hugepages counts and default size</td><td class="mono">grub</td></tr>
+      <tr><td class="mono">MAAS, BFB, BFB_FW, DOCA_DEB</td><td>Firmware/package source, file names, minimum BFB firmware</td><td class="mono">init_sw, init_hw</td></tr>
+      <tr><td class="mono">CONTROLDPU, DPUOFFLOAD</td><td>Policy: may the host flash/configure DPUs; offload-engine value</td><td class="mono">init_hw, config</td></tr>
+      <tr><td class="mono">DISABLE_ACS</td><td>Disable ACS on all PCIe switches</td><td class="mono">precomplete</td></tr>
+      <tr><td class="mono">APT_UPDATE, CP_DELAY, NFSORDMA_ENABLED</td><td>Apt upgrade flag; control-plane unpause delay; NFSoRDMA enable</td><td class="mono">init_sw, ensure_state, nfsrdma</td></tr>
+      <tr><td class="mono">DPU_BMC_PWD, DPU_BMC_NEW_PWD <span class="mut">(v106)</span></td><td>BMC credentials written into <code>/tmp/bf.cfg</code> during flash</td><td class="mono">init_hw</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><span class="hn">1.2</span>Where it hurts</h3>
+  <p>These are numbered — the design refers back to them as <span class="chip">P1</span>…<span class="chip">P10</span>.</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th style="width:52px">#</th><th>Pain</th><th>Consequence</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">P1</td><td><strong>State is one label string.</strong> Stage granularity only; no step history, no per-device progress, no timestamps.</td><td>A node that crashed mid-flash is indistinguishable from one that finished; the only recovery is re-running the whole stage.</td></tr>
+      <tr><td class="mono">P2</td><td><strong>Failure = <code>exit 1</code></strong> (every <code>fn_process_result</code>).</td><td>The next boot retries the same stage forever — a bad BFB URL produces an infinite silent boot loop. No backoff, no cap, no alert.</td></tr>
+      <tr><td class="mono">P3</td><td><strong>No drift repair between reboots.</strong> Convergence only happens because <code>complete</code> falls through on boot.</td><td>An OVS conf.db wipe or package upgrade mid-run is invisible until someone reboots the node.</td></tr>
+      <tr><td class="mono">P4</td><td><strong>Downloads lack integrity checks</strong> — bare <code>wget -t 5</code> (L301, L309).</td><td>A truncated BFB gets flashed; a truncated deb gets installed. Supply-chain blind spot.</td></tr>
+      <tr><td class="mono">P5</td><td><strong>Secrets in a plaintext env file</strong> — <code>DPU_BMC_PWD</code> on disk and baked into the image (v106 writes <code>/tmp/bf.cfg</code>).</td><td>Credentials outlive the operation and leak into logs and images.</td></tr>
+      <tr><td class="mono">P6</td><td><strong>Inventory as 8 labels × N NICs</strong>, generated with <code>kubectl label</code> in a loop (L258–283); GPU loop counts in a subshell.</td><td>Unordered, unqueryable, races with itself, hits label-count/size limits on dense nodes; no history when firmware regresses.</td></tr>
+      <tr><td class="mono">P7</td><td><strong>No fleet-level coordination.</strong> Parallelism exists only within a node (flash jobs).</td><td>A 64-node rack powers on and flashes all BlueFields simultaneously — a PDU/brownout hazard with no throttle.</td></tr>
+      <tr><td class="mono">P8</td><td><strong>Fork-heavy, untestable logic</strong> — hundreds of execs of <code>kubectl</code>/<code>awk</code>/<code>sed</code> per run.</td><td>Slow (minutes of pure fork overhead), brittle to tool output changes, zero unit-testability.</td></tr>
+      <tr><td class="mono">P9</td><td><strong>Identity and bootstrapping hacks.</strong> Uses kubelet.conf for API writes that NodeRestriction normally blocks; self-installs rc.local; waits out <code>mlnx_interface_mgr</code>; sleeps <code>CP_DELAY</code> seconds blind.</td><td>Privilege model is unclear, boot coupling is timing-based, and control-plane bootstrap is a sleep, not a condition.</td></tr>
+      <tr><td class="mono">P10</td><td><strong>Versioning = shipping two files</strong> (v105, v106) with a changelog in comments.</td><td>No guarantee which nodes ran which logic; no staged rollout; divergent behavior silently accumulates.</td></tr>
+      <tr><td class="mono">P11</td><td><strong>The taint is removed once, at completion.</strong> Every later reboot brings the node up Ready and untainted — the Node object and its taints persist in etcd, but nothing re-checks them.</td><td>Workloads can schedule before post-reboot nodeprep reapplies VFs, lossless RoCE, ACS — silent fabric corruption under running jobs.</td></tr>
+      <tr><td class="mono">P12</td><td><strong>Pre-kubelet fixes live in hand-edited rc.local</strong> — kubelet CPU/memory-manager state reset, and repair after the <code>mlnx_interface_mgr</code> bug wipes IPs on VLAN subinterfaces.</td><td>Both must run before Kubernetes initializes; rc.local is invisible to the cluster, unversioned, and easy to lose.</td></tr>
+      <tr><td class="mono">P13</td><td><strong>A second controller already exists</strong> (legacy <code>nodeprep-controller</code>: untaint at <code>complete</code>, CAPI Machine pause, worker-role label) keyed off bash label strings.</td><td>Multiple sources of truth for node lifecycle state; a new implementation must absorb it, not sit beside it.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ==================== PART 2 ==================== -->
+<section class="part" id="s2">
+  <div class="phead"><span class="pnum">02</span><h2>Design principles</h2></div>
+  <p class="plead">Eight commitments that shape everything downstream.</p>
+
+  <ol class="tight">
+    <li><strong>The CRD is the state machine; the agent is stateless hands.</strong> All progress lives in <code>NodePrep.status</code>. The agent pod can die, be rescheduled, or be rebooted at any instant — the next reconcile resumes from what was persisted, never from memory.</li>
+    <li><strong>Every mutation is a step with Detect → Apply → Verify.</strong> A step reads the host, reports clean/drifted, applies idempotently, then re-reads to prove the end state. There is no "run this script" step anywhere.</li>
+    <li><strong>Reboots are first-class objects of the protocol</strong>, not <code>shutdown</code> calls sprinkled through code: requested in status, executed once, detected via <code>boot_id</code>, counted, and budgeted.</li>
+    <li><strong>Policy and mechanics are separated.</strong> The cluster controller owns taints, cordons, fleet flash windows and profile propagation; the node agent owns every touch of hardware, packages and boot config.</li>
+    <li><strong>No action without a profile.</strong> Nodes are adopted explicitly via <code>NodePrepProfile.nodeSelector</code>. An unmanaged AI node is visible (no NodePrep object), not silently mutated by accident.</li>
+    <li><strong>Status over labels.</strong> Structured inventory lives in <code>status.nics[]</code>/<code>status.gpus[]</code>. The <code>spectrocloud.com/nic-N-*</code> labels survive as an opt-in compatibility generator so existing dashboards keep working.</li>
+    <li><strong>Failure is a first-class phase.</strong> Bounded retries with backoff end in <code>Failed</code> with the exact step, attempt count and stderr — not an exit code in a log file.</li>
+    <li><strong>Observable by default:</strong> structured logs, Kubernetes Events on the NodePrep object, and Prometheus metrics for step results, reboots, and flash durations.</li>
+    <li><strong>The taint is a held maintenance window, not a one-shot flag.</strong> It persists across reboots in etcd, is released only by boot-time verification, and is re-applied whenever disruptive work must run — one mechanism covering bring-up, post-reboot recovery, and maintenance (§6.1).</li>
+  </ol>
+
+  <div class="note"><span class="ntag">Key insight — the reboot trick dissolves</span>
+  <p>The bash script's central hack — rc.local self-re-execution so the state machine survives reboots — is exactly what a DaemonSet already is. The agent pod starts on every node boot, reads its NodePrep object, compares <code>boot_id</code>, and continues. Nothing is installed into the boot path of the OS at all.</p>
+  </div>
+</section>
+
+<!-- ==================== PART 3 ==================== -->
+<section class="part" id="s3">
+  <div class="phead"><span class="pnum">03</span><h2>API design</h2></div>
+  <p class="plead">Two cluster-scoped kinds. The profile is the declarative form of every nodeprep.env variable; the NodePrep object is the per-node state machine and inventory.</p>
+
+  <h3><span class="hn">3.1</span>NodePrepProfile</h3>
+  <p>One profile can serve a whole rack class; <code>nodeSelector</code> decides which nodes adopt it. Field names follow the domain (rail, east-west, north-south), not the env-var spellings.</p>
+
+<pre class="code"><span class="c"># Group: nodeprep.spectrocloud.com/v1alpha1, Kind: NodePrepProfile (cluster-scoped)</span>
+apiVersion: nodeprep.spectrocloud.com/v1alpha1
+kind: NodePrepProfile
+metadata:
+  name: spectrumx-2x-a100
+spec:
+  nodeSelector:                      <span class="c"># adoption gate: only these nodes get a NodePrep object</span>
+    matchLabels:
+      spectrocloud.com/ai-node: <span class="s">"true"</span>
+
+  firmware:                          <span class="c"># replaces MAAS, BFB, BFB_FW, DOCA_DEB, APT_UPDATE</span>
+    source: <span class="s">http://maas.internal:8069/rcp</span>
+    bfb:
+      name: <span class="s">bf-fwbundle-3.3.0-202_26.01-prod.bfb</span>
+      minVersion: <span class="s">3.3.0-202</span>          <span class="c"># flash only when NIC firmware sorts below this</span>
+      sha256: <span class="s">9f2c…</span>                  <span class="c"># fixes P4</span>
+    doca:
+      deb: <span class="s">doca-host_3.3.0-088000-26.01-ubuntu2404_amd64.deb</span>
+      sha256: <span class="s">1b7e…</span>
+      packages: [<span class="s">doca-all</span>, <span class="s">lldpd</span>, <span class="s">mft</span>, <span class="s">netplan.io</span>, <span class="s">pv</span>, <span class="s">psmisc</span>]
+    aptUpgrade: <span class="s">false</span>
+
+  eastWest:                          <span class="c"># the GPU fabric rail</span>
+    linkType: <span class="s">Ethernet</span>               <span class="c"># InfiniBand | Ethernet  (LINKTYPE_EW 1|2)</span>
+    numVFs: <span class="s">8</span>                        <span class="c"># NUMVF_EW</span>
+    mtu: <span class="s">9216</span>                        <span class="c"># MTU_EW; bridges/VFs derive mtu-50</span>
+    eswitchMode: <span class="s">switchdev</span>           <span class="c"># switchdev | legacy  (ESWITCH_MODE)</span>
+    roceCC: <span class="s">true</span>                     <span class="c"># ROCECC: adaptive routing + user CC</span>
+  northSouth:
+    linkType: <span class="s">Ethernet</span>               <span class="c"># LINKTYPE_NS</span>
+    numVFs: <span class="s">0</span>                        <span class="c"># NUMVF_NS</span>
+    offloadEngine: <span class="s">0</span>                 <span class="c"># DPUOFFLOAD → INTERNAL_CPU_OFFLOAD_ENGINE</span>
+
+  rails:                             <span class="c"># rails_pciaddr, made explicit and ordered</span>
+    - { rail: <span class="s">r0</span>, pciFunction: <span class="s">"05:00"</span> }
+    - { rail: <span class="s">r1</span>, pciFunction: <span class="s">"06:00"</span> }
+    <span class="c"># railSource: lldp   ← future: infer from switch port descriptions</span>
+
+  hostBoot:                          <span class="c"># the grub + modprobe + boot-hook surface (§6.2)</span>
+    iommu: <span class="s">auto</span>                      <span class="c"># intel_iommu=on | amd_iommu=on by CPU vendor</span>
+    rdmaNetnsMode: <span class="s">0</span>                 <span class="c"># ib_core netns_mode, only written when VFs &gt; 0</span>
+    hugepages: { defaultSize: <span class="s">1G</span>, pages1G: <span class="s">32</span>, pages2M: <span class="s">0</span> }
+    bootHook: <span class="s">true</span>                   <span class="c"># render nodeprep-boot.service, runs pre-kubelet</span>
+    kubeletStateReset: <span class="s">always</span>        <span class="c"># always | readyCheck | off</span>
+    mlnxInterfaceMgr: <span class="s">wait</span>           <span class="c"># hw-gated wait + netplan apply | disable | ignore</span>
+
+  policy:
+    controlDPU: <span class="s">true</span>                 <span class="c"># CONTROLDPU — policy gate on all DPU mutations</span>
+    disableACS: <span class="s">true</span>                 <span class="c"># DISABLE_ACS</span>
+    maxConcurrentFlashes: <span class="s">25%</span>        <span class="c"># fleet-wide flash window — fixes P7</span>
+    cordonDuringVFConfig: <span class="s">true</span>
+    capiPause: <span class="s">true</span>                  <span class="c"># pause CAPI Machines while nodeprep owns the node (§6.3)</span>
+    workerRoleLabel: <span class="s">manage</span>          <span class="c"># remove at Finalizing, restore at Ready (§6.3)</span>
+    labelCompat: <span class="s">v1</span>                  <span class="c"># regenerate spectrocloud.com/nic-N-* labels</span>
+
+  dpuBMC:                            <span class="c"># v106 bf.cfg content, credentials via Secret — fixes P5</span>
+    credentialsSecretRef: { name: <span class="s">dpu-bmc</span>, namespace: <span class="s">nodeprep-system</span> }
+    updateBMC: <span class="s">true</span>
+    updateCEC: <span class="s">true</span>
+
+  nfsRdma: { enabled: <span class="s">true</span> }         <span class="c"># NFSORDMA_ENABLED</span>
+
+  controlPlane:                      <span class="c"># control-plane node prep choreography (§6.4)</span>
+    prep: <span class="s">true</span>                       <span class="c"># may nodeprep run on control-plane nodes at all</span>
+    expectedCount: <span class="s">auto</span>              <span class="c"># auto = KubeadmControlPlane.spec.replicas; else 1|3|5</span>
+    strategy: <span class="s">serial</span>                 <span class="c"># serial (quorum-safe) | background (forced for 1-CP)</span>
+    bootstrapGate: <span class="s">auto</span>              <span class="c"># wait for ControlPlaneInitialized + cert-manager Available</span>
+    bootstrapDelay: <span class="s">120s</span>             <span class="c"># CP_DELAY — fallback only when gate signals are absent</span></pre>
+
+  <h3><span class="hn">3.2</span>NodePrep</h3>
+  <p>Created by the controller when a Node matching a profile appears; owned by the controller, patched by the agent. The spec is two references; everything else is status.</p>
+
+<pre class="code"><span class="c"># Kind: NodePrep (cluster-scoped, one per adopted node)</span>
+apiVersion: nodeprep.spectrocloud.com/v1alpha1
+kind: NodePrep
+metadata:
+  name: ai-node-07
+spec:
+  nodeName: ai-node-07
+  profileRef: { name: <span class="s">spectrumx-2x-a100</span> }
+status:
+  phase: <span class="s">Finalizing</span>            <span class="c"># Pending|Provisioning|Flashing|Configuring|</span>
+                                <span class="c"># RebootPending|Finalizing|Ready|Failed</span>
+  observedProfileGeneration: <span class="s">3</span>
+  conditions:                   <span class="c"># standard meta/v1 Condition set — see §3.4</span>
+    - { type: <span class="s">PackagesReady</span>,      status: <span class="s">"True"</span> }
+    - { type: <span class="s">FirmwareFlashed</span>,    status: <span class="s">"True"</span> }
+    - { type: <span class="s">NICConfigured</span>,      status: <span class="s">"True"</span> }
+    - { type: <span class="s">VFsReady</span>,           status: <span class="s">"False"</span>, reason: <span class="s">VFRebindInProgress</span> }
+    - { type: <span class="s">RebootRequired</span>,     status: <span class="s">"False"</span> }
+  reboots:
+    total: <span class="s">2</span>
+    perStage: { Provisioning: <span class="s">1</span>, Flashing: <span class="s">1</span> }
+  bootId: <span class="s">7f3a9c…</span>            <span class="c"># /proc/sys/kernel/random/boot_id observed by the agent</span>
+  steps:                        <span class="c"># per-step progress — the resumable state</span>
+    - { name: <span class="s">docaPackages</span>, stage: <span class="s">Provisioning</span>, state: <span class="s">Done</span>,
+        inputsHash: <span class="s">b31d…</span>, attempts: <span class="s">1</span>, completedAt: <span class="s">"2026-08-31T09:14:03Z"</span> }
+    - { name: <span class="s">vfGuids</span>, stage: <span class="s">Finalizing</span>, state: <span class="s">InProgress</span>, attempts: <span class="s">1</span> }
+  nics:                         <span class="c"># replaces the nic-N-* label pile — fixes P6</span>
+    - pci: <span class="s">0000:05:00.0</span>
+      fn: <span class="s">05:00</span>
+      type: <span class="s">SuperNIC</span>            <span class="c"># SuperNIC | DPU | ConnectX-7 | … | Unknown</span>
+      variant: <span class="s">Physical</span>          <span class="c"># Physical | Air</span>
+      firmware: <span class="s">3.3.0-202</span>
+      psid: <span class="s">MT_0000000667</span>
+      rail: <span class="s">r0</span>
+      plane: <span class="s">p0</span>                  <span class="c"># set when multi-plane (r0_p0)</span>
+      rshim: <span class="s">/dev/rshim0</span>
+      netdev: <span class="s">eth_r0</span>
+      ibdev: <span class="s">mlx5_0</span>
+      linkWidth: <span class="s">x16</span>
+      linkSpeed: <span class="s">32GTs</span>
+      numVFs: <span class="s">8</span>
+  gpus:
+    - { pci: <span class="s">0000:1b:00.0</span>, name: <span class="s">NVIDIA A100-SXM4-80GB</span>, linkWidth: <span class="s">x12</span>, linkSpeed: <span class="s">32GTs</span> }</pre>
+
+  <h3><span class="hn">3.3</span>Why status, not labels</h3>
+  <p>Labels were the bash script's only channel, so everything became one: state, inventory, firmware versions. The controller keeps exactly one label — the compat generator's output — and moves the rest into a typed, watchable, diffable resource. Concrete wins:</p>
+  <ul class="tight">
+    <li><code>kubectl get nodeprep -o wide</code> replaces parsing eight labels per NIC;</li>
+    <li>status writes go through the status subresource — agents can never clobber spec, and controller/agent writes don't collide (agent owns inventory + step progress, controller owns phase gating + conditions like flash admission);</li>
+    <li>firmware history lives in Events when it changes, so a silent regression is visible.</li>
+  </ul>
+  <p>With <code>policy.labelCompat: v1</code>, the controller regenerates the legacy <code>spectrocloud.com/nic-N-{type,fw,psid,addr,name,linkwidth,linkspeed,rail}</code> labels from <code>status.nics[]</code> in deterministic order — same values the bash script produced, so existing tooling is unaffected during migration.</p>
+
+  <h3><span class="hn">3.4</span>Condition set</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Condition</th><th>Set by</th><th>Meaning / notable reasons</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">PackagesReady</td><td>agent</td><td>Downloads (sha256-verified), apt packages, headers, DOCA, lldpd</td></tr>
+      <tr><td class="mono">HostBootConfigured</td><td>agent</td><td>GRUB cmdline, ib_core modprobe, hugepages — pending reboot if changed</td></tr>
+      <tr><td class="mono">FirmwareFlashed</td><td>agent</td><td>Per-NIC result in <code>status.nics[].flash</code>; reason <code>UpToDate</code> when skipped</td></tr>
+      <tr><td class="mono">NICConfigured</td><td>agent</td><td>mlxconfig applied and verified by re-query</td></tr>
+      <tr><td class="mono">VFsReady</td><td>agent</td><td>numvfs + GUIDs + rebind complete; eswitch mode included</td></tr>
+      <tr><td class="mono">DevicesRenamed</td><td>agent</td><td>udev rules installed and names verified (<code>eth_rN</code>, <code>roce_rN</code>, <code>nic_vfN_*</code>)</td></tr>
+      <tr><td class="mono">LosslessRoCEConfigured</td><td>agent</td><td>PFC/ECN/DSCP/AR/IPG/SPCX-CC; Skipped when linkType is InfiniBand</td></tr>
+      <tr><td class="mono">OVSConfigured</td><td>agent</td><td>DOCA OVS options + br-rail bridges + PF ports (switchdev only)</td></tr>
+      <tr><td class="mono">DevicePluginSynced</td><td>controller</td><td>sriov-device-plugin pod restarted on this node, VFs re-inventoried</td></tr>
+      <tr><td class="mono">FlashAdmitted</td><td>controller</td><td>Fleet flash window admits this node; reason <code>WindowFull</code> while waiting</td></tr>
+      <tr><td class="mono">RebootRequired</td><td>agent</td><td>reason: <code>DocaInstalled</code> | <code>BFBFlashed</code> | <code>MlxConfigApplied</code> | <code>GrubChanged</code></td></tr>
+      <tr><td class="mono">BootVerified</td><td>agent</td><td>Runtime-critical steps verified on the current boot — the gate that releases the taint (§6.1)</td></tr>
+      <tr><td class="mono">MaintenanceAdmitted</td><td>controller</td><td>Quorum-safe CP window / maintenance re-entry granted; reasons <code>QuorumFloor</code>, <code>BootstrapGate</code>, <code>WindowFull</code></td></tr>
+      <tr><td class="mono">Ready</td><td>controller</td><td>All stage conditions True; <code>BootVerified</code> on the current boot; taint released; node schedulable</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ==================== PART 4 ==================== -->
+<section class="part" id="s4">
+  <div class="phead"><span class="pnum">04</span><h2>Architecture</h2></div>
+  <p class="plead">Two binaries, one Go module: a cluster controller (Deployment) and a node agent (privileged DaemonSet). All communication flows through the API server.</p>
+
+  <figure class="fig">
+  <svg viewBox="0 0 960 584" role="img" aria-label="Architecture: API server holds profiles and NodePrep objects; controller Deployment reconciles them; agent DaemonSet on each node executes steps via chroot host tools and downloads firmware from MAAS">
+    <defs>
+      <marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkh" d="M0,0L8,4L0,8z"/></marker>
+      <marker id="ah2a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mka" d="M0,0L8,4L0,8z"/></marker>
+    </defs>
+
+    <text class="cap" x="16" y="30">KUBERNETES API</text>
+    <rect class="box" x="16" y="44" width="236" height="368" rx="6"/>
+    <text class="it" x="32" y="80">NodePrepProfile</text>
+    <text class="it" x="32" y="112">NodePrep <tspan class="im">— one per adopted node</tspan></text>
+    <text class="it" x="32" y="144">Node <tspan class="im">— labels · taints · cordon</tspan></text>
+    <text class="it" x="32" y="172">Machine <tspan class="im">(CAPI) — pause annotation</tspan></text>
+    <text class="it" x="32" y="200">KubeadmControlPlane <tspan class="im">— expected CP count</tspan></text>
+    <text class="it" x="32" y="228">Lease <tspan class="im">nodeprep/&lt;node&gt;</tspan></text>
+    <text class="it" x="32" y="256">Secret <tspan class="im">dpu-bmc · Event — progress</tspan></text>
+    <line x1="32" y1="282" x2="236" y2="282" stroke="var(--line)" />
+    <text class="im" x="32" y="306">spec = desired state</text>
+    <text class="im" x="32" y="326">status = observed state</text>
+    <text class="im" x="32" y="354">agents + controller only ever</text>
+    <text class="im" x="32" y="372">watch and patch these objects —</text>
+    <text class="im" x="32" y="390">no direct controller↔agent channel</text>
+
+    <text class="cap" x="372" y="30">CONTROL PLANE OF THE SOLUTION</text>
+    <rect class="box" x="372" y="44" width="248" height="308" rx="6"/>
+    <text class="tt" x="496" y="72" text-anchor="middle">nodeprep-controller</text>
+    <text class="sub" x="496" y="90" text-anchor="middle">Deployment · leader-elected</text>
+    <text class="im" x="388" y="122">· adopt matching Nodes →</text>
+    <text class="im" x="400" y="140">create NodePrep</text>
+    <text class="im" x="388" y="166">· taint lifecycle + control-plane</text>
+    <text class="im" x="400" y="184">bootstrap gate (cert-manager)</text>
+    <text class="im" x="388" y="210">· fleet flash window (max N nodes</text>
+    <text class="im" x="400" y="228">in Flashing concurrently)</text>
+    <text class="im" x="388" y="254">· v1-compat label generation</text>
+    <text class="im" x="388" y="280">· profile generation diff →</text>
+    <text class="im" x="400" y="298">NodePrep re-opens affected steps</text>
+    <text class="im" x="388" y="330">RBAC: nodeprep.* CRUD, nodes</text>
+    <text class="im" x="388" y="348">patch, events</text>
+
+    <text class="cap" x="688" y="30">EACH AI NODE (×N)</text>
+    <rect class="box" x="688" y="44" width="256" height="404" rx="6"/>
+    <text class="sub" x="816" y="66" text-anchor="middle">ai-node-07</text>
+    <rect class="boxa" x="700" y="76" width="232" height="130" rx="5"/>
+    <text class="tt" x="816" y="98" text-anchor="middle">nodeprep-agent</text>
+    <text class="sub" x="816" y="115" text-anchor="middle">DaemonSet · privileged · hostPID</text>
+    <text class="im" x="712" y="136">· step runner (Detect→Apply→Verify)</text>
+    <text class="im" x="712" y="154">· resumes via boot_id + status.steps</text>
+    <text class="im" x="712" y="172">· inventory → status.nics / gpus</text>
+    <text class="im" x="712" y="190">· cordon / reboot (nsenter → systemd)</text>
+    <rect class="dashb" x="700" y="216" width="232" height="86" rx="5"/>
+    <text class="im" x="712" y="238">chroot /host:</text>
+    <text class="im" x="712" y="258">apt · mst/flint · mlxconfig</text>
+    <text class="im" x="712" y="276">bfb-install · devlink · mlnx_qos</text>
+    <text class="im" x="712" y="294">mlxreg · udevadm · libovsdb</text>
+    <text class="im" x="700" y="326">/sys rw · /dev/rshim* · /proc/cmdline</text>
+    <text class="im" x="700" y="350">netplan drop-ins · udev rules · grub.d</text>
+    <text class="im" x="700" y="378">restarts sriov-device-plugin pod</text>
+    <text class="im" x="700" y="402">writes /run/mellanox/drivers/.driver-ready</text>
+    <text class="im" x="700" y="430">(same host paths as the bash script)</text>
+
+    <rect class="box" x="688" y="478" width="256" height="92" rx="6"/>
+    <text class="tt" x="816" y="502" text-anchor="middle">MAAS TFTP server</text>
+    <text class="im" x="700" y="524">bf-fwbundle-3.3.0-202….bfb</text>
+    <text class="im" x="700" y="542">doca-host_3.3.0-088000….deb</text>
+    <text class="lbl" x="700" y="562">download → sha256 → atomic rename</text>
+
+    <line class="solid" marker-end="url(#ah2)" x1="252" y1="120" x2="368" y2="120"/>
+    <text class="lbl" x="310" y="112" text-anchor="middle">watch</text>
+    <line class="solid" marker-end="url(#ah2)" x1="368" y1="164" x2="252" y2="164"/>
+    <text class="lbl" x="310" y="156" text-anchor="middle">create / patch</text>
+    <line class="solid" marker-end="url(#ah2)" x1="620" y1="140" x2="684" y2="140"/>
+    <text class="lbla" x="652" y="130" text-anchor="middle">gates</text>
+    <text class="lbla" x="652" y="156" text-anchor="middle">flash</text>
+    <line class="solid" marker-start="url(#ah2)" marker-end="url(#ah2)" x1="252" y1="472" x2="684" y2="472"/>
+    <text class="lbl" x="468" y="464" text-anchor="middle">agent ↔ API: watch own NodePrep · patch status · Events · cordon</text>
+    <line class="solid" marker-end="url(#ah2)" x1="816" y1="448" x2="816" y2="474"/>
+    <text class="lbl" x="806" y="444" text-anchor="end">fetch</text>
+  </svg>
+  <figcaption><b>Figure 2</b> — Components and ownership. The controller is pure API logic (no host access); the agent is the only component that touches the host, always through <code>chroot /host</code> so the container ships no host binaries. Host file paths are unchanged from the bash script, easing mixed-fleet operations and debugging.</figcaption>
+  </figure>
+
+  <h3><span class="hn">4.1</span>Ownership split</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Concern</th><th>Owner</th><th>Rationale</th></tr></thead>
+    <tbody>
+      <tr><td>Node adoption, profile propagation, generation bumps</td><td class="mono">controller</td><td>Cluster-wide view; single writer to NodePrep spec</td></tr>
+      <tr><td>CAPI Machine pause, worker-role label management</td><td class="mono">controller</td><td>Cluster-scoped identity &amp; lifecycle concerns; replaces the legacy controller Deployment (§6.3)</td></tr>
+      <tr><td>CP quorum admission, bootstrap gate</td><td class="mono">controller</td><td>Needs the cluster-wide view of CP membership (§6.4)</td></tr>
+      <tr><td>Boot hook install/update; taint release at boot-verify</td><td class="mono">agent</td><td>Host-boot integration lives with the host; the release decision needs local Detect (§6.1, §6.2)</td></tr>
+      <tr><td>Taint add/remove, CP bootstrap gate, cordon during VF work</td><td class="mono">controller</td><td>Scheduling policy must not depend on a pod surviving on the node being changed</td></tr>
+      <tr><td>Fleet flash window (<span class="chip">fixes P7</span>)</td><td class="mono">controller</td><td>Only a cluster-level actor can throttle across nodes</td></tr>
+      <tr><td>v1-compat labels, Events aggregation, metrics rollup</td><td class="mono">controller</td><td>Derived data belongs above the node</td></tr>
+      <tr><td>Inventory, all steps, downloads, reboot execution, lease</td><td class="mono">agent</td><td>Every host mutation happens where the hardware is</td></tr>
+      <tr><td>status.steps / status.nics writes</td><td class="mono">agent</td><td>status subresource; controller never writes agent-owned fields</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><span class="hn">4.2</span>The agent runtime</h3>
+  <ul class="tight">
+    <li><strong>Pod shape:</strong> privileged, <code>hostPID: true</code>, <code>hostNetwork: false</code>, mounts <code>/host</code> (chroot root), <code>/sys</code> rw, <code>/dev</code> (rshim, mst), <code>/run/udev</code>. Tolerates the nodeprep taint <em>and</em> control-plane taints — the agent must run on a tainted node, or nothing could ever remove the taint.</li>
+    <li><strong>Host tooling via chroot:</strong> the agent image contains only Go binaries and a minimal runtime; every host operation is <code>chroot /host …</code> against tools installed on the host itself (mft, mlxconfig, devlink, iproute2). This keeps version coupling honest: the tools match the host kernel the DOCA stack was installed for.</li>
+    <li><strong>Package operations</strong> take <code>flock</code> on <code>/host/var/lib/dpkg/lock</code> to avoid racing host unattended-upgrades.</li>
+    <li><strong>Node identity</strong> comes from the <code>NODE_NAME</code> downward API — no <code>hostname -f</code> guessing (<span class="chip">fixes P9</span>).</li>
+    <li><strong>Single writer:</strong> the agent holds a <code>coordination.k8s.io</code> Lease per node before mutating anything; adoption of a previously bash-prepped node removes the rc.local entry under the same lease.</li>
+    <li><strong>Boot hook:</strong> the agent renders and maintains <code>nodeprep-boot.service</code> (§6.2) — the only OS boot integration, versioned in Go, replacing rc.local.</li>
+  </ul>
+</section>
+
+<!-- ==================== PART 5 ==================== -->
+<section class="part" id="s5">
+  <div class="phead"><span class="pnum">05</span><h2>Reconciliation model</h2></div>
+  <p class="plead">A stage DAG of idempotent steps, a persisted step ledger, and a reboot protocol that survives power loss at any point.</p>
+
+  <h3><span class="hn">5.1</span>The step abstraction</h3>
+<pre class="code"><span class="c">// A Step is one idempotent host mutation with a verifiable end state.</span>
+<span class="k">type</span> Step <span class="k">interface</span> {
+    Name() <span class="k">string</span>
+    <span class="c">// Hash of every input that determines the end state (profile fields,</span>
+    <span class="c">// inventory, package versions). A changed hash re-opens a Done step.</span>
+    InputsHash(ctx context.Context, inv *Inventory) (<span class="k">string</span>, error)
+    <span class="c">// Inspect the host: Clean | Drifted | Done.</span>
+    Detect(ctx context.Context, inv *Inventory) (State, error)
+    <span class="c">// Move the host toward the end state. Must be safe to interrupt;</span>
+    <span class="c">// reports coarse progress for status.steps updates.</span>
+    Apply(ctx context.Context, inv *Inventory, report Progress) error
+    <span class="c">// Prove the end state by re-reading the host, independent of Apply.</span>
+    Verify(ctx context.Context, inv *Inventory) error
+    <span class="c">// True if Apply can disturb running workloads (VF rebind, eswitch</span>
+    <span class="c">// mode change, kubelet restart) — gates cordon + maintenance policy.</span>
+    Disruptive() <span class="k">bool</span>
+}</pre>
+
+  <p>Example — the VF GUID step's Detect, which reproduces the bash script's read-compare-repair loop as a pure predicate:</p>
+<pre class="code"><span class="k">func</span> (s *VFGuids) Detect(ctx context.Context, inv *Inventory) (State, error) {
+    <span class="k">for</span> _, nic := <span class="k">range</span> inv.VFProviders(s.profile) {  <span class="c">// SuperNIC/CX: eastWest, DPU: northSouth</span>
+        want := s.profile.VFCountFor(nic)
+        <span class="k">if</span> got, err := s.mlx.SRIOVNumVFs(nic.PCI); err != <span class="k">nil</span> || got != want {
+            <span class="k">return</span> Drifted, err
+        }
+        <span class="k">for</span> vf := <span class="s">0</span>; vf &lt; want; vf++ {
+            node, port, mac := GUIDScheme.For(nic, vf)   <span class="c">// §8.3 — byte-identical to v105</span>
+            <span class="k">if</span> !s.mlx.VFGuidsMatch(nic.IBDev, vf, node, port, mac) {
+                <span class="k">return</span> Drifted, <span class="k">nil</span>
+            }
+        }
+    }
+    <span class="k">return</span> Done, <span class="k">nil</span>
+}</pre>
+
+  <h3><span class="hn">5.2</span>Stages and the reboot protocol</h3>
+  <p>Stages exist only where the hardware demands sequencing: you cannot mlxconfig a card that is being flashed, and link-type changes need a reboot to take effect. Within a boot, stages run back-to-back; a stage that ends clean hands straight to the next — the fast path when a node is already converged.</p>
+
+  <figure class="fig">
+  <svg viewBox="0 0 960 356" role="img" aria-label="Controller phase machine: Pending, Provisioning, Flashing, Configuring, Finalizing, Ready, with a reboot rail between stages and a Failed state from retry budget exhaustion">
+    <defs>
+      <marker id="ah3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkh" d="M0,0L8,4L0,8z"/></marker>
+      <marker id="ah3a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mka" d="M0,0L8,4L0,8z"/></marker>
+    </defs>
+    <rect class="box" x="12" y="56" width="104" height="64" rx="4"/>
+    <text class="tt" x="64" y="82" text-anchor="middle">Pending</text>
+    <text class="sub" x="64" y="102" text-anchor="middle">adopted</text>
+    <rect class="box" x="152" y="56" width="140" height="64" rx="4"/>
+    <text class="tt" x="222" y="82" text-anchor="middle">Provisioning</text>
+    <text class="sub" x="222" y="102" text-anchor="middle">init_sw</text>
+    <rect class="box" x="328" y="56" width="110" height="64" rx="4"/>
+    <text class="tt" x="383" y="82" text-anchor="middle">Flashing</text>
+    <text class="sub" x="383" y="102" text-anchor="middle">init_hw</text>
+    <rect class="box" x="474" y="56" width="136" height="64" rx="4"/>
+    <text class="tt" x="542" y="82" text-anchor="middle">Configuring</text>
+    <text class="sub" x="542" y="102" text-anchor="middle">mlxconfig</text>
+    <rect class="box" x="646" y="56" width="126" height="64" rx="4"/>
+    <text class="tt" x="709" y="82" text-anchor="middle">Finalizing</text>
+    <text class="sub" x="709" y="102" text-anchor="middle">precomplete</text>
+    <rect class="box" x="848" y="56" width="100" height="64" rx="4"/>
+    <text class="tt" x="898" y="82" text-anchor="middle">Ready</text>
+    <text class="sub" x="898" y="102" text-anchor="middle">complete</text>
+
+    <line class="solid" marker-end="url(#ah3)" x1="116" y1="88" x2="148" y2="88"/>
+    <line class="solid" marker-end="url(#ah3)" x1="292" y1="88" x2="324" y2="88"/>
+    <text class="lbl" x="308" y="78" text-anchor="middle">window</text>
+    <line class="solid" marker-end="url(#ah3)" x1="438" y1="88" x2="470" y2="88"/>
+    <line class="solid" marker-end="url(#ah3)" x1="610" y1="88" x2="642" y2="88"/>
+    <line class="solid" marker-end="url(#ah3)" x1="772" y1="88" x2="844" y2="88"/>
+    <text class="lbl" x="808" y="78" text-anchor="middle">verify→untaint</text>
+
+    <line class="rail" marker-end="url(#ah3a)" x1="310" y1="124" x2="310" y2="212"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="310" y1="212" x2="383" y2="212"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="383" y1="212" x2="383" y2="124"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="456" y1="124" x2="456" y2="240"/>
+    <line class="rail" x1="456" y1="240" x2="542" y2="240"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="542" y1="240" x2="542" y2="124"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="628" y1="124" x2="628" y2="268"/>
+    <line class="rail" x1="628" y1="268" x2="709" y2="268"/>
+    <line class="rail" marker-end="url(#ah3a)" x1="709" y1="268" x2="709" y2="124"/>
+    <text class="lbla" x="490" y="300" text-anchor="middle">RebootRequired(reason) persisted → agent cordons (policy) → nsenter systemctl reboot (+60s grace, as today)</text>
+    <text class="lbla" x="490" y="318" text-anchor="middle">→ boot_id changes → agent clears condition, resumes at persisted phase · budget: 3 reboots/stage</text>
+
+    <path class="dash" marker-end="url(#ah3)" d="M 878 56 C 878 20, 918 20, 918 52"/>
+    <text class="lbl" x="898" y="14" text-anchor="middle">10 min detect-only resync</text>
+
+    <rect class="box" x="760" y="252" width="128" height="52" rx="4"/>
+    <text class="tt" x="824" y="276" text-anchor="middle">Failed</text>
+    <text class="sub" x="824" y="294" text-anchor="middle">step · reason · event</text>
+    <path class="dash" marker-end="url(#ah3)" d="M 222 124 C 222 296, 600 296, 756 280"/>
+    <text class="lbl" x="180" y="160" text-anchor="start">step retry +</text>
+    <text class="lbl" x="180" y="176" text-anchor="start">reboot budget</text>
+    <text class="lbl" x="180" y="192" text-anchor="start">exhausted</text>
+
+    <line class="solid" x1="12" y1="344" x2="44" y2="344" marker-end="url(#ah3)"/>
+    <text class="lbl" x="52" y="348">phase advance</text>
+    <line class="rail" x1="180" y1="344" x2="212" y2="344" marker-end="url(#ah3a)"/>
+    <text class="lbl" x="220" y="348">reboot path</text>
+    <line class="dash" x1="330" y1="344" x2="362" y2="344" marker-end="url(#ah3)"/>
+    <text class="lbl" x="370" y="348">failure / resync</text>
+  </svg>
+  <figcaption><b>Figure 3</b> — The phase machine. Bash labels map one-to-one onto phases (sub-labels), so migration is a rename, not a redesign. Dashed entries are the additions the bash script lacked: a reboot budget, a terminal Failed state, and periodic detect-only resync (<span class="chip">fixes P1 P2 P3</span>).</figcaption>
+  </figure>
+
+  <p>The reboot protocol, end to end:</p>
+  <ol class="tight">
+    <li>A step's Apply sets <code>RebootRequired</code> with a reason (doca installed, BFB flashed, mlxconfig applied, grub changed).</li>
+    <li>At stage end the agent persists <code>phase = nextStage</code> <em>before</em> acting on the condition — a crash here means the reboot happens without progress being lost, the safe order.</li>
+    <li>Controller cordons the node if policy says so; agent executes <code>nsenter -t 1 systemctl reboot</code> after a 60s grace period (preserving today's <code>shutdown -r +1</code> margin for status writes).</li>
+    <li>Node boots. The boot hook has already repaired connectivity (wait out <code>mlnx_interface_mgr</code>, re-apply netplan) and reset kubelet manager state per policy — <em>before kubelet starts</em> (§6.2). Kubelet comes up; the DaemonSet pod starts. This, not rc.local, is the boot trigger.</li>
+    <li>Agent reads <code>/proc/sys/kernel/random/boot_id</code>, sees a change, clears <code>RebootRequired</code>, increments <code>reboots.perStage</code>, resumes the persisted phase. It then runs <em>boot-verify</em>: Detect over the runtime-critical steps — and because the taint persisted in etcd, no workload has been able to schedule since kubelet re-registered the node. Only when boot-verify is clean does the agent release the taint (§6.1). Completion is simply the first boot that passes this gate.</li>
+    <li>A stage exceeding 3 reboots (or a step exceeding its apply-retry budget with exponential backoff, 30s → 16m) moves the NodePrep to <code>Failed</code> with the offending step, attempt count and output — and an Event. Recovery is explicit: bump the profile generation or annotate <code>nodeprep.spectrocloud.com/resume</code>.</li>
+  </ol>
+
+  <h3><span class="hn">5.3</span>Convergence and drift</h3>
+  <ul class="tight">
+    <li><strong>During bring-up</strong> (any phase before Ready) the agent re-runs Detect for every step on start and after each reboot — the persisted step ledger with <code>inputsHash</code> makes this cheap, only drifted or re-opened steps apply.</li>
+    <li><strong>In Ready</strong>, a detect-only pass runs every 10 minutes and on agent start, and drift is classified. <em>Non-disruptive</em> drift (udev rule files deleted, netplan drop-ins edited, driver-ready marker missing, OVS options wiped — repairable with file writes, ensure-transactions and sysfs setters) is repaired immediately. <em>Disruptive</em> drift (VF rebind, eswitch mode flip, conf.db reset, interface renames, kubelet restart) is not: it re-enters the taint contract (§6.1) — the controller re-applies the taint, turning the node into a maintenance window, the agent converges inside it, and the taint releases again after verification. A repair that needs a reboot follows §5.2. Stricter than the bash script, which re-ran the whole finalization on every boot whether or not pods were running — and more thorough than detect-only, which left drift unrepaired until maintenance.</li>
+    <li><strong>Kubelet CPU/memory manager state</strong> is cleared by the boot hook (§6.2) using the guarded sequence — stop kubelet if running, delete, restart — because deleting the files under a live kubelet races its re-persist of in-memory manager state and the stale file survives. In the normal boot path the hook runs <code>Before=kubelet.service</code>, kubelet is not yet up, and this reduces to a plain <code>rm</code>. When the agent must reset kubelet state outside the boot path (adopting a live bash-era node, post-boot repair), the same sequence runs as a <em>disruptive</em> step under the taint window — stopping kubelet does not kill the agent pod, since containers are managed by the still-running runtime, so the agent completes stop→delete→start and waits for the kubelet to re-register. <code>always</code> (default, bash parity) | <code>readyCheck</code> (skip the deletion when NodePrep is Ready, preserving CPU pin assignments across ordinary reboots; opt-in pending validation) | <code>off</code>.</li>
+    <li><strong>Profile changes</strong> bump <code>observedProfileGeneration</code>; steps whose <code>inputsHash</code> changed re-open automatically. Changing <code>eastWest.numVFs</code> from 8 to 16 re-runs exactly the mlxconfig, numvfs, GUID and device-plugin steps — nothing else.</li>
+  </ul>
+</section>
+
+<!-- ==================== PART 6 ==================== -->
+<section class="part" id="s6">
+  <div class="phead"><span class="pnum">06</span><h2>The taint contract, boot hooks &amp; control plane</h2></div>
+  <p class="plead">The cluster-level behaviors that today live in three places — the bash script's taint dance, the hand-edited rc.local, and the legacy nodeprep-controller — unified into one design.</p>
+
+  <h3><span class="hn">6.1</span>The taint contract: a held maintenance window, not a one-shot flag</h3>
+  <p>Today the taint is removed once, at completion <span class="chip">fixes P11</span>. Everything after that is on trust: a node that reboots weeks later comes up Ready and untainted, and the scheduler can place customer workloads before the runtime settings — VFs, lossless RoCE parameters, ACS, OVS bridges — have been reapplied. The design inverts the lifecycle:</p>
+  <ul class="tight">
+    <li><strong>The taint is never "removed at completion" — it is released after verification, at every boot.</strong> Taints live on the Node object in etcd, so the taint survives a reboot for free: it is already present before kubelet re-registers the node. There is no scheduling race window at all — not a small one, none. (Kubelet manages only its own <code>not-ready</code>/<code>unreachable</code> taints and never touches foreign ones.)</li>
+    <li><strong>Boot-verify is the release gate.</strong> On every boot the agent runs Detect over the runtime-critical steps — VF counts, VF GUIDs, udev rules and the resulting interface names, lossless RoCE parameters, OVS bridges, ACS state, driver-ready marker. Sysfs/devlink/file reads; seconds, not minutes. While the taint is held, no customer workload can be scheduled — which makes this also the one moment where disruptive repair is free.</li>
+    <li><strong>Clean → release.</strong> The agent removes the taint, the controller restores the worker-role label, NodePrep is Ready. Drift found → repair under the held taint, reboot if required (the taint persists through the reboot), loop. The first boot that passes this gate is the completion event; every later boot passes the same gate. Completion and post-reboot recovery are one mechanism, not two.</li>
+    <li><strong>Disruptive drift on a live Ready node</strong> re-enters the same state: the controller re-applies the taint, the node becomes a maintenance window again, the agent converges inside it, the taint releases after verification (§5.3). One mechanism for bring-up, post-reboot recovery, and maintenance.</li>
+    <li><strong>Agent failure fails safe.</strong> If the agent cannot run (image pull failure, API unreachable), the taint stays — the node is unusable but never silently unverified. On an AI fabric that is the correct trade: customer workloads on a node with broken RoCE VFs are worse than a node that waits. Monitoring surfaces the stuck-taint state.</li>
+  </ul>
+  <div class="note"><span class="ntag">Why no drain is needed</span>
+  <p>nodeprep-initiated reboots always happen under the held taint, so nothing can be scheduled onto the node across them; running AI jobs die with the reboot regardless of drain semantics, and checkpointing is the workload's own concern. Post-completion reboots are covered by the boot-verify gate above. PodDisruptionBudget-aware draining would add failure modes (stuck drains on AI DaemonSet jobs) without protecting anything the taint doesn't already protect. Cordon-only stands — now with an explicit rationale instead of inertia. The cost of the contract: non-tolerating pods start a minute or so later after each reboot, and DaemonSets that must run early (CNI, CSI) already carry broad tolerations.</p>
+  </div>
+
+  <h3><span class="hn">6.2</span>Boot hooks: the two fixes that must run before Kubernetes</h3>
+  <p>Two of the bash script's jobs genuinely cannot move into a pod, for the same chicken-and-egg reason in both cases: a pod needs a healthy kubelet and working connectivity, and these fixes exist to provide exactly that <span class="chip">fixes P12</span>.</p>
+  <ul class="tight">
+    <li><strong>Kubelet CPU/memory manager state.</strong> Stale <code>cpu_manager_state</code>/<code>memory_manager_state</code> files can keep the kubelet from starting after a reboot — and a dead kubelet can never schedule the DaemonSet pod that would clean them up. The deletion must remain a pre-kubelet action, as it is in the bash script today.</li>
+    <li><strong>mlnx_interface_mgr VLAN-IP wipe.</strong> The mft interface manager has a bug that wipes active IPs on VLAN subinterfaces; on a node whose only addressing rides on VLAN subinterfaces, that cuts the node off from the API server entirely. Waiting out the manager and re-applying netplan afterwards is therefore a <em>pre-connectivity</em> repair: an agent-based repair would need the very network it is supposed to be fixing — even the agent image pull would fail. One bash detail is load-bearing and carries over: the manager service (and its transient <code>system-mlnx_interface_mgr.slice</code>) only exists when Mellanox hardware is present, so the wait is gated on <em>both</em> the manager script being installed <em>and</em> a 15b3 device being enumerated — the bash script's <code>[ -f /usr/bin/mlnx_interface_mgr.sh ] &amp;&amp; [ $(lspci -d 15b3:* | wc -l) -gt 0 ]</code>. Without that gate, a node whose BlueFields are absent or failed pays the full 600s timeout at every single boot.</li>
+  </ul>
+  <p>The design does not deny the need for a boot-time script — it removes the reasons rc.local was bad: invisible to the cluster, unversioned, unmanaged. The agent renders a small systemd oneshot from a template versioned in the Go source:</p>
+
+<pre class="code"><span class="c"># /etc/systemd/system/nodeprep-boot.service — rendered by the agent, content-hashed</span>
+<span class="k">[Unit]</span>
+Description=nodeprep pre-kubelet boot hook (managed — do not edit)
+Before=kubelet.service
+<span class="c"># no After=mlnx_interface_mgr.service: it is a transient unit that may not exist</span>
+<span class="c"># (hardware-dependent); the hook polls for it behind a hardware gate instead</span>
+
+<span class="k">[Service]</span>
+Type=oneshot
+ExecStart=/usr/local/sbin/nodeprep-boot-hook
+
+<span class="k">[Install]</span>
+WantedBy=multi-user.target
+</pre>
+
+<pre class="code"><span class="c">#!/bin/sh — nodeprep-boot-hook, rendered alongside the unit; failures logged to the journal</span>
+<span class="c"># The manager only exists when its hardware does — wait only when BOTH hold,</span>
+<span class="c"># else the wait can never succeed and every boot burns the full timeout.</span>
+if [ -f /usr/bin/mlnx_interface_mgr.sh ] &amp;&amp; grep -qs 0x15b3 /sys/bus/pci/devices/*/vendor; then
+  wait_for_mlnx_interface_mgr --timeout 600s   <span class="c"># as fn_ensure_nodeprep does today; sysfs ≡ lspci -d 15b3:*</span>
+  netplan apply                                <span class="c"># restore VLAN subinterface IPs the manager wiped</span>
+fi
+<span class="k">case</span> "$KUBELET_STATE_RESET" <span class="k">in</span>
+  always)     reset_kubelet_state ;;
+  readyCheck) probe NodePrep phase via kubelet.conf (short timeout) <span class="c">— skip when Ready,</span>
+              <span class="c">  reset_kubelet_state on any error (fail-safe = bash parity)</span> ;;
+<span class="k">esac</span>
+
+reset_kubelet_state() {
+  <span class="c"># never delete under a running kubelet: it holds manager state in memory and</span>
+  <span class="c"># re-persists it (checkpoint / shutdown), so rm-while-running races that write</span>
+  <span class="c"># and the stale file survives — stop, delete, restart, as L112–115 does</span>
+  if systemctl is-active --quiet kubelet; then
+    systemctl stop kubelet
+    rm -f /var/lib/kubelet/cpu_manager_state /var/lib/kubelet/memory_manager_state
+    systemctl start kubelet          <span class="c"># we stopped it, we restart it</span>
+  else
+    rm -f /var/lib/kubelet/cpu_manager_state /var/lib/kubelet/memory_manager_state
+  fi                                <span class="c"># normal boot path: Before=kubelet.service ordered us first,</span>
+                                    <span class="c"># kubelet is not yet up — the boot transaction starts it after us</span>
+}
+exit 0                              <span class="c"># a hook failure must never block boot</span>
+</pre>
+
+  <p>Properties: ordered <code>Before=kubelet.service</code>; the interface-manager wait is two-condition gated (manager script present + Mellanox vendor 15b3 in sysfs — the sysfs-native equivalent of the bash <code>lspci -d 15b3:*</code> check, no pciutils dependency), because the manager's unit only exists when the hardware does and an unconditional wait can never succeed on a node without it; the kubelet-state reset is guarded the way <code>fn_ensure_state</code> does it — stop kubelet if it is running, delete, restart — because deleting the files under a live kubelet races its re-persist of in-memory manager state and the stale file survives (in the normal boot path kubelet is not yet up, so this reduces to a plain <code>rm</code>); every action best-effort (the hook always exits 0 — a hook failure must never block boot, it degrades to today's failure mode at worst); content-hashed, so the agent re-renders it on profile change and detects out-of-band edits; installed under the node lease at adoption, disabled on de-adoption. Adoption deletes the rc.local entry — this unit is the only OS boot integration the controller ever installs. Profile knobs: <code>hostBoot.kubeletStateReset: always | readyCheck | off</code> and <code>hostBoot.mlnxInterfaceMgr: wait</code> (default: hardware-gated wait, then <code>netplan apply</code>) <code>| disable</code> (mask the service outright — opt-in after validating nothing else on the distro depends on it; the wipe bug itself is upstream in mft) <code>| ignore</code>. The gate predicate is one shared, unit-tested function used by the hook (rendered as shell), the agent's coexistence wait (§9.2), and the agent's decision of whether the manager is even in scope.</p>
+
+  <h3><span class="hn">6.3</span>CAPI integration: absorbing the legacy controller</h3>
+  <p>The existing <code>nodeprep-controller</code> Deployment <span class="chip">fixes P13</span> watches Nodes and performs three duties keyed off bash label strings. All three move into the new controller, driven by NodePrep phases instead of label values:</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Legacy behavior</th><th>Trigger today</th><th>In the new controller</th></tr></thead>
+    <tbody>
+      <tr><td>Remove <code>spectrocloud.com/nodeprep:NoSchedule</code> when the label reads <code>complete</code></td><td class="mono">label == complete</td><td>Superseded by the taint contract (§6.1): released by agent boot-verify, never by a label value</td></tr>
+      <tr><td>Remove <code>node-role.kubernetes.io/worker</code> at <code>precomplete</code>, re-add at <code>complete</code></td><td class="mono">label transitions</td><td>Removed entering Finalizing, restored at Ready (<code>policy.workerRoleLabel: manage</code>)</td></tr>
+      <tr><td>Add <code>cluster.x-k8s.io/paused</code> to the node's CAPI Machine while nodeprep runs, remove at <code>complete</code></td><td class="mono">label ≠ complete, Machine matched via <code>status.nodeRef.name</code></td><td>Paused from adoption to Ready; kept paused on Failed; skipped when the Machine CRD is absent (same graceful detection as today)</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>The CAPI pause deserves its rationale in writing: reboots during nodeprep otherwise look like node failures to MachineHealthCheck, which can respond by deleting and recreating the Machine mid-flash — the worst possible intervention. Pausing the Machine (not the MachineDeployment, matching today's granularity) suppresses exactly that while nodeprep owns the node. On <code>Failed</code>, the Machine stays paused: remediation-by-recreation of a half-flashed node is worse than a loud object, and the same explicit recovery that restarts nodeprep (profile bump or resume annotation) unpauses it. Worker-role label timing is unchanged in spirit: the node is demoted from worker pools before the disruptive finalization begins and promoted only after verification.</p>
+
+  <h3><span class="hn">6.4</span>Control-plane choreography</h3>
+  <p>Prepping control-plane nodes is a quorum problem, and the bash script solved it with a 30-minute blind sleep <span class="chip">fixes P9</span>. The controller replaces the sleep with a gate and an admission policy. The same machinery then makes rolling control-plane upgrades a natural extension rather than a new problem.</p>
+  <ul class="tight">
+    <li><strong>Expected CP count first.</strong> The controller reads the expected control-plane replica count from the cluster's <code>KubeadmControlPlane.spec.replicas</code> (CAPI is present on every Palette-managed cluster); <code>controlPlane.expectedCount</code> overrides for non-CAPI clusters. Typically 1 or 3.</li>
+    <li><strong>Bootstrap gate for fresh clusters.</strong> A control-plane node is tainted and prepped only after the CAPI <code>ControlPlaneInitialized</code> condition and cert-manager Availability — real signals for what <code>sleep $CP_DELAY</code> was approximating. While the gate is open, CP nodes are untainted so cluster initialization (add-ons on a fresh single-node cluster) proceeds normally. If neither signal is reachable, the gate falls back to <code>controlPlane.bootstrapDelay</code> — a named, tunable, observable wait instead of a blind one.</li>
+    <li><strong>Quorum admission.</strong> The controller admits at most <code>expectedCount − quorum(expectedCount)</code> CP nodes into prep concurrently — 1 for a 3-node CP, 2 for a 5-node — and schedules them serially. A 3-node control plane is never more than one member short of quorum: while CP-1 reboots, CP-2 and CP-3 serve etcd and the API. Add-on pods that landed on CP-1 during the untainted window reschedule onto the still-untainted members as each wave runs. <code>MaintenanceAdmitted</code> carries the reason while a node waits its turn.</li>
+    <li><strong>Single-CP clusters: background mode.</strong> The quorum math allows zero disruptions, but the work must still happen — so nodeprep runs in the background against the live node, and the reboots are an unavoidable, announced disruption (Events, cordon per policy). The taint contract still governs workload placement; what it cannot protect is the API server sharing the node's fate across its reboots. Documented trade-off, not a hidden one.</li>
+    <li><strong>Worker nodes prep concurrently</strong> with all of the above — no quorum constraint — bounded only by the fleet flash window (§9.1).</li>
+  </ul>
+
+  <figure class="fig">
+  <svg viewBox="0 0 960 344" role="img" aria-label="Control-plane choreography timelines: a fresh three-node cluster preps CP nodes serially behind a bootstrap gate, keeping at least two of three etcd members up; a single-node cluster gets an untainted init window and then preps in the background">
+    <defs>
+      <marker id="ah4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mkh" d="M0,0L8,4L0,8z"/></marker>
+    </defs>
+    <text class="cap" x="16" y="24">FRESH 3-NODE CONTROL PLANE (CAPI)</text>
+    <line class="solid" marker-end="url(#ah4)" x1="90" y1="40" x2="930" y2="40"/>
+    <text class="im" x="130" y="32" text-anchor="middle">machines join</text>
+    <text class="im" x="230" y="32" text-anchor="middle">bootstrap gate</text>
+    <text class="im" x="575" y="32" text-anchor="middle">serial prep — quorum ≥ 2/3</text>
+    <text class="im" x="895" y="32" text-anchor="middle">all Ready</text>
+    <line class="dash" x1="170" y1="48" x2="170" y2="248"/>
+    <line class="dash" x1="290" y1="48" x2="290" y2="248"/>
+
+    <text class="it" x="84" y="81" text-anchor="end">CP-1</text>
+    <rect class="box" x="90" y="62" width="80" height="26" rx="3"/>
+    <rect class="dashb" x="170" y="62" width="120" height="26" rx="3"/>
+    <rect x="290" y="62" width="210" height="26" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="395" y="79" text-anchor="middle">taint · CAPI pause · reboots</text>
+    <text class="im" x="508" y="79">Ready</text>
+    <text class="it" x="84" y="121" text-anchor="end">CP-2</text>
+    <rect class="box" x="90" y="102" width="80" height="26" rx="3"/>
+    <rect class="dashb" x="170" y="102" width="330" height="26" rx="3"/>
+    <rect x="500" y="102" width="180" height="26" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="590" y="119" text-anchor="middle">taint · pause · reboots</text>
+    <text class="im" x="688" y="119">Ready</text>
+    <text class="it" x="84" y="161" text-anchor="end">CP-3</text>
+    <rect class="box" x="90" y="142" width="80" height="26" rx="3"/>
+    <rect class="dashb" x="170" y="142" width="510" height="26" rx="3"/>
+    <rect x="680" y="142" width="180" height="26" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="770" y="159" text-anchor="middle">taint · pause · reboots</text>
+    <text class="im" x="868" y="159">Ready</text>
+    <text class="it" x="84" y="201" text-anchor="end">Workers</text>
+    <rect class="box" x="290" y="182" width="80" height="26" rx="3"/>
+    <rect x="370" y="182" width="280" height="26" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="510" y="199" text-anchor="middle">prep in parallel — flash window only</text>
+    <text class="im" x="658" y="199">Ready</text>
+
+    <text class="it" x="84" y="241" text-anchor="end">etcd</text>
+    <text class="im" x="160" y="241" text-anchor="middle">3/3 up</text>
+    <text class="im" x="395" y="241" text-anchor="middle">2/3 up</text>
+    <text class="im" x="590" y="241" text-anchor="middle">2/3 up</text>
+    <text class="im" x="770" y="241" text-anchor="middle">2/3 up</text>
+    <text class="im" x="895" y="241" text-anchor="middle">3/3 up</text>
+
+    <text class="cap" x="16" y="280">SINGLE-NODE CONTROL PLANE</text>
+    <text class="it" x="84" y="309" text-anchor="end">CP-1</text>
+    <rect class="box" x="90" y="290" width="80" height="26" rx="3"/>
+    <rect class="dashb" x="170" y="290" width="140" height="26" rx="3"/>
+    <text class="im" x="240" y="307" text-anchor="middle">untainted init window</text>
+    <rect x="310" y="290" width="390" height="26" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="505" y="307" text-anchor="middle">prep in background — reboots are announced API outages</text>
+    <text class="im" x="716" y="307">Ready</text>
+
+    <rect class="box" x="90" y="326" width="14" height="12"/>
+    <text class="im" x="110" y="336">join / waiting</text>
+    <rect class="dashb" x="210" y="326" width="14" height="12"/>
+    <text class="im" x="230" y="336">gate / untainted window</text>
+    <rect x="400" y="326" width="14" height="12" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text class="im" x="420" y="336">prep — taint held, Machine paused</text>
+  </svg>
+  <figcaption><b>Figure 4</b> — Control-plane choreography. Three-node clusters prep serially behind the bootstrap gate, never more than one etcd member down — the same cadence a rolling CP upgrade needs, which is why the machinery is admission-shaped, not scripted. Single-CP clusters get an untainted init window, then background prep; the taint contract still governs workload placement, but the API server shares the node's fate across reboots.</figcaption>
+  </figure>
+</section>
+
+<!-- ==================== PART 7 ==================== -->
+<section class="part" id="s7">
+  <div class="phead"><span class="pnum">07</span><h2>Coverage: every bash function, accounted for</h2></div>
+  <p class="plead">The replacement proof. Each row is a function from nodeprep-v105.sh (line numbers refer to it), its destination in the controller, and the idempotency strategy that replaces run-once script logic.</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Bash function</th><th>Destination</th><th>Tooling</th><th>Idempotency / detection</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">fn_ensure_nodeprep <span class="mut">L76</span></td><td>Controller <em>adoption</em> (rc.local removal) + boot hook (§6.2): wait out mlnx_interface_mgr <em>behind the two-condition gate</em> (manager script + 15b3 hardware present, as L91 checks), re-apply netplan — pre-kubelet, where the VLAN-IP repair actually has to happen</td><td class="mono">/etc/rc.local, nodeprep-boot.service, /sys/bus/pci/*/vendor, netplan</td><td>Adoption is one-shot under lease; the hook is content-hashed and rendered from a versioned template; the gate predicate is shared with the agent (§9.2)</td></tr>
+      <tr><td class="mono">fn_ensure_state <span class="mut">L110</span></td><td>Boot hook: pre-kubelet kubelet state reset (§6.2) · Controller: <em>bootstrap gate</em> + CP choreography (§6.4)</td><td class="mono">/var/lib/kubelet/*_state, CAPI conditions, cert-manager</td><td>Guarded stop→delete→start of kubelet — deleting under a live kubelet lets its re-persist of in-memory manager state resurrect the stale file (L112–115 ordering preserved); gate is a real condition instead of <code>sleep CP_DELAY</code></td></tr>
+      <tr><td class="mono">fn_update_state <span class="mut">L170</span></td><td>Phase transition in status + <code>RebootRequired</code> condition; reboot via §5.2 protocol</td><td class="mono">—</td><td>Status subresource writes</td></tr>
+      <tr><td class="mono">fn_process_result <span class="mut">L182</span></td><td>The Apply→Verify error model: per-step attempts, backoff, budget → Failed <span class="chip">fixes P2</span></td><td class="mono">—</td><td>—</td></tr>
+      <tr><td class="mono">fn_inventory_hw <span class="mut">L191</span></td><td>Agent <code>inventory</code> step: runs at each stage start and after disruptive steps; writes <code>status.nics/gpus</code>; restarts openibd if LINKTYPE_EW=IB and it failed (as bash does)</td><td class="mono">mst, mlxconfig q, flint q, /sys/bus/pci, /dev/rshim*, lspci class-scan</td><td>Read-only; diffed against cached status; classification in §8</td></tr>
+      <tr><td class="mono">fn_init_sw_stage <span class="mut">L288</span></td><td>Steps: <code>downloads</code> (BFB + deb, sha256, .tmp+rename) · <code>aptPackages</code> · <code>kernelHeaders</code> (install + apt-mark hold) · <code>gcc12</code> · <code>docaRepo</code> + <code>docaAll</code> · <code>lldpdConfig</code> · <code>grubParams</code> (IOMMU per CPU vendor, iommu=pt, hugepages; deterministic 90-nodeprep.cfg) · <code>ibCoreNetns</code> · <code>rshimService</code> · <code>aptAutoremove</code></td><td class="mono">HTTP client, chroot apt-get, /etc/default/grub.d, /etc/modprobe.d, systemctl</td><td>dpkg status query, /proc/cmdline comparison, file hash comparison; reboot only when something changed</td></tr>
+      <tr><td class="mono">fn_init_hw_stage <span class="mut">L468</span></td><td>Agent <code>bfbFlash</code> step: per-NIC version gate, parallel flash via errgroup (one goroutine per rshim, as bash), DPU bf.cfg rendered from Secret (v106 semantics incl. ≥12-char NEW_BMC_PASSWORD check) <span class="chip">fixes P5</span></td><td class="mono">bfb-install --rshim, flint q</td><td>FW version ≥ target ⇒ skip; per-device progress in status so interruption never re-flashes a done card</td></tr>
+      <tr><td class="mono">fn_config_stage <span class="mut">L506</span></td><td>Agent <code>mlxconfig</code> step: per-class config assembly (SuperNIC/CX/DPU/Air variants, LINK_TYPE_P2 probing), <code>reset</code>-then-<code>set</code> preserved, rail netplan drop-ins</td><td class="mono">mlxconfig, /etc/netplan/gpu_fabric_eth_rN.yaml</td><td>Query-before-set, verify by re-query; netplan file content hash</td></tr>
+      <tr><td class="mono">fn_disable_acs <span class="mut">L589</span></td><td>Agent <code>disableACS</code> step (policy-gated)</td><td class="mono">setpci ECAP_ACS</td><td>Read-back verification, exactly the bash check, per device</td></tr>
+      <tr><td class="mono">fn_set_vfs <span class="mut">L611</span></td><td>Steps: <code>eswitchMode</code> (legacy→switchdev transition incl. hmfs flow-steering) · <code>linkUp</code> · <code>sriovNumVFs</code> · <code>vfGuids</code> (synthesize + write + rebind, §8.3) · <code>vfUdevRules</code> (VF, RDMA rename, cma_roce_tos 96, representor naming via devlink phys_port_name/phys_switch_id) · <code>ovsSetup</code> (conf.db reset, DOCA other_config, br-rail-rN bridges, datapath netdev)</td><td class="mono">devlink, ip, sysfs sriov_numvfs, /sys/class/infiniband/*/device/sriov/*, udevadm, ovs-vsctl → libovsdb</td><td>Everything read-compare-write; GUID rebind only on mismatch; OVS via libovsdb transactions that converge schema (<span class="chip">fixes P8</span> for the OVS third)</td></tr>
+      <tr><td class="mono">fn_setup_nfsrdma <span class="mut">L884</span></td><td>Agent <code>nfsRdma</code> step (profile-gated): nfs-common, mlnx-nfsrdma-dkms, modprobe rpcrdma/xprtrdma/svcrdma, modules-load.d</td><td class="mono">chroot apt, modprobe, lsmod</td><td>dpkg + lsmod checks</td></tr>
+      <tr><td class="mono">fn_rename_devices <span class="mut">L795</span></td><td>Agent <code>deviceRename</code> step: PF udev rules (70-persistent-net, 60-persistent-rdma + cma_roce_tos), udevadm reload + trigger (net, infiniband), MTU bring-up of PF/VF/rep</td><td class="mono">ip, udevadm, /etc/udev/rules.d</td><td>Rule files content-hashed; resulting interface names verified via netlink before Done</td></tr>
+      <tr><td class="mono">fn_set_lossless_roce <span class="mut">L833</span></td><td>Agent <code>losslessRoce</code> step: mlnx_qos PFC/trust, ECN enable ×8, cnp_dscp 48, ROCE_ACCL adaptive routing, PIPG IPG, the two raw 0x5006 register writes, and <code>doca_spcx_cc</code> converted from <code>nohup</code> to a supervised host systemd unit the agent writes once</td><td class="mono">mlnx_qos, sysfs ecn, mlxreg, doca tools</td><td>Read-back where registers allow; setters are inherently idempotent; Skipped for IB rails (as bash)</td></tr>
+      <tr><td class="mono">fn_add_pfs_to_rail_bridges <span class="mut">L863</span></td><td>Merged into <code>ovsSetup</code>: PF ports as <code>type=dpdk</code> with <code>mtu_request</code></td><td class="mono">libovsdb</td><td>Ensure-semantics replace <code>--may-exist</code></td></tr>
+      <tr><td class="mono">fn_restart_sriov_devplugin <span class="mut">L876</span></td><td>Controller <code>devicePluginSync</code>: delete sriov-device-plugin pod on the node, then uncordon per policy — controller-owned because it is scheduling, not hardware</td><td class="mono">K8s API</td><td>Pod deletion idempotent; field-selector on nodeName preserved</td></tr>
+      <tr><td class="mono">GDS workaround <span class="mut">L966–969</span></td><td>Agent <code>driverReadyMarker</code> step, flag-gated in profile with a comment tracking the upstream GPU Operator fix</td><td class="mono">/run/mellanox/drivers</td><td>File existence</td></tr>
+      <tr><td class="mono">vercomp <span class="mut">L50</span> · do_log <span class="mut">L15</span></td><td>Internal semver comparison; zap structured logs + Events + Prometheus metrics</td><td class="mono">—</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><span class="ntag">Triggers, not modes</span>
+  <p>Stylus and <code>/etc/rc.local</code> were never two behaviors of the script — they are two <em>triggers</em> for the same script. Stylus invokes it on Stylus-managed clusters; rc.local does it on CAPI clusters, where Stylus is absent. The new design replaces both triggers with the DaemonSet on every cluster type, so nothing needs to invoke nodeprep from the OS anymore. During migration, a node where the Stylus trigger is still active stays in bash mode until its adoption wave — the two implementations never run concurrently on one host.</p>
+  </div>
+
+  <div class="note"><span class="ntag">VF management is not delegated</span>
+  <p>The SRIOV / NVIDIA network-operators are deliberately not given ownership of VF creation, GUIDs or renaming. Spectrum-X 2.1 requires the VFs to be managed externally to the Network Operator — that is, by this controller — and the GUID scheme and rename grammar are fabric-load-bearing. <code>fn_set_vfs</code> is re-implemented here in full, not approximated by a delegating integration.</p>
+  </div>
+</section>
+
+<!-- ==================== PART 8 ==================== -->
+<section class="part" id="s8">
+  <div class="phead"><span class="pnum">08</span><h2>Hardware &amp; rail identification</h2></div>
+  <p class="plead">The subtlest part of the bash script, preserved exactly — with the classification made explicit and testable.</p>
+
+  <h3><span class="hn">8.1</span>Device classification</h3>
+  <p>For each Mellanox PCI function found via <code>mst status -v</code>, the agent queries <code>mlxconfig q INTERNAL_CPU_OFFLOAD_ENGINE</code>. The presence of a <code>Description:</code> line distinguishes physical engines from the N/A case, and the <code>Device type:</code> string classifies:</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>mlxconfig evidence</th><th>type</th><th>variant</th><th>Usable / labeled</th><th>Rail</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Device type: … SuperNIC</td><td class="mono">SuperNIC</td><td class="mono">Physical</td><td>yes</td><td>mapped via <code>spec.rails</code>; multi-plane → <code>rN_pF</code></td></tr>
+      <tr><td class="mono">Description: N/A → Device type: …</td><td class="mono">per type</td><td class="mono">Air</td><td>yes</td><td>same; Air ConnectX gets the RTT-timestamp mlxconfig variant</td></tr>
+      <tr><td class="mono">Device type: … DPU</td><td class="mono">DPU</td><td class="mono">Physical</td><td>function .0 only</td><td class="mono">dpu</td></tr>
+      <tr><td class="mono">Device type: … ConnectX-N</td><td class="mono">ConnectX-N</td><td class="mono">Physical / Air</td><td>yes</td><td>mapped; N extracted for the CX7+ feature gates</td></tr>
+      <tr><td>otherwise</td><td class="mono">Unknown</td><td>—</td><td>no</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Multi-plane detection (the v105 addition) is kept: when more than one <code>mst</code> entry resolves to the same PCI function, the rail label gains a plane suffix (<code>r0_p0</code>, <code>r0_p1</code>), and netdev selection excludes entries whose <code>phys_port_name</code> matches <code>vf</code> — identical to the awk/sed chain, but as a tested function over sysfs.</p>
+
+  <h3><span class="hn">8.2</span>Rail assignment</h3>
+  <p>v1 keeps the bash semantics as the default: <code>spec.rails</code> is an explicit, ordered PCI-function → rail map (the <code>rails_pciaddr</code> env var, made declarative and validated at admission — unknown functions produce an Event, not silence). An opt-in <code>railSource: lldp</code> can derive rails from switch port descriptions — lldpd is already installed and configured by this very controller — but ships <strong>off by default</strong>: switch-side description conventions are not assumable to be stable across the switch vendors in the fleet, and a misparsed rail silently rewires the fabric. It stays an open validation question (§11), not a default.</p>
+
+  <h3><span class="hn">8.3</span>VF GUID scheme — reproduced verbatim</h3>
+  <p>The GUID/MAC derivation is load-bearing for the fabric (roce_vf names and GUIDs are what the spectrum switches and fabric managers expect), so the controller reproduces the v105 arithmetic byte-for-byte. From the PF's <code>node_guid</code> (hex, colons stripped, 16 chars), for VF index <code>v</code> in two-digit hex:</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Attribute</th><th>Derivation</th><th>Written to</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">VF node GUID</td><td class="mono">raw[0:7] + "f1" + v₂ + raw[11:16]</td><td class="mono">/sys/class/infiniband/&lt;ib&gt;/device/sriov/&lt;vf&gt;/node</td></tr>
+      <tr><td class="mono">VF port GUID</td><td class="mono">raw[0:7] + "f2" + v₂ + raw[11:16] <span class="mut">(IB link type only)</span></td><td class="mono">…/sriov/&lt;vf&gt;/port</td></tr>
+      <tr><td class="mono">VF MAC</td><td class="mono">"f2" + v₂ + raw[8:16] <span class="mut">(ETH, legacy eswitch only)</span></td><td class="mono">…/sriov/&lt;vf&gt;/mac</td></tr>
+      <tr><td class="mono">Policy</td><td class="mono">"Follow" <span class="mut">(IB only, non-critical on failure)</span></td><td class="mono">…/sriov/&lt;vf&gt;/policy</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>After writing, the VF's PCI address (from <code>virtfn&lt;v&gt;/uevent</code>) is unbound and rebound on <code>mlx5_core</code> to activate the GUIDs, then read back for verification — the exact sequence of <code>fn_set_vfs</code>, as three small functions with unit tests over fixture GUIDs. The VF and representor udev rules (<code>nic_vfN_rM</code>, <code>roce_vfN_rM</code> + <code>cma_roce_tos -t 96</code>, <code>nic_vfN_rep_rM</code> keyed on <code>phys_switch_id</code>/<code>phys_port_name</code>) are emitted from the same data that produced the GUIDs, so rules and GUIDs can never disagree.</p>
+
+  <h3><span class="hn">8.4</span>GPU inventory</h3>
+  <p>NVIDIA 3D controllers are enumerated by PCI class <code>0x03</code> / vendor <code>0x10de</code> straight from sysfs (no <code>lspci</code> fork), capturing name, current link width and max link speed into <code>status.gpus[]</code> — the same data the bash script labeled, minus the subshell counter bug.</p>
+</section>
+
+<!-- ==================== PART 9 ==================== -->
+<section class="part" id="s9">
+  <div class="phead"><span class="pnum">09</span><h2>Safety &amp; policy</h2></div>
+  <p class="plead">The gates the bash script enforced, plus the ones it couldn't.</p>
+
+  <h3><span class="hn">9.1</span>Hardware safety</h3>
+  <ul class="tight">
+    <li><strong><code>policy.controlDPU: false</code></strong> short-circuits every DPU step — flash, mlxconfig, offload-engine — each reporting condition reason <code>SkippedByPolicy</code>. Identical to <code>CONTROLDPU</code>, but auditable from the object instead of a log line.</li>
+    <li><strong>Version-gated flashing:</strong> flash only when <code>flint q</code> firmware sorts below <code>firmware.bfb.min</code> (same ordering rules as <code>vercomp</code>, including its zero-padding behavior).</li>
+    <li><strong>Fleet flash window:</strong> the controller admits at most <code>maxConcurrentFlashes</code> (count or percentage) NodePreps into <code>Flashing</code> at once via the <code>FlashAdmitted</code> condition; the agent blocks before the flash step until admitted. A rack powers up and flashes in waves, not all at once (<span class="chip">fixes P7</span>).</li>
+    <li><strong>Integrity everywhere:</strong> sha256-pinned downloads, atomic tmp+rename (kept from bash), read-back verification on every sysfs/mlxconfig mutation, ACS read-back, GUID read-back (<span class="chip">fixes P4</span>).</li>
+    <li><strong>ACS:</strong> disabled per policy across all PCI functions with the same skip-if-unsupported logic; re-checked on resync since BIOS updates can re-enable it.</li>
+  </ul>
+
+  <h3><span class="hn">9.2</span>Workload safety</h3>
+  <ul class="tight">
+    <li><strong>Cordon windows:</strong> node cordoned for eswitch/VF mutations through device-plugin resync (the bash <code>fn_set_vfs</code>…<code>fn_restart_sriov_devplugin</code> span), and optionally across reboots. Cordons are controller-owned records so an agent crash can never leave a node cordoned — the controller reconciles cordon state from NodePrep conditions. For CAPI clusters, the Machine pause (§6.3) covers the same span.</li>
+    <li><strong>Disruptive steps</strong> declare themselves. During bring-up they run under the held taint; on a Ready node they only run after the controller re-applies the taint — the maintenance-window re-entry of §6.1 — or, for non-disruptive drift, in place (§5.3).</li>
+    <li><strong>Taint lifecycle:</strong> applied at adoption (control-plane nodes: only after the bootstrap gate, §6.4), released only by boot-verify (§6.1), re-applied for maintenance. The fresh-control-plane dance from <code>fn_ensure_state</code> (untaint so cert-manager can schedule on a single-node cluster, wait for its helm secret, retaint) becomes the controller's bootstrap gate plus quorum admission (§6.4), replacing a bare <code>sleep $CP_DELAY</code> with named, tunable, observable waits (<span class="chip">fixes P9</span>).</li>
+    <li><strong>Credentials:</strong> BMC credentials live in a Secret referenced by the profile; rendered into <code>bf.cfg</code> only for the duration of the flash, never logged, and the new-password length rule (≥12 chars, else skipped with a warning Event) is enforced in code (<span class="chip">fixes P5</span>).</li>
+    <li><strong>Interface-manager coexistence:</strong> if the manager script is installed <em>and</em> Mellanox hardware (vendor 15b3) is enumerated, the agent waits for its slice to settle exactly as bash does — the same two-condition gate as the boot hook (§6.2), since the unit only exists when the hardware does — then owns the interfaces. Either condition false ⇒ no wait, no scope. Both writers active simultaneously is a deployment error; the lease makes the second writer visible.</li>
+  </ul>
+
+  <h3><span class="hn">9.3</span>Failure semantics</h3>
+  <p>Every failure path terminates in one of three states: a retry with backoff (transient: downloads, apt, flash), a reboot (the kernel/hardware demands it), or <code>Failed</code> (budget exhausted). <code>Failed</code> is loud — Event, metric, condition with step name and output tail — and cheap to recover from: fix the cause, bump the profile, and only the affected steps re-open. Nothing is ever silently retried forever again.</p>
+</section>
+
+<!-- ==================== PART 10 ==================== -->
+<section class="part" id="s10">
+  <div class="phead"><span class="pnum">10</span><h2>Repo, RBAC, rollout</h2></div>
+  <p class="plead">Layout, permissions, and how to get from 979 lines of bash to the controller without a flag day.</p>
+
+<pre class="code">nodeprep/
+├── cmd/
+│   ├── controller/main.go        <span class="c"># Deployment binary</span>
+│   └── agent/main.go             <span class="c"># DaemonSet binary</span>
+├── internal/
+│   ├── api/v1alpha1/             <span class="c"># NodePrepProfile, NodePrep types + deepcopy + CRDs</span>
+│   ├── inventory/                <span class="c"># pci scan, mst/flint/mlxconfig exec + parsing, rshim</span>
+│   ├── host/                     <span class="c"># chroot runner, apt, systemctl, grub, udev, netplan</span>
+│   ├── fabric/                   <span class="c"># devlink, guid scheme, ovs via libovsdb, mlnx_qos</span>
+│   ├── steps/                    <span class="c"># provision/ flash/ configure/ finalize/ step sets</span>
+│   ├── engine/                   <span class="c"># stage DAG, step ledger, backoff, reboot protocol</span>
+│   ├── cluster/                  <span class="c"># CAPI pause, worker-role label, CP admission, bootstrap gate</span>
+│   ├── boothook/                 <span class="c"># nodeprep-boot.service template + hook logic</span>
+│   └── compat/                   <span class="c"># v1 label generator, nodeprep.env → Profile converter</span>
+└── manifests/                    <span class="c"># CRDs, RBAC, DaemonSet, Deployment, metrics</span></pre>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Subject</th><th>Permissions</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">agent (per node SA)</td><td>get/patch own Node + NodePrep; get/list/watch NodePrepProfile; create own Lease; create/patch Events; delete pods in <code>nvidia-network-operator</code> with <code>spec.nodeName</code> field selector; read <code>nodeprep-system</code> Secrets (bmc)</td></tr>
+      <tr><td class="mono">controller</td><td>full CRUD on nodeprep.* resources; patch Nodes (labels, taints, cordon); create/patch Events; watch Profiles; CAPI Machines get/list/watch/patch and KubeadmControlPlane get/list/watch (§6.3–6.4)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><span class="hn">9.1</span>Rollout sequence</h3>
+  <ol class="tight">
+    <li><strong>Shadow mode.</strong> Deploy the agent with <code>--mode=shadow</code> on nodes already prepped by bash: every step runs Detect only, and its verdict is recorded. A correctly modeled step reports <code>Done</code> on every bash-converged host; any <code>Drifted</code> verdict is a modeling bug to fix <em>before</em> the controller can apply anything. Shadow mode turns the migration risk into a checklist.</li>
+    <li><strong>Import.</strong> The converter reads <code>nodeprep.env</code> into a NodePrepProfile; the controller maps the legacy label to a phase (<code>init</code>→Provisioning, <code>inithw</code>→Flashing, <code>config</code>→Configuring, <code>precomplete</code>/<code>complete</code>→Finalizing). Because every step verifies before declaring Done, a mis-mapped import self-corrects on first Detect. In the same step the new controller deploys and the legacy <code>nodeprep-controller</code> Deployment is removed — its untaint, CAPI-pause and worker-label duties are now native (§6.3), and running both would fight over taints.</li>
+    <li><strong>Canary.</strong> A labeled canary set gets <code>rc.local</code> removed and full controller ownership; fleet flash window set to 1. Watch step metrics and reboot counts across two full reboots.</li>
+    <li><strong>Fleet.</strong> Remaining nodes adopt in waves; <code>labelCompat: v1</code> keeps existing dashboards green throughout. The bash scripts stay in the repo untouched until the last node is imported, then move to <code>attic/</code>.</li>
+  </ol>
+
+  <h3><span class="hn">9.2</span>Testing strategy</h3>
+  <ul class="tight">
+    <li><strong>Pure logic</strong> (GUID scheme, classification parsing, semver compare, grub assembly, profile defaults) is unit-tested against fixtures captured from real nodes — including the mst/mlxconfig output quirks the awk chains were tuned around.</li>
+    <li><strong>Host boundary</strong> is an interface (<code>type Host interface</code> in <code>internal/host</code>) with a scripted fake, so the entire stage engine runs in CI without hardware.</li>
+    <li><strong>envtest</strong> covers controller behavior: adoption, flash-window admission, taint lifecycle, bootstrap gate, CP quorum admission, CAPI pause, worker-label transitions.</li>
+    <li><strong>Hardware-in-the-loop:</strong> one lab node runs the agent against a nightly <code>converge → wipe → reconverge</code> loop — the closest thing to what the bash script could never give us: a regression test for the whole bring-up path.</li>
+  </ul>
+</section>
+
+<!-- ==================== PART 11 ==================== -->
+<section class="part" id="s11">
+  <div class="phead"><span class="pnum">11</span><h2>Open questions</h2></div>
+  <p class="plead">Decisions deliberately left open, with the information needed to close them. Resolved by review: VF management stays in-house (Spectrum-X 2.1 requires VFs managed externally to the Network Operator — §7 note); Ready-state converge uses the middle ground — non-disruptive repair in place, disruptive repair behind the taint window (§5.3, §6.1); post-reboot workload protection is solved by the taint contract (§6.1); CAPI pause, worker-role label and untaint are absorbed from the legacy controller (§6.3).</p>
+
+  <ol class="tight">
+    <li><strong>LLDP rail discovery — a validation task, not a design task.</strong> <code>railSource: lldp</code> ships as an opt-in mechanism with the explicit <code>spec.rails</code> map as the default, because switch-side port-description conventions are not assumable to be stable across vendors. Closing this means auditing the actual port descriptions per switch vendor in the fleet and defining a parsing contract per vendor.</li>
+    <li><strong>mlnx_interface_mgr: repair vs. remove.</strong> The boot hook defaults to wait-then-<code>netplan apply</code> (parity with the bash script). <code>mlnxInterfaceMgr: disable</code> (mask the service) exists but needs a validation pass per affected distro image to confirm nothing else consumes the manager. The wipe bug itself is upstream in mft and should be tracked there; the boot hook is the workaround, not the cure.</li>
+    <li><strong><code>kubeletStateReset: readyCheck</code>.</strong> Skipping the pre-kubelet state-file deletion when NodePrep is Ready would preserve CPU-manager pin assignments across ordinary reboots. It stays opt-in until validated against the target kubelet version's state-restore behavior — a wrong guess deadlocks the node (kubelet won't start, agent can't run). The fail-safe default remains <code>always</code>.</li>
+    <li><strong>Stylus as a profile consumer.</strong> On Stylus-managed clusters, whether Stylus should create NodePrepProfiles per cluster template (rather than the DaemonSet adopting nodes by selector) is a product decision, not an engineering one. Engineering's position: the API is already shaped for it.</li>
+    <li><strong>Control planes without CAPI.</strong> CP choreography needs an expected replica count; on clusters without CAPI it must come from the profile. Decide whether that is a documented requirement or whether Palette guarantees CAPI everywhere nodeprep runs.</li>
+  </ol>
+</section>
+
+<footer>
+  NP-CTRL-001 · NodePrep Controller design · analysis basis: nodeprep-v105.sh (979 lines) · v106 BMC-flash delta · nodeprep-controller/main.go (untaint, CAPI pause, worker-role label) · all host paths, tool names and firmware semantics preserved from the bash implementation unless explicitly flagged as a fix (P1–P13).
+</footer>
+
+</div>
