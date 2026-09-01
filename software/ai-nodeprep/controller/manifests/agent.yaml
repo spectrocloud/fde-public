@@ -22,6 +22,18 @@ spec:
     spec:
       serviceAccountName: nodeprep-agent
       hostPID: true # nsenter into PID 1 for nodeprep-initiated reboots
+      # The agent must run on the very nodes the contract taints: the taint
+      # survives reboots in etcd and is only released after the agent's own
+      # boot-verify — without this toleration the agent could never come back
+      # after a reboot to release it. The DaemonSet controller already adds
+      # the standard not-ready/unreachable/unschedulable tolerations; custom
+      # taints are never auto-tolerated. Control-plane taints so the agent can
+      # prep control-plane nodes.
+      tolerations:
+        - key: spectrocloud.com/nodeprep
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
       containers:
         - name: agent
           image: docker.io/kreeuwijk/ai-nodeprep:0.1.0-agent

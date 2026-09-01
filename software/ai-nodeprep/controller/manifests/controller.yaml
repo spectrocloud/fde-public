@@ -18,6 +18,15 @@ spec:
         app.kubernetes.io/part-of: nodeprep
     spec:
       serviceAccountName: nodeprep-controller
+      # Unlike the agent DaemonSet, this Deployment gets no auto-added
+      # tolerations. On a single-control-plane-node cluster it must be able to
+      # run on the one node being prepped (tainted with spectrocloud.com/nodeprep
+      # and carrying the control-plane taint).
+      tolerations:
+        - key: spectrocloud.com/nodeprep
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
       containers:
         - name: controller
           image: docker.io/kreeuwijk/ai-nodeprep:0.1.0-controller
