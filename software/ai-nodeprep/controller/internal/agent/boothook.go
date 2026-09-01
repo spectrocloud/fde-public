@@ -95,7 +95,7 @@ readycheck() {
   crt=$(awk '/client-certificate:/{print $2; exit}' "$kc")
   key=$(awk '/client-key:/{print $2; exit}' "$kc")
   out=$(curl -sS --max-time 5 --cacert "$ca" --cert "$crt" --key "$key" \
-    "$server/apis/nodeprep.spectrocloud.com/v1alpha1/nodepreps/` + nodeName + `" 2>/dev/null") || return 1
+    "$server/apis/nodeprep.spectrocloud.com/v1alpha1/nodepreps/` + nodeName + `" 2>/dev/null) || return 1
   printf '%s' "$out" | grep -q '"phase":"Ready"'
 }
 `)
@@ -186,13 +186,31 @@ func (a *Agent) ensureBootHook(profile *v1alpha1.NodePrepProfile) (string, error
 			return "", fmt.Errorf("mkdir %s: %v", d, err)
 		}
 	}
+	// Syntax gate before anything is installed (found in live testing: a
+	// stray quote in the template made dash reject the script at boot, the
+	// kubelet state reset silently never ran, and the node crashlooped after
+	// reboot). The candidate is validated by the HOST's /bin/sh — the same
+	// shell that will execute it — via nsenter, and only then moved into
+	// place; an enabled unit can never point at an unvalidated script.
+	candDir := "/host/tmp"
+	candPath := filepath.Join(candDir, "nodeprep-boot-hook.candidate")
+	if err := os.MkdirAll(candDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %v", candDir, err)
+	}
+	if err := os.WriteFile(candPath, []byte(script), 0o755); err != nil {
+		return "", fmt.Errorf("writing candidate: %v", err)
+	}
+	if _, err := a.hostExec(env, 30*time.Second, "sh", "-n", "/tmp/nodeprep-boot-hook.candidate"); err != nil {
+		_ = os.Remove(candPath)
+		return "", fmt.Errorf("rendered boot hook fails sh -n (refusing to install): %v", err)
+	}
+	if err := os.Rename(candPath, scriptPath); err != nil {
+		return "", fmt.Errorf("installing %s: %v", bootHookScriptPath, err)
+	}
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return "", fmt.Errorf("writing %s: %v", bootHookUnitPath, err)
 	}
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		return "", fmt.Errorf("writing %s: %v", bootHookScriptPath, err)
-	}
-	a.logf("boot hook rendered to %s and %s", bootHookUnitPath, bootHookScriptPath)
+	a.logf("boot hook rendered to %s and %s (sh -n verified)", bootHookScriptPath, bootHookUnitPath)
 	if _, err := a.hostExec(env, 30*time.Second, "systemctl", "daemon-reload"); err != nil {
 		return "", fmt.Errorf("daemon-reload: %v", err)
 	}

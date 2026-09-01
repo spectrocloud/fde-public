@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,6 +66,37 @@ func TestRenderBootHookMlnxGate(t *testing.T) {
 	// The content-hash placeholder must be substituted everywhere.
 	if strings.Contains(wait, "@@HASH@@") {
 		t.Fatalf("content-hash placeholder left unsubstituted")
+	}
+}
+
+// Every rendering variant must parse as valid POSIX shell. Found in live
+// testing: a stray quote in the curl line made dash reject the script at
+// boot, the kubelet state reset silently never ran, and the node
+// crashlooped after reboot. sh -n here is the same parser the host uses.
+func TestRenderBootHookShellSyntax(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh on PATH")
+	}
+	for _, hb := range []v1alpha1.HostBootSpec{
+		{KubeletStateReset: "always", MlnxInterfaceMgr: "wait"},
+		{KubeletStateReset: "always", MlnxInterfaceMgr: "disable"},
+		{KubeletStateReset: "always", MlnxInterfaceMgr: "ignore"},
+		{KubeletStateReset: "readyCheck", MlnxInterfaceMgr: "wait"},
+		{KubeletStateReset: "readyCheck", MlnxInterfaceMgr: "ignore"},
+		{KubeletStateReset: "off", MlnxInterfaceMgr: "wait"},
+		{}, // all defaults
+	} {
+		for _, nodeName := range []string{"bm-a-rtx6k-7", "node-with-dashes", "n"} {
+			_, script := renderBootHook(nodeName, hb)
+			f := filepath.Join(t.TempDir(), "hook")
+			if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("sh", "-n", f).Run(); err != nil {
+				t.Fatalf("rendered hook does not parse (reset=%q mlnx=%q node=%q): %v\n%s",
+					hb.KubeletStateReset, hb.MlnxInterfaceMgr, nodeName, err, script)
+			}
+		}
 	}
 }
 

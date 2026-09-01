@@ -85,9 +85,9 @@ the NodePrep object describe what the bash script *would* have done.
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.9-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.9-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.9-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.10-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.10-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.10-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true
