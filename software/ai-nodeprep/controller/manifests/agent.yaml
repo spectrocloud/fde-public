@@ -36,7 +36,7 @@ spec:
           operator: Exists
       containers:
         - name: agent
-          image: docker.io/kreeuwijk/ai-nodeprep:0.1.7-agent
+          image: docker.io/kreeuwijk/ai-nodeprep:0.1.9-agent
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME
@@ -61,10 +61,10 @@ spec:
               mountPath: /dev
           resources:
             requests:
-              cpu: 20m
-              memory: 32Mi
+              cpu: 100m
+              memory: 256Mi
             limits:
-              memory: 128Mi
+              memory: 1Gi
       volumes:
         - name: sys
           hostPath:

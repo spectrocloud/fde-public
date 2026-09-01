@@ -59,7 +59,11 @@ tooling. With `-host-mutations` **off** (the default, mirrored by
 status and events but does not touch the host. Mutating steps that run for
 real when mutations are on: the download cache under
 `/opt/spectrocloud/spcx`, DOCA package installation (`dpkg`/`apt` on the
-host via `nsenter`, deliberately with no Mellanox-hardware gate), the
+host via `nsenter` — heavy commands run in a host systemd transient unit
+(`systemd-run --wait --pipe`) so apt/dpkg memory is accounted to the host,
+not the pod cgroup; found in live testing, `apt-get install doca-all` as a
+pod child OOM-killed the agent — deliberately with no Mellanox-hardware
+gate), the
 `driverReadyMarker` write to `/run/mellanox/drivers`, and `kubeletState` —
 the guarded stop → rm manager-state → restart from `fn_ensure_state`, plus
 the boot hook: the agent renders `nodeprep-boot.service` + its script onto
@@ -81,9 +85,9 @@ the NodePrep object describe what the bash script *would* have done.
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.7-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.7-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.7-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.9-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.9-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.9-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

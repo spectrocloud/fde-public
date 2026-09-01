@@ -15,6 +15,12 @@ import (
 // observable by default), so pod logs audit exactly what ran on the host and
 // what the host said back.
 //
+// Use only for short, light commands (queries, systemctl toggles): the child
+// process lives in the agent pod's cgroup, so its memory counts against the
+// pod limit. Anything heavy — apt, dpkg unpacking hundreds of packages —
+// must go through heavyHostExec (found in live testing: `apt-get install
+// doca-all` as a pod child OOM-killed the agent against its memory limit).
+//
 // Steps do not carry a context in v0.1, so each call enforces its own
 // timeout locally; a pod deletion kills the child process regardless.
 func (a *Agent) hostExec(env []string, timeout time.Duration, name string, args ...string) (string, error) {
@@ -26,6 +32,86 @@ func (a *Agent) hostExec(env []string, timeout time.Duration, name string, args 
 	full := append([]string{"-t", "1", "-m", "-u", "-i", "-n", "--", name}, args...)
 	cmd := exec.CommandContext(cctx, "nsenter", full...)
 	cmd.Env = env
+	out, err := a.runLogged(cctx, timeout, cmdline, cmd)
+	if cctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("%s: timed out after %s", cmdline, timeout)
+	}
+	return out, err
+}
+
+// heavyHostExec runs a long, memory-hungry host command in a transient
+// systemd unit on the host (systemd-run via nsenter) instead of as a child
+// of the agent process: the unit is owned by the host's systemd, so its
+// memory is accounted to the host, not the pod's cgroup, and the pod cannot
+// be OOM-killed by host package management. --wait --pipe keeps output and
+// exit status flowing back; --collect garbage-collects the unit afterwards.
+//
+// The unit name is derived from the command, so a retry while a previous
+// attempt is still running fails fast with systemd's "already active"
+// instead of two apts racing the dpkg lock. On timeout the transient unit
+// keeps running on the host — dpkg state makes a later retry idempotent.
+func (a *Agent) heavyHostExec(env []string, timeout time.Duration, name string, args ...string) (string, error) {
+	unit := heavyUnitName(name)
+	cmdline := strings.Join(append([]string{name}, args...), " ")
+	a.logf("host exec (unit %s): %s", unit, cmdline)
+
+	cctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := []string{"-t", "1", "-m", "-u", "-i", "-n", "--", "systemd-run",
+		"--collect", "--wait", "--pipe", "--quiet", "--unit=" + unit}
+	for _, e := range env {
+		if heavyEnvForward(e) {
+			full = append(full, "--setenv="+e)
+		}
+	}
+	full = append(full, "--", name)
+	full = append(full, args...)
+	cmd := exec.CommandContext(cctx, "nsenter", full...)
+	cmd.Env = env
+	out, err := a.runLogged(cctx, timeout, cmdline, cmd)
+	if cctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("%s: timed out after %s (host unit %s keeps running; dpkg state makes the retry idempotent)", cmdline, timeout, unit)
+	}
+	return out, err
+}
+
+// heavyUnitName derives a stable systemd unit name from a command path.
+func heavyUnitName(name string) string {
+	base := name
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	var b strings.Builder
+	b.WriteString("nodeprep-")
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+// heavyEnvForward reports whether an environment variable is worth carrying
+// into the transient unit (the unit gets env only via --setenv, not the
+// pod's whole environ). Interactive apt guardrails and proxies.
+func heavyEnvForward(e string) bool {
+	for _, p := range []string{
+		"DEBIAN_FRONTEND=", "NEEDRESTART_MODE=", "DEBCONF_NONINTERACTIVE_SEEN=",
+		"http_proxy=", "https_proxy=", "no_proxy=", "HTTP_PROXY=", "HTTPS_PROXY=", "NO_PROXY=",
+	} {
+		if strings.HasPrefix(e, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// runLogged is the shared execution-and-audit body of hostExec and
+// heavyHostExec: run, time, log the outcome with a bounded output tail.
+func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline string, cmd *exec.Cmd) (string, error) {
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -33,10 +119,10 @@ func (a *Agent) hostExec(env []string, timeout time.Duration, name string, args 
 	if err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			a.logf("host exec TIMED OUT after %s: %s", timeout, cmdline)
-			return string(out), fmt.Errorf("%s: timed out after %s", cmdline, timeout)
+		} else {
+			a.logf("host exec failed after %s: %s", dur, tail)
 		}
-		a.logf("host exec failed after %s: %s", dur, tail)
-		return string(out), fmt.Errorf("%s: %w: %s", cmdline, err, tail)
+		return string(out), err
 	}
 	a.logf("host exec ok (%s): %s", dur, tail)
 	return string(out), nil

@@ -269,19 +269,19 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	}
 
 	if debNeeded {
-		if _, err := a.hostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
+		if _, err := a.heavyHostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("dpkg --install %s: %v", fw.DOCA.Deb, err)
 		}
 	}
 	if len(missing) > 0 {
 		if fw.DOCA.Deb != "" {
 			// the bundle deb bootstrapped the NVIDIA apt repository; refresh
-			if _, err := a.hostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
+			if _, err := a.heavyHostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
 				return v1alpha1.StepFailed, fmt.Sprintf("apt-get update: %v", err)
 			}
 		}
-		args := append([]string{"--yes"}, missing...)
-		if _, err := a.hostExec(env, 30*time.Minute, "apt-get", args...); err != nil {
+		args := append([]string{"install", "--yes"}, missing...)
+		if _, err := a.heavyHostExec(env, 30*time.Minute, "apt-get", args...); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("apt-get install %v: %v", missing, err)
 		}
 	}
