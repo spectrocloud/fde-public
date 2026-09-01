@@ -1,6 +1,12 @@
 # Example NodePrepProfile for an AI worker with Bluefield-3 DPUs on the
 # north-south rail and ConnectX SuperNICs on two east-west rails.
 # Mirrors the parameters of nodeprep-v105.sh (names in the comments).
+#
+# Artifacts below are the exact ones verified live on the test cluster
+# (controller/agent 0.1.11): downloads are sha256-verified, and a local copy
+# in the spcx cache that still hashes to the configured sha256 is reused
+# instead of re-fetched — keep the checksums set so re-preps stay off the
+# network.
 apiVersion: nodeprep.spectrocloud.com/v1alpha1
 kind: NodePrepProfile
 metadata:
@@ -11,13 +17,17 @@ spec:
       node.spectrocloud.com/ai-worker: "true"
 
   firmware:
-    source: http://maas.internal:8069/rcp # base URL for artifacts
+    source: http://maas.internal:8069/rcp # base URL for artifacts (MAAS mirror)
     bfb:
-      name: bf-3.9.3-mlnx-ofed.bfb
-      sha256: "<sha256 of the BFB>"
+      name: bf-fwbundle-3.4.0-92_26.04-prod.bfb
+      sha256: cfad862925ad90618cb65dce0a025d2a408a756992df9a19e203d2d2445332a5
     doca:
-      deb: doca-host-2.9.0-...amd64.deb
-      packages: [doca-ofed, doca-runtime]
+      deb: doca-host_3.4.0-085000-26.04-ubuntu2404_amd64.deb
+      sha256: f274db1c9445bb9362565981a226966c058e068a53207890449a83c6757004aa
+      # fn_init_sw_stage's exact install set: the DOCA bundle plus the
+      # companion packages (mft is a hard prerequisite of the Mellanox-gated
+      # steps — mlxconfig/bfb-install/mlnx_qos).
+      packages: [doca-all, lldpd, mft, netplan.io, pv, psmisc]
     aptUpgrade: false
 
   eastWest: # LINKTYPE_EW=2, NUMVF_EW=8, MTU_EW=9216, ESWITCH_MODE=switchdev
@@ -44,6 +54,7 @@ spec:
     hugepages:
       defaultSize: 1G
       pages1G: 32
+    bootHook: true # nodeprep-boot.service rendered Before=kubelet.service (nil = on)
     kubeletStateReset: always # guarded stop -> rm -> start at boot
     mlnxInterfaceMgr: wait # two-condition gate (script + hardware)
 
