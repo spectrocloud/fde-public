@@ -1,0 +1,61 @@
+# Example NodePrepProfile for an AI worker with Bluefield-3 DPUs on the
+# north-south rail and ConnectX SuperNICs on two east-west rails.
+# Mirrors the parameters of nodeprep-v105.sh (names in the comments).
+apiVersion: nodeprep.spectrocloud.com/v1alpha1
+kind: NodePrepProfile
+metadata:
+  name: gpu-worker-v105
+spec:
+  nodeSelector:
+    matchLabels:
+      node.spectrocloud.com/ai-worker: "true"
+
+  firmware:
+    source: http://maas.internal:8069/rcp # base URL for artifacts
+    bfb:
+      name: bf-3.9.3-mlnx-ofed.bfb
+      sha256: "<sha256 of the BFB>"
+    doca:
+      deb: doca-host-2.9.0-...amd64.deb
+      packages: [doca-ofed, doca-runtime]
+    aptUpgrade: false
+
+  eastWest: # LINKTYPE_EW=2, NUMVF_EW=8, MTU_EW=9216, ESWITCH_MODE=switchdev
+    linkType: Ethernet
+    numVFs: 8
+    mtu: 9216
+    eswitchMode: switchdev
+    roceCC: true
+
+  northSouth: # LINKTYPE_NS=2, NUMVF_NS=16, DPUOFFLOAD=0
+    linkType: Ethernet
+    numVFs: 16
+    offloadEngine: none
+
+  rails: # rails_pciaddr in the bash script
+    - rail: r0
+      pciFunction: "05:00"
+    - rail: r1
+      pciFunction: "06:00"
+
+  hostBoot:
+    iommu: intel # intel_iommu=on
+    rdmaNetnsMode: "0" # options ib_core netns_mode=0
+    hugepages:
+      defaultSize: 1G
+      pages1G: 32
+    kubeletStateReset: always # guarded stop -> rm -> start at boot
+    mlnxInterfaceMgr: wait # two-condition gate (script + hardware)
+
+  policy:
+    capiPause: true # pause the CAPI Machine while prepping
+    workerRoleLabel: manage # demote at Finalizing, restore at Ready
+    labelCompat: v1 # mirror the legacy spectrocloud.com/nodeprep label
+    maxConcurrentFlashes: 1 # fleet flash window
+    disableACS: true
+    taintEnabled: true # default; shown for clarity
+    rebootEnabled: false # flip with the agent's -allow-reboot
+    hostMutations: false # flip with the agent's -host-mutations
+
+  nfsRdma:
+    enabled: true

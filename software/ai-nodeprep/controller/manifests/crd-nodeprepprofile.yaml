@@ -1,0 +1,235 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodeprepprofiles.nodeprep.spectrocloud.com
+spec:
+  group: nodeprep.spectrocloud.com
+  names:
+    kind: NodePrepProfile
+    listKind: NodePrepProfileList
+    plural: nodeprepprofiles
+    singular: nodeprepprofile
+    shortNames:
+      - npp
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Max Flash
+          type: integer
+          jsonPath: .spec.policy.maxConcurrentFlashes
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [nodeSelector]
+              properties:
+                nodeSelector:
+                  description: Which Nodes are adopted into NodePrep objects.
+                  type: object
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      items:
+                        type: object
+                        required: [key, operator]
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                firmware:
+                  type: object
+                  properties:
+                    source:
+                      description: Base URL for BFB/DOCA artifacts (e.g. MAAS/TFTP mirror).
+                      type: string
+                    aptUpgrade:
+                      type: boolean
+                    bfb:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        minVersion:
+                          type: string
+                        sha256:
+                          type: string
+                    doca:
+                      type: object
+                      properties:
+                        deb:
+                          type: string
+                        sha256:
+                          type: string
+                        packages:
+                          type: array
+                          items:
+                            type: string
+                eastWest:
+                  description: East-west rail (GPU fabric) settings.
+                  type: object
+                  properties:
+                    linkType:
+                      type: string
+                      enum: [InfiniBand, Ethernet, ""]
+                    numVFs:
+                      type: integer
+                      minimum: 0
+                    mtu:
+                      type: integer
+                    eswitchMode:
+                      type: string
+                      enum: [switchdev, legacy, ""]
+                    roceCC:
+                      type: boolean
+                northSouth:
+                  description: North-south (DPU) settings.
+                  type: object
+                  properties:
+                    linkType:
+                      type: string
+                      enum: [InfiniBand, Ethernet, ""]
+                    numVFs:
+                      type: integer
+                      minimum: 0
+                    offloadEngine:
+                      type: string
+                rails:
+                  description: Rail assignment by PCI function ("05:00").
+                  type: array
+                  items:
+                    type: object
+                    required: [rail, pciFunction]
+                    properties:
+                      rail:
+                        type: string
+                        pattern: '^r\d+(_p\d+)?$'
+                      pciFunction:
+                        type: string
+                hostBoot:
+                  type: object
+                  properties:
+                    iommu:
+                      type: string
+                      enum: [auto, intel, amd, off, ""]
+                    rdmaNetnsMode:
+                      type: string
+                    hugepages:
+                      type: object
+                      properties:
+                        defaultSize:
+                          type: string
+                        pages1G:
+                          type: integer
+                        pages2M:
+                          type: integer
+                    bootHook:
+                      description: Render the nodeprep-boot.service oneshot (v0.2).
+                      type: boolean
+                    kubeletStateReset:
+                      description: Guarded kubelet manager-state reset at boot.
+                      type: string
+                      enum: [always, readyCheck, off, ""]
+                    mlnxInterfaceMgr:
+                      description: Handling of the mlnx_interface_mgr wait.
+                      type: string
+                      enum: [wait, disable, ignore, ""]
+                policy:
+                  type: object
+                  properties:
+                    controlDPU:
+                      type: boolean
+                    disableACS:
+                      type: boolean
+                    maxConcurrentFlashes:
+                      description: Fleet flash window; 0 = unlimited.
+                      type: integer
+                      minimum: 0
+                    cordonDuringVFConfig:
+                      type: boolean
+                    capiPause:
+                      type: boolean
+                    workerRoleLabel:
+                      type: string
+                      enum: [manage, ignore, ""]
+                    labelCompat:
+                      description: v1 mirrors the legacy spectrocloud.com/nodeprep label.
+                      type: string
+                      enum: [v1, off, ""]
+                    controlPlanePrep:
+                      type: boolean
+                    taintEnabled:
+                      description: Default true. Held from adoption until boot-verify passes.
+                      type: boolean
+                    rebootEnabled:
+                      description: Default false; agent also requires -allow-reboot.
+                      type: boolean
+                    hostMutations:
+                      description: Default false. Gate for any step that mutates the host.
+                      type: boolean
+                dpuBMC:
+                  type: object
+                  properties:
+                    credentialsSecretRef:
+                      type: object
+                      required: [name]
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                    updateBMC:
+                      type: boolean
+                    updateCEC:
+                      type: boolean
+                nfsRdma:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                controlPlane:
+                  description: Control-plane choreography (design §6.4).
+                  type: object
+                  properties:
+                    prep:
+                      type: boolean
+                    expectedCount:
+                      description: 0 = auto from KubeadmControlPlane replicas.
+                      type: integer
+                      minimum: 0
+                    strategy:
+                      type: string
+                      enum: [serial, background, ""]
+                    bootstrapGate:
+                      type: string
+                      enum: [auto, delay, off, ""]
+                    bootstrapDelay:
+                      type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

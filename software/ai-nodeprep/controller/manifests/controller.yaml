@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodeprep-controller
+  namespace: nodeprep-system
+  labels:
+    app.kubernetes.io/name: nodeprep-controller
+    app.kubernetes.io/part-of: nodeprep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nodeprep-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nodeprep-controller
+        app.kubernetes.io/part-of: nodeprep
+    spec:
+      serviceAccountName: nodeprep-controller
+      containers:
+        - name: controller
+          image: ghcr.io/spectrocloud/nodeprep-controller:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

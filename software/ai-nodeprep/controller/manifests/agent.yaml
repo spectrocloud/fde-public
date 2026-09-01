@@ -1,0 +1,65 @@
+# Node agent DaemonSet. It needs eyes on the host (sysfs, PCI, udev, kubelet
+# state) and — only when an operator flips the flags — hands on the host
+# (-host-mutations, -allow-reboot). Detect-only is the default posture: with
+# the flags off the agent reports Blocked instead of touching anything.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nodeprep-agent
+  namespace: nodeprep-system
+  labels:
+    app.kubernetes.io/name: nodeprep-agent
+    app.kubernetes.io/part-of: nodeprep
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nodeprep-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nodeprep-agent
+        app.kubernetes.io/part-of: nodeprep
+    spec:
+      serviceAccountName: nodeprep-agent
+      hostPID: true # nsenter into PID 1 for nodeprep-initiated reboots
+      containers:
+        - name: agent
+          image: ghcr.io/spectrocloud/nodeprep-agent:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - -interval=5s
+            # Safety flags (design: experimental gate). Both default false in
+            # the binary; uncomment to let steps mutate the host / reboot it.
+            # - -host-mutations
+            # - -allow-reboot
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: host
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: host
+          hostPath:
+            path: /
+        - name: dev
+          hostPath:
+            path: /dev
