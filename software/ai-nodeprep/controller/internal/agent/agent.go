@@ -326,13 +326,16 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		}
 	}
 
-	steps := stepsForStage(phase)
-	ledger := ensureSteps(np.Status.Steps, steps)
+	defs := stepsForStage(phase)
+	ledger := ensureSteps(np.Status.Steps, defs, phase)
 	np.Status.Steps = ledger
 
 	blocked, failed, allDone := false, false, true
-	for i, def := range stepsForStage(phase) {
-		s := &ledger[i]
+	for _, def := range defs {
+		s := stepByName(ledger, def.name)
+		if s == nil {
+			continue // cannot happen: ensureSteps adds every def
+		}
 		if s.State == v1alpha1.StepDone {
 			continue
 		}
@@ -471,20 +474,63 @@ func (a *Agent) bootVerify(np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProf
 	return true
 }
 
-func ensureSteps(existing []v1alpha1.StepStatus, defs []stepDef) []v1alpha1.StepStatus {
-	out := existing[:0:0]
-	byName := map[string]v1alpha1.StepStatus{}
-	for _, s := range existing {
-		byName[s.Name] = s
+// ensureSteps merges the current stage's step definitions into the
+// persistent ledger. Prior stages keep their entries — the ledger is the
+// node's full prep history, not just the active stage. A definition for a
+// stage the node has already walked through (first seen by a newer agent on
+// a mid-prep node) is recorded Done: it ran before the ledger began
+// accumulating.
+func ensureSteps(existing []v1alpha1.StepStatus, defs []stepDef, phase v1alpha1.Phase) []v1alpha1.StepStatus {
+	out := append(existing[:0:0], existing...)
+	known := map[string]bool{}
+	for _, s := range out {
+		known[s.Name] = true
 	}
 	for _, d := range defs {
-		if s, ok := byName[d.name]; ok {
-			out = append(out, s)
+		if known[d.name] {
 			continue
 		}
-		out = append(out, v1alpha1.StepStatus{Name: d.name, Stage: d.stage, State: v1alpha1.StepPending})
+		known[d.name] = true
+		st, msg := v1alpha1.StepPending, ""
+		var done *metav1.Time
+		if stageRank(d.stage) < stageRank(phase) {
+			st, msg = v1alpha1.StepDone, "completed before the ledger began accumulating"
+			now := metav1.Now()
+			done = &now
+		}
+		out = append(out, v1alpha1.StepStatus{Name: d.name, Stage: d.stage, State: st, Message: msg, CompletedAt: done})
 	}
 	return out
+}
+
+// stepByName returns a pointer into the ledger slice, so runStage can mutate
+// the entry that gets patched back to the API server.
+func stepByName(steps []v1alpha1.StepStatus, name string) *v1alpha1.StepStatus {
+	for i := range steps {
+		if steps[i].Name == name {
+			return &steps[i]
+		}
+	}
+	return nil
+}
+
+// stageRank orders the phase chain for the ledger backfill decision.
+func stageRank(p v1alpha1.Phase) int {
+	switch p {
+	case v1alpha1.PhasePending:
+		return 0
+	case v1alpha1.PhaseProvisioning:
+		return 1
+	case v1alpha1.PhaseFlashing:
+		return 2
+	case v1alpha1.PhaseConfiguring:
+		return 3
+	case v1alpha1.PhaseFinalizing:
+		return 4
+	case v1alpha1.PhaseReady:
+		return 5
+	}
+	return -1
 }
 
 func firstStepNamed(steps []v1alpha1.StepStatus, state v1alpha1.StepState) string {

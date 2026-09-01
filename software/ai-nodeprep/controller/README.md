@@ -48,16 +48,21 @@ Real, exercised end-to-end:
 
 Detect-first steps (report Blocked honestly rather than half-configure):
 `downloads` is fully real (HTTP + sha256 + atomic rename); `grubParams`,
-`ibCoreNetns`, `sriovNumVFs`, `udevRules`, `ovsBridges`, `kubeletState`
+`ibCoreNetns`, `sriovNumVFs`, `udevRules`, `ovsBridges`
 detect current host state and compare it to the profile; flashing/
 mlxconfig/lossless-RoCE/VF-GUID steps gate on Mellanox presence and MFT
 tooling. With `-host-mutations` **off** (the default, mirrored by
 `policy.hostMutations`), everything stays detect-only: the agent writes
-status and events but does not touch the host. Two mutating steps already
-run for real when mutations are on: the download cache under
+status and events but does not touch the host. Mutating steps that run for
+real when mutations are on: the download cache under
 `/opt/spectrocloud/spcx`, DOCA package installation (`dpkg`/`apt` on the
-host via `nsenter`, deliberately with no Mellanox-hardware gate), and the
-`driverReadyMarker` write to `/run/mellanox/drivers`.
+host via `nsenter`, deliberately with no Mellanox-hardware gate), the
+`driverReadyMarker` write to `/run/mellanox/drivers`, and `kubeletState` —
+the guarded stop → rm manager-state → restart from `fn_ensure_state`, plus
+the boot hook: the agent renders `nodeprep-boot.service` + its script onto
+the host (content-hashed, `Before=kubelet.service`, design §6.2), carrying
+the kubelet reset and the two-condition-gated `mlnx_interface_mgr` wait
+into every future boot.
 
 ## Safety model
 
@@ -73,9 +78,9 @@ the NodePrep object describe what the bash script *would* have done.
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.5-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.5-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.5-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.6-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.6-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.6-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

@@ -380,27 +380,75 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	return v1alpha1.StepBlocked, "setpci ACS handling lands in v0.2"
 }
 
-// stepKubeletState reports on kubelet manager state files. The guarded
-// stop→delete→start sequence runs via the boot hook (design §6.2); the agent
-// only verifies the outcome here.
+// stepKubeletState clears the kubelet CPU/Memory manager state files the way
+// nodeprep-v105.sh fn_ensure_state does, guarded: never delete under a
+// running kubelet — stop, delete, restart (the same sequence the boot hook
+// carries into every future boot, design §6.2). The reset is one-shot per
+// prep: runStage never re-opens Done steps, so a kubelet that re-persists
+// fresh manager state cannot cause a reset loop.
 func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	mode := profile.Spec.HostBoot.KubeletStateReset
+	hb := profile.Spec.HostBoot
+	mode := hb.KubeletStateReset
 	if mode == "" || mode == "off" {
 		return v1alpha1.StepDone, "skipped: kubeletStateReset off"
 	}
-	stale := []string{}
-	for _, f := range []string{"cpu_manager_state", "memory_manager_state"} {
-		if _, err := os.Stat(filepath.Join(a.hostKubeletDir, f)); err == nil {
-			stale = append(stale, f)
+	stale := staleKubeletStateFiles(a.hostKubeletDir)
+	if !a.mutationsAllowed(profile) {
+		if len(stale) == 0 {
+			return v1alpha1.StepDone, "kubelet manager state files absent (detect-only: boot hook not installed)"
 		}
+		return v1alpha1.StepBlocked, fmt.Sprintf("stale kubelet state %v; guarded reset requires -host-mutations and policy.hostMutations", stale)
+	}
+	hookMsg, err := a.ensureBootHook(profile)
+	if err != nil {
+		return v1alpha1.StepFailed, "boot hook: " + err.Error()
 	}
 	if len(stale) == 0 {
-		return v1alpha1.StepDone, "kubelet manager state files absent"
+		return v1alpha1.StepDone, hookMsg + "; kubelet manager state files absent"
 	}
-	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, fmt.Sprintf("stale kubelet state %v; the guarded reset is the boot hook's job (design §6.2)", stale)
+
+	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	out, _ := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "kubelet")
+	wasActive := strings.TrimSpace(out) == "active"
+	if wasActive {
+		a.logf("kubelet is active; stopping it for the guarded state reset")
+		if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "stop", "kubelet"); err != nil {
+			_, _ = a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet") // never leave it stopped
+			return v1alpha1.StepFailed, fmt.Sprintf("stopping kubelet: %v", err)
+		}
 	}
-	return v1alpha1.StepBlocked, "agent-side guarded reset lands in v0.2"
+	removed := []string{}
+	for _, f := range stale {
+		p := filepath.Join(a.hostKubeletDir, f)
+		a.logf("removing stale kubelet state file %s", p)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			if wasActive {
+				_, _ = a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet")
+			}
+			return v1alpha1.StepFailed, fmt.Sprintf("removing %s: %v", f, err)
+		}
+		removed = append(removed, f)
+	}
+	restarted := "kubelet was not running"
+	if wasActive {
+		if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("starting kubelet: %v", err)
+		}
+		active := false
+		for i := 0; i < 30; i++ {
+			out, err := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "kubelet")
+			if err == nil && strings.TrimSpace(out) == "active" {
+				active = true
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !active {
+			return v1alpha1.StepFailed, "kubelet did not return to active within 60s after the state reset"
+		}
+		restarted = "kubelet stopped and restarted"
+	}
+	return v1alpha1.StepDone, fmt.Sprintf("%s; cleared stale kubelet state %v (%s)", hookMsg, removed, restarted)
 }
 
 func stepNfsRdma(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {

@@ -149,7 +149,7 @@ spec:
                         pages2M:
                           type: integer
                     bootHook:
-                      description: Render the nodeprep-boot.service oneshot (v0.2).
+                      description: Render the nodeprep-boot.service oneshot (design §6.2). Unset means true.
                       type: boolean
                     kubeletStateReset:
                       description: Guarded kubelet manager-state reset at boot.

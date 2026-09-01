@@ -154,9 +154,17 @@ type HostBootSpec struct {
 	IOMMU             string        `json:"iommu,omitempty"` // auto | intel | amd | off
 	RDMANetnsMode     string        `json:"rdmaNetnsMode,omitempty"`
 	Hugepages         HugepagesSpec `json:"hugepages,omitempty"`
-	BootHook          bool          `json:"bootHook,omitempty"`
+	BootHook          *bool         `json:"bootHook,omitempty"`          // nil = on: render nodeprep-boot.service
 	KubeletStateReset string        `json:"kubeletStateReset,omitempty"` // always | readyCheck | off
 	MlnxInterfaceMgr  string        `json:"mlnxInterfaceMgr,omitempty"`  // wait | disable | ignore
+}
+
+// BootHookOn reports whether the nodeprep-boot.service oneshot should be
+// rendered on the host (design §6.2). Unset means on — the hook replaces the
+// bash script's rc.local entry and is the only OS boot integration
+// nodeprep installs.
+func (h HostBootSpec) BootHookOn() bool {
+	return h.BootHook == nil || *h.BootHook
 }
 
 type HugepagesSpec struct {
