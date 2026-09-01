@@ -41,7 +41,7 @@ type stepDef struct {
 var stepDefs = []stepDef{
 	// --- Provisioning (bash fn_init_sw_stage) ---
 	{name: "downloads", stage: v1alpha1.PhaseProvisioning, run: stepDownloads},
-	{name: "aptPackages", stage: v1alpha1.PhaseProvisioning, run: stepNotConfiguredYet("package operations land in v0.2")},
+	{name: "aptPackages", stage: v1alpha1.PhaseProvisioning, run: stepAptPackages},
 	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
 	{name: "ibCoreNetns", stage: v1alpha1.PhaseProvisioning, run: stepIbCoreNetns},
 	// --- Flashing (bash fn_init_hw_stage) ---
@@ -221,11 +221,81 @@ func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 
 // stepNotConfiguredYet marks provision-side package steps deferred to v0.2;
 // they are Done (skipped) so the vanilla end-to-end loop stays green.
-func stepNotConfiguredYet(msg string) func(*Agent, *v1alpha1.NodePrep, *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	return func(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-		return v1alpha1.StepDone, "skipped: " + msg
+
+// stepAptPackages installs the DOCA host packages configured in the profile,
+// deliberately with NO Mellanox-hardware gate: the host userspace is useful
+// without NICs and lab nodes install it too, matching the bash script. The
+// deb bundle, when configured, is installed first (it bootstraps the NVIDIA
+// apt repository), then the named packages via apt. Detection is dpkg state,
+// so the step is idempotent and only the missing pieces are installed.
+func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	fw := profile.Spec.Firmware
+	if fw.DOCA.Deb == "" && len(fw.DOCA.Packages) == 0 {
+		return v1alpha1.StepDone, "skipped: no DOCA deb or packages configured"
 	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "package installation requires -host-mutations and policy.hostMutations"
+	}
+	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+
+	// The deb must already be on the host: the downloads step fetches it
+	// into the spcx cache during the same stage (it runs first).
+	debHostPath := ""
+	if fw.DOCA.Deb != "" {
+		debHostPath = strings.TrimPrefix(filepath.Join(a.spcxDir(), fw.DOCA.Deb), "/host")
+		if _, err := os.Stat(filepath.Join(a.spcxDir(), fw.DOCA.Deb)); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("DOCA deb %s missing from %s; configure firmware.source so the downloads step fetches it first", fw.DOCA.Deb, a.spcxDir())
+		}
+	}
+
+	debNeeded := false
+	debPkg := ""
+	if fw.DOCA.Deb != "" {
+		out, err := a.hostExec(nil, 2*time.Minute, "dpkg-deb", "-f", debHostPath, "Package")
+		if err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("cannot read package name from %s: %v", fw.DOCA.Deb, err)
+		}
+		debPkg = strings.TrimSpace(out)
+		debNeeded = !a.pkgInstalled(env, debPkg)
+	}
+	missing := []string{}
+	for _, p := range fw.DOCA.Packages {
+		if !a.pkgInstalled(env, p) {
+			missing = append(missing, p)
+		}
+	}
+	if !debNeeded && len(missing) == 0 {
+		return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean)"
+	}
+
+	if debNeeded {
+		if _, err := a.hostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("dpkg --install %s: %v", fw.DOCA.Deb, err)
+		}
+	}
+	if len(missing) > 0 {
+		if fw.DOCA.Deb != "" {
+			// the bundle deb bootstrapped the NVIDIA apt repository; refresh
+			if _, err := a.hostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("apt-get update: %v", err)
+			}
+		}
+		args := append([]string{"--yes"}, missing...)
+		if _, err := a.hostExec(env, 30*time.Minute, "apt-get", args...); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("apt-get install %v: %v", missing, err)
+		}
+	}
+
+	parts := []string{}
+	if debNeeded {
+		parts = append(parts, "deb "+fw.DOCA.Deb+" ("+debPkg+")")
+	}
+	if len(missing) > 0 {
+		parts = append(parts, "packages "+strings.Join(missing, ","))
+	}
+	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
 }
+
 
 // stepNeedsMFT is the shared shape of the hardware steps that require host
 // tooling (bfb-install, mlxconfig, mlnx_qos, mlxreg): Done without Mellanox
