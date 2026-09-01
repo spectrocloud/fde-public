@@ -108,12 +108,28 @@ func stepDownloads(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	return v1alpha1.StepDone, "firmware artifacts present and checksum-verified"
 }
 
-// downloadFile fetches url into dest and verifies the payload against
-// wantSHA when one is configured. Every download is logged start-to-finish
-// (URL, destination, bytes, duration, checksum) so pod logs audit exactly
-// what landed on the host (design §2: observable by default).
+// downloadFile ensures url's payload is present at dest with wantSHA
+// verified. A file already at dest that hashes to wantSHA is reused as-is —
+// the spcx cache lives on the host and survives agent restarts and reboots,
+// so re-preps must not re-fetch the 711 MB BFB and 843 MB DOCA deb. Anything
+// else (missing, empty, hash-mismatched — e.g. a rotated upstream artifact)
+// is fetched fresh via .tmp+rename. A local copy cannot be called known-good
+// without a configured checksum, so an empty wantSHA always re-downloads.
+// Every download is logged start-to-finish (URL, destination, bytes,
+// duration, checksum) so pod logs audit exactly what landed on the host
+// (design §2: observable by default).
 func (a *Agent) downloadFile(url, dest, wantSHA string) error {
 	a.logf("download %s -> %s", url, dest)
+	if wantSHA != "" {
+		if info, err := os.Stat(dest); err == nil && info.Size() > 0 {
+			if got := fileSHA256(dest); got == wantSHA {
+				a.logf("reusing %s (%d bytes, sha256 verified) from the local cache", filepath.Base(dest), info.Size())
+				return nil
+			} else if got != "" {
+				a.logf("local %s failed sha256 verification (got %s), re-downloading", filepath.Base(dest), got)
+			}
+		}
+	}
 	// The spcx cache does not exist on a fresh node (found in live testing:
 	// os.Create fails with ENOENT after a perfectly good HTTP 200).
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -157,6 +173,21 @@ func (a *Agent) downloadFile(url, dest, wantSHA string) error {
 	}
 	a.logf("downloaded %s: %d bytes in %s, %s", filepath.Base(dest), n, time.Since(start).Round(time.Millisecond), checksum)
 	return nil
+}
+
+// fileSHA256 hashes a file's contents; "" when unreadable (the caller then
+// treats the copy as unusable and re-downloads).
+func fileSHA256(path string) string {
+	f, err := os.Open(path) // #nosec G304 -- path is the step's own cache destination
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // stepGrubParams detects the desired cmdline parameters (iommu, hugepages)
