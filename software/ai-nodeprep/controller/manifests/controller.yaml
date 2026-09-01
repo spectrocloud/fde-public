@@ -20,7 +20,7 @@ spec:
       serviceAccountName: nodeprep-controller
       containers:
         - name: controller
-          image: ghcr.io/spectrocloud/nodeprep-controller:dev
+          image: docker.io/kreeuwijk/ai-nodeprep:0.1.0-controller
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true

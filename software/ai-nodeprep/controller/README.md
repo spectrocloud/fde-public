@@ -71,17 +71,17 @@ the NodePrep object describe what the bash script *would* have done.
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent
-kind load docker-image ghcr.io/spectrocloud/nodeprep-controller:dev \
-                        ghcr.io/spectrocloud/nodeprep-agent:dev
-make manifests-install
-kubectl -n nodeprep-system set image deploy/nodeprep-controller \
-    controller=ghcr.io/spectrocloud/nodeprep-controller:dev
-kubectl -n nodeprep-system set image ds/nodeprep-agent \
-    agent=ghcr.io/spectrocloud/nodeprep-agent:dev
-make sample                      # apply the example profile
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.0-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.0-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.0-agent
+make manifests-install                     # manifests reference the image tags
+make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true
 ```
+
+`make image-multi` builds and pushes both images for amd64 and arm64 to
+Docker Hub (run `docker login` first); `VERSION=... make image-controller`
+overrides the version.
 
 Watch it work:
 

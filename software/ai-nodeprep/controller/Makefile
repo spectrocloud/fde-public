@@ -1,9 +1,16 @@
 GO      ?= go
 GOFLAGS ?= -mod=mod
-IMG     ?= ghcr.io/spectrocloud/nodeprep
-TAG     ?= dev
+IMG     ?= docker.io/kreeuwijk/ai-nodeprep
+VERSION ?= 0.1.0
+PLATFORMS ?= linux/amd64,linux/arm64
 
-.PHONY: build test vet fmt manifests-install sample clean image image-controller image-agent deploy
+# One repo, two binaries: the component rides in the tag because a single
+# repository cannot hold two images under the same tag. Bump VERSION here
+# together with the image refs in manifests/controller.yaml and agent.yaml.
+TAG_CONTROLLER = $(IMG):$(VERSION)-controller
+TAG_AGENT      = $(IMG):$(VERSION)-agent
+
+.PHONY: build test vet fmt manifests-install sample clean image-controller image-agent image-multi
 
 build: ## Compile both binaries
 	$(GO) build $(GOFLAGS) -o bin/controller ./cmd/controller
@@ -18,11 +25,15 @@ vet:
 fmt:
 	$(GO) fmt ./...
 
-image-controller: ## docker build -f Dockerfile --target controller
-	docker build -f Dockerfile --target controller -t $(IMG)-controller:$(TAG) .
+image-controller: ## Build the controller image for the local platform
+	docker buildx build --load --target controller -t $(TAG_CONTROLLER) .
 
 image-agent:
-	docker build -f Dockerfile --target agent -t $(IMG)-agent:$(TAG) .
+	docker buildx build --load --target agent -t $(TAG_AGENT) .
+
+image-multi: ## Build + push both images for amd64 and arm64 (needs binfmt for the runtime apk layers; docker login first)
+	docker buildx build --platform $(PLATFORMS) --target controller --push -t $(TAG_CONTROLLER) .
+	docker buildx build --platform $(PLATFORMS) --target agent --push -t $(TAG_AGENT) .
 
 manifests-install: ## Apply CRDs + RBAC + workloads
 	kubectl apply -f manifests/
