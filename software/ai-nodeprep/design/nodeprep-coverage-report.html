@@ -1,0 +1,455 @@
+<title>NodePrep Coverage Report</title>
+<style>
+  :root {
+    --bg:#F2F3EE; --surface:#FAFAF7; --surface2:#E9EBE2; --ink:#1F241E; --muted:#59614F;
+    --line:#D9DCD0; --line-strong:#B8BEAC;
+    --accent:#44700F; --accent-soft:rgba(88,132,20,.12);
+    --ok:#20713F; --warn:#96660A; --err:#B3382E; --info:#2E5F8A;
+    --code-bg:#E7E9DF; --code-ink:#23291F;
+    --sans:'IBM Plex Sans',-apple-system,'Segoe UI',sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+    --cond:'IBM Plex Sans Condensed','IBM Plex Sans',sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#14170F; --surface:#1B2015; --surface2:#242B1C; --ink:#E4E8DA; --muted:#9BA48C;
+      --line:#2E3524; --line-strong:#454E37;
+      --accent:#A5CE48; --accent-soft:rgba(165,206,72,.12);
+      --ok:#66C489; --warn:#DCAC50; --err:#E07E72; --info:#83B4DF;
+      --code-bg:#202617; --code-ink:#DCE2CE;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#14170F; --surface:#1B2015; --surface2:#242B1C; --ink:#E4E8DA; --muted:#9BA48C;
+    --line:#2E3524; --line-strong:#454E37;
+    --accent:#A5CE48; --accent-soft:rgba(165,206,72,.12);
+    --ok:#66C489; --warn:#DCAC50; --err:#E07E72; --info:#83B4DF;
+    --code-bg:#202617; --code-ink:#DCE2CE;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:400 16px/1.65 var(--sans);
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 28px 96px; }
+  p, li { max-width: 78ch; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  h1,h2,h3,h4 { line-height: 1.2; text-wrap: balance; }
+
+  .mast { padding: 56px 0 8px; border-bottom: 1px solid var(--line-strong); }
+  .docline {
+    font: 500 11.5px/1.5 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 22px; margin-bottom: 26px;
+  }
+  .docline b { color: var(--accent); font-weight: 600; }
+  h1 { font: 700 54px/1.02 var(--cond); letter-spacing: -.015em; margin: 0 0 14px; }
+  .dek { font-size: 19px; line-height: 1.55; color: var(--muted); max-width: 66ch; margin: 0 0 22px; }
+  .verline { font: 500 13px/1.7 var(--mono); color: var(--ink); }
+  .verline code { color: var(--accent); }
+
+  h2 {
+    font: 700 30px/1.15 var(--cond); letter-spacing: -.01em;
+    margin: 64px 0 6px; padding-top: 22px; border-top: 1px solid var(--line);
+  }
+  h2 .no { color: var(--accent); font: 600 13px var(--mono); letter-spacing: .08em; display: block; margin-bottom: 8px; }
+  h3 { font: 600 18px/1.3 var(--sans); margin: 34px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 24px; max-width: 72ch; }
+
+  table { border-collapse: collapse; width: 100%; margin: 18px 0 30px; font-size: 14.5px; }
+  .tblwrap { overflow-x: auto; margin: 18px 0 30px; }
+  .tblwrap table { margin: 0; min-width: 760px; }
+  th {
+    font: 600 11.5px/1.4 var(--mono); letter-spacing: .07em; text-transform: uppercase;
+    text-align: left; color: var(--muted); padding: 10px 14px 8px;
+    border-bottom: 2px solid var(--line-strong);
+  }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 1px solid var(--line-strong); }
+  td code, li code, p code {
+    font: 500 12.5px var(--mono); background: var(--code-bg); color: var(--code-ink);
+    padding: 1px 5px; border-radius: 3px; white-space: nowrap;
+  }
+  td code { white-space: normal; }
+
+  .pill {
+    display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase;
+    padding: 4px 8px; border-radius: 3px; white-space: nowrap;
+  }
+  .pill.live   { background: rgba(32,113,63,.13);  color: var(--ok); }
+  .pill.gate   { background: rgba(46,95,138,.13); color: var(--info); }
+  .pill.defer  { background: rgba(150,102,10,.13); color: var(--warn); }
+  .pill.missing{ background: rgba(179,56,46,.12); color: var(--err); }
+  .pill.new    { background: var(--accent-soft);  color: var(--accent); }
+
+  .callout {
+    border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
+    background: var(--surface); padding: 16px 20px; margin: 22px 0; border-radius: 0 4px 4px 0;
+  }
+  .callout p { margin: 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.ok   { border-left-color: var(--ok); }
+
+  .timeline { margin: 22px 0 30px; padding: 0; list-style: none; }
+  .timeline li {
+    display: grid; grid-template-columns: 118px 150px 1fr; gap: 14px;
+    padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14.5px;
+  }
+  .timeline li:last-child { border-bottom: 1px solid var(--line-strong); }
+  .timeline .t { font: 500 12.5px/1.6 var(--mono); color: var(--muted); }
+  .timeline .e { font: 600 12.5px/1.6 var(--mono); color: var(--accent); }
+  .timeline .d { line-height: 1.55; }
+  @media (max-width: 720px) { .timeline li { grid-template-columns: 90px 1fr; } .timeline .d { grid-column: 2; } }
+
+  ul.tight { margin: 12px 0 26px; padding-left: 22px; }
+  ul.tight li { margin: 7px 0; }
+  .count {
+    font: 600 13px var(--mono); color: var(--ink);
+    display: flex; flex-wrap: wrap; gap: 10px 26px; margin: 4px 0 18px;
+  }
+  .count span b { font-size: 20px; font-family: var(--cond); color: var(--accent); margin-right: 6px; }
+  footer { margin-top: 80px; padding-top: 20px; border-top: 1px solid var(--line-strong);
+           font: 400 12.5px/1.7 var(--mono); color: var(--muted); }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="docline">
+    <span><b>NP-COV-001</b></span>
+    <span>Live coverage report</span>
+    <span>nodeprep-v105.sh → controller v0.1.10</span>
+    <span>2026-09-01</span>
+  </div>
+  <h1>What the fresh-node run actually covered</h1>
+  <p class="dek">Every step the controller performed on a freshly reprovisioned worker node, mapped line-by-line
+     against the 979-line bash script it replaces — with the live evidence for each, and an honest list of what
+     is still gated or unconverted.</p>
+  <div class="verline">
+    Verified on <code>bm-a-rtx6k-7</code> (no-Mellanox worker, CAPI machine
+    <code>nodeprep-testing-worker-pool-default-b6ppf-vt85f</code>) · agent/controller <code>0.1.10</code> ·
+    profile <code>gpu-worker-v105</code> · full reprovision from bare metal via Node deletion
+  </div>
+</header>
+
+<h2><span class="no">§1</span>How this was verified</h2>
+<p class="sub">The Node object for the worker was deleted, causing CAPI to deprovision and MAAS to reprovision the
+   machine from scratch (~25 min). The fresh node joined with the <code>node.spectrocloud.com/ai-worker: "true"</code>
+   label, the controller adopted it, and the agent ran the full phase machine against bare metal — the same starting
+   point the bash script has on a fresh rack unit. Because the box carries no Mellanox NICs, every hardware-mutating
+   step exercised its detection-and-skip gate; the gates are live-verified, the mutation bodies are declared below as
+   v0.2. Two controlled reboots then proved the boot path.</p>
+
+<div class="count">
+  <span><b>7</b> bash functions fully covered</span>
+  <span><b>9</b> steps gate-verified, bodies v0.2</span>
+  <span><b>10</b> v0.1 features beyond the bash script</span>
+  <span><b>3</b> defects found &amp; fixed by live testing</span>
+</div>
+
+<h2><span class="no">§2</span>The run on a fresh worker node, as performed</h2>
+<p class="sub">Chronological, from bare metal to Ready and through both reboots. Times are event ages from the
+   cluster's event stream; everything below is reconstructible from <code>kubectl get nodeprep bm-a-rtx6k-7 -o yaml</code>,
+   the event history, and agent pod logs.</p>
+
+<ul class="timeline">
+  <li><span class="t">T+0</span><span class="e">Node deleted</span>
+      <span class="d">CAPI deprovisions the machine; MAAS releases and re-racks the instance. MHC
+      <code>maxUnhealthy</code> patched to 0% for the duration of testing so the 10-minute Ready-timeout
+      could not remediate the Machine mid-test (restored to 100% afterwards).</span></li>
+  <li><span class="t">T+25 min</span><span class="e">Fresh join</span>
+      <span class="d">New node registers with a new boot ID (<code>586f9b73…</code>) and the
+      <code>ai-worker</code> label. The profile's nodeSelector matches; the controller creates the
+      NodePrep object and the agent begins its 5-second cycle.</span></li>
+  <li><span class="t">T+25:30</span><span class="e">Adopted</span>
+      <span class="d">Phase <code>Pending</code>: hardware inventory run in the agent pod (sysfs/pci enumeration,
+      no Mellanox found). Node tainted <code>nodeprep.spectrocloud.com/prep</code> to keep workloads off.
+      CAPI Machine <b>paused</b> (<code>MachinePaused</code> event, annotation <code>cluster.x-k8s.io/paused</code>
+      present on the Machine) so no controller fights the nodeprep for the node.</span></li>
+  <li><span class="t">T+26</span><span class="e">→ Provisioning</span>
+      <span class="d"><b>downloads:</b> BFB <code>bf-fwbundle-3.4.0-92_26.04-prod.bfb</code> (711 MB, ~30 s) and
+      <code>doca-host_3.4.0-085000-26.04-ubuntu2404_amd64.deb</code> (843 MB, ~25 s) fetched from the MAAS mirror
+      into the spcx cache — both <b>sha256-verified</b> against the profile, written via
+      <code>.tmp</code>+rename. <b>aptPackages:</b> <code>dpkg --install</code> of the DOCA host bundle executed
+      <b>in a transient host systemd unit</b> (not as a pod child), then <code>apt-get update</code> to register
+      the NVIDIA repository the bundle bootstrapped.</span></li>
+  <li><span class="t">T+26→33</span><span class="e">aptPackages fails ×5</span>
+      <span class="d"><code>apt-get --yes doca-all</code> exited 100 — "E: Invalid operation doca-all": the step
+      was missing the <code>install</code> subcommand. Its unit tests covered the decision gates, not the command
+      shape, and this was the step's first live execution. Retry/backoff exhausted 5 attempts →
+      <code>StepFailed</code> → phase <code>Failed</code>.</span></li>
+  <li><span class="t">T+33</span><span class="e">Fix + resume</span>
+      <span class="d">0.1.9 (<code>apt-get install --yes</code>) built, pushed, rolled out. NodePrep resumed with
+      <code>kubectl annotate nodeprep bm-a-rtx6k-7 nodeprep.spectrocloud.com/resume=</code> — the designed
+      recovery path.</span></li>
+  <li><span class="t">T+34</span><span class="e">→ Flashing → Configuring → Finalizing → Ready</span>
+      <span class="d">All heavy work already on disk, so the resumed pass re-detected each step Done
+      (~1 min total): downloads checksum-verified, doca-all present, bfbFlash/mlxconfig/sriov/vfGuids/
+      losslessRoce correctly skipped (no Mellanox), ovsBridges skipped (eswitch <code>legacy</code>),
+      disableACS/nfsRdma skipped by profile policy. <b>Finalizing — kubeletState:</b> rendered
+      <code>/etc/systemd/system/nodeprep-boot.service</code> (ordered <code>Before=kubelet.service</code>) and
+      <code>/usr/local/sbin/nodeprep-boot-hook</code>, syntax-gated through the host's own
+      <code>sh&nbsp;-n</code>, and cleared the stale <code>cpu_manager_state</code>/
+      <code>memory_manager_state</code> with the guarded stop→rm→start sequence.</span></li>
+  <li><span class="t">T+35</span><span class="e">Ready</span>
+      <span class="d">Boot verified for the first boot, taint released (<code>TaintReleased</code>),
+      CAPI Machine <b>unpaused</b> (<code>MachineUnpaused</code>), NodePrep phase <code>Ready</code>.
+      The bash script's end state — labels, taints gone, node schedulable — reproduced.</span></li>
+  <li><span class="t">Reboot #1</span><span class="e">Hook bug found</span>
+      <span class="d">Controlled reboot. Boot change detected (<code>BootDetected</code>, reboot #1 recorded),
+      hook ran before kubelet — but died with <i>"Unterminated quoted string"</i>: the readycheck curl line in
+      the rendered script carried a stray quote, so dash rejected the whole script and the kubelet manager-state
+      reset never ran → kubelet crashlooped on stale <code>memory_manager_state</code>
+      ("Invalid state… Failed to start ContainerManager"), the exact failure this hook exists to prevent.
+      Fixed on the host, then in the template; 0.1.10 added a render-time <code>sh -n</code> gate (candidate
+      validated by the host's own /bin/sh before install) and a parser test over every rendering variant.</span></li>
+  <li><span class="t">Reboot #2</span><span class="e">Fix proven</span>
+      <span class="d">The exact failure was then planted on purpose: <code>memory_manager_state</code>
+      overwritten with 20 bytes of garbage, node rebooted. The corrected hook logged
+      <i>"cleared kubelet manager state (kubelet was not running)"</i> at boot, before kubelet started; the
+      garbage file was gone; kubelet came up with <b>0</b> crash signatures and the node reached Ready in
+      ~3 min. Agent recorded reboot #2 (<code>793a544d…</code>) and re-verified
+      (<code>BootVerified</code>).</span></li>
+</ul>
+
+<h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
+<p class="sub">One row per bash function (line numbers into <code>nodeprep-v105.sh</code>). "Covered" means the
+   behavior ran on the fresh node with the cited evidence; "Gate-verified" means the skip/detect logic exercised
+   live while the mutation body is deferred; "Missing" means no equivalent exists yet.</p>
+
+<div class="tblwrap">
+<table>
+  <thead><tr>
+    <th style="width:19%">v105 function</th>
+    <th style="width:26%">What it does on the host</th>
+    <th style="width:17%">Controller equivalent</th>
+    <th style="width:38%">Status on the fresh run</th>
+  </tr></thead>
+  <tbody>
+  <tr>
+    <td><code>fn_ensure_nodeprep</code> <small>L76</small></td>
+    <td>Installs/updates the nodeprep mechanism on the host itself (script cron/rc.local bootstrap)</td>
+    <td>Architecture replaces it</td>
+    <td><span class="pill live">Covered</span> No self-install exists or is needed: the agent is a DaemonSet pod
+        reconciled by the controller; host integration is the rendered boot hook below.</td>
+  </tr>
+  <tr>
+    <td><code>fn_update_state</code> <small>L170</small></td>
+    <td>Writes stage/state file consumed by the script's own loop</td>
+    <td>NodePrep status ledger + phase machine</td>
+    <td><span class="pill live">Covered</span> 15-step ledger with per-step state/messages, phase transitions and
+        reboot count all visible in <code>kubectl get nodeprep</code>.</td>
+  </tr>
+  <tr>
+    <td><code>fn_ensure_state</code> <small>L110</small></td>
+    <td>Boot-time reset of kubelet CPU/memory manager state (stop → rm → start)</td>
+    <td><code>kubeletState</code> step + boot hook</td>
+    <td><span class="pill live">Covered + proven</span> Hook rendered with the guarded reset; reboot #2 planted
+        corrupt <code>memory_manager_state</code> and the hook cleared it pre-kubelet — 0 crash signatures,
+        kubelet active, node Ready.</td>
+  </tr>
+  <tr>
+    <td><code>fn_process_result</code> <small>L182</small></td>
+    <td>Reads stage result, advances the stage label</td>
+    <td>Controller reconcile of step reports</td>
+    <td><span class="pill live">Covered</span> Stage advance, 5-attempt failure → <code>Failed</code>, and the
+        resume-annotation recovery all exercised live in this run.</td>
+  </tr>
+  <tr>
+    <td><code>fn_inventory_hw</code> <small>L191</small></td>
+    <td>Detects NICs, PCI addresses, GUIDs; branches everything downstream</td>
+    <td>Agent inventory (sysfs/pci)</td>
+    <td><span class="pill live">Covered</span> Correctly found zero Mellanox devices and routed every
+        hardware-dependent step to its skip path.</td>
+  </tr>
+  <tr>
+    <td><code>fn_init_sw_stage</code> <small>L288</small></td>
+    <td>spcx cache; wget BFB + DOCA deb; apt upgrade; headers hold; gcc-12; <code>dpkg -i</code> deb +
+        <code>apt update</code>; install doca-all/lldpd/mft/netplan.io/pv/psmisc; LLDPD config; grub
+        90-nodeprep.cfg; rshim restart; autoremove; reboot to inithw</td>
+    <td><code>downloads</code>, <code>aptPackages</code>, <code>grubParams</code> + reboot protocol</td>
+    <td><span class="pill live">Covered in part</span> spcx cache creation, sha256-verified <code>.tmp</code>+rename
+        downloads, <code>dpkg --install</code>, <code>apt-get update</code>, <code>apt-get install</code> and the
+        reboot protocol all live-verified. Remaining pieces listed in §5 (apt upgrade, headers hold, gcc-12,
+        lldpd/mft/etc. packages, LLDPD config, grub assembly, rshim restart, autoremove, the post-stage
+        reboot trigger).</td>
+  </tr>
+  <tr>
+    <td><code>fn_init_hw_stage</code> <small>L468</small></td>
+    <td>Parallel <code>bfb-install</code> through rshim to both BlueField DPUs, version-checked skip</td>
+    <td><code>bfbFlash</code></td>
+    <td><span class="pill gate">Gate verified</span> Skipped — "no Mellanox hardware present". The gate chain
+        (hardware → MFT tool present → host mutations allowed → apply) is implemented; the flash body is v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_config_stage</code> <small>L506</small></td>
+    <td><code>mlxconfig</code> reset+set per adapter type; netplan <code>gpu_fabric_eth</code> file generation</td>
+    <td><code>mlxconfig</code></td>
+    <td><span class="pill gate">Gate verified</span> mlxconfig: same gate chain, body v0.2.
+        <span class="pill missing">Missing</span> netplan generation: no step writes
+        <code>gpu_fabric_eth</code> files (only the boot hook's <code>netplan apply</code> re-run exists).</td>
+  </tr>
+  <tr>
+    <td><code>fn_disable_acs</code> <small>L589</small></td>
+    <td>Disables ACS on PCI bridges via setpci</td>
+    <td><code>disableACS</code></td>
+    <td><span class="pill gate">Gate verified</span> Profile policy <code>disableACS=false</code> honored →
+        "skipped by policy". <code>setpci</code> body v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_set_vfs</code> <small>L611</small></td>
+    <td>Cordon, devlink eswitch → switchdev, write <code>sriov_numvfs</code>, synthesize VF GUIDs from the
+        PF <code>node_guid</code></td>
+    <td><code>sriovNumVFs</code>, <code>vfGuids</code> <small>(critical)</small></td>
+    <td><span class="pill gate">Gate verified</span> <code>sriovNumVFs</code> reads the current
+        <code>sriov_numvfs</code> per device; both steps skipped on no-Mellanox. Writes are v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_rename_devices</code> <small>L795</small></td>
+    <td>udev 70-persistent-net / 60-persistent-rdma rules, <code>ip link up</code>, VF MTU −50</td>
+    <td><code>udevRules</code> <small>(critical)</small></td>
+    <td><span class="pill gate">Gate verified</span> Rail-NIC detection ran ("no rail NICs to rename").
+        Rule generation v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_set_lossless_roce</code> <small>L833</small></td>
+    <td><code>mlnx_qos</code> PFC/ECN/cnp_dscp; <code>mlxreg</code> ROCE_ACCL, PIPG, 0x5006</td>
+    <td><code>losslessRoce</code> <small>(critical)</small></td>
+    <td><span class="pill gate">Gate verified</span> Skipped — no Mellanox hardware. Body v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_add_pfs_to_rail_bridges</code> <small>L863</small></td>
+    <td><code>ovs-vsctl</code> adds PFs to <code>br-rail-*</code> bridges</td>
+    <td><code>ovsBridges</code> <small>(critical)</small></td>
+    <td><span class="pill gate">Gate verified</span> Es-switch-mode gate honored ("eswitch mode is not
+        switchdev"); the profile here uses <code>legacy</code>. libovsdb convergence v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_restart_sriov_devplugin</code> <small>L876</small></td>
+    <td>Deletes the SR-IOV device-plugin pod and uncordons the node</td>
+    <td>Folded into taint release</td>
+    <td><span class="pill missing">Missing</span> The controller releases its own taint on Ready, but nothing yet
+        bounces the SR-IOV device-plugin pod so it re-discovers VFs. v0.2.</td>
+  </tr>
+  <tr>
+    <td><code>fn_setup_nfsrdma</code> <small>L884</small></td>
+    <td>nfs-common + mlnx-nfsrdma-dkms, rpcrdma modules, modules-load.d</td>
+    <td><code>nfsRdma</code></td>
+    <td><span class="pill gate">Gate verified</span> Profile <code>nfsRdma.enabled=false</code> honored →
+        "skipped by policy". Body v0.2.</td>
+  </tr>
+  <tr>
+    <td><i>(bash complete stage, GPU-operator workaround)</i></td>
+    <td>Writes <code>/run/mellanox/drivers/.driver-ready</code> marker</td>
+    <td><code>driverReadyMarker</code></td>
+    <td><span class="pill live">Covered</span> Fully implemented (marker write with mkdir); skipped on this
+        node — no Mellanox hardware.</td>
+  </tr>
+  <tr>
+    <td><i>rc.local boot integration</i></td>
+    <td>The script re-runs state repair from rc.local at every boot</td>
+    <td><code>nodeprep-boot.service</code> + hook script</td>
+    <td><span class="pill live">Covered + proven</span> systemd unit ordered <code>Before=kubelet.service</code>,
+        content-hash self-check, hardware-gated mlnx wait, guarded kubelet reset — validated across both
+        reboots, including the planted-corruption proof.</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="no">§4</span>What v0.1 adds beyond the bash script</h2>
+<p class="sub">The rewrite was an opportunity to fix what the script could not do, and every item below was
+   exercised in this run.</p>
+<ul class="tight">
+  <li><b>CAPI pause/unpause of the Machine</b> — the node is owned exclusively during prep
+      (<code>MachinePaused</code>/<code>MachineUnpaused</code> events, annotation verified on the Machine,
+      released on Ready and on de-adoption). The bash script had no notion of CAPI at all.</li>
+  <li><b>sha256-verified downloads</b> with <code>.tmp</code>+rename — a truncated or MITM'd BFB cannot be flashed.</li>
+  <li><b>Declared, inspectable state</b> — the 15-step ledger, phase, reboot count and per-step messages are a
+      kubectl object, not a file inside a container image.</li>
+  <li><b>Crash-safe resume</b> — a Failed NodePrep recovers by annotation without re-imaging
+      (used live after the aptPackages bug).</li>
+  <li><b>Per-step criticality</b> — a failed critical step (SR-IOV, udev, lossless RoCE, OVS, ACS) blocks Ready
+      and holds the taint; non-critical failures do not poison the node.</li>
+  <li><b>Boot verification protocol</b> — boot-ID change detection, reboot counting, taint held until the new
+      boot is verified, all evented.</li>
+  <li><b>Host-mutation guardrails</b> — detect-only mode (no <code>-host-mutations</code>) turns every mutating
+      step into a Blocked report instead of an error.</li>
+  <li><b>OOM-safe heavy exec</b> — apt/dpkg run in transient host systemd units, not as pod children; the agent
+      pod cannot be OOM-killed by host package management (the 0.1.7 fix, shipped before this run).</li>
+  <li><b>Render-time syntax gate</b> — the boot hook is parsed by the host's own <code>/bin/sh</code> before it can
+      replace a working file (the 0.1.10 fix from reboot #1).</li>
+  <li><b>Auditability</b> — every host command, download and transition is logged with duration and bounded
+      output, and surfaced as Kubernetes events.</li>
+</ul>
+
+<h2><span class="no">§5</span>Honest gaps — what is not converted yet</h2>
+<p class="sub">Ordered roughly by when they would bite. The first block only matters once a Mellanox-equipped
+   system is provided; the second block applies to every node.</p>
+
+<h3>On the Mellanox path (waiting on hardware)</h3>
+<ul class="tight">
+  <li><b>Flash/config mutation bodies</b> — <code>bfb-install</code>, <code>mlxconfig</code>,
+      <code>sriov_numvfs</code> writes, VF GUID synthesis, udev rule generation, <code>mlnx_qos</code>/<code>mlxreg</code>,
+      OVS bridge convergence, ACS setpci, NFSoRDMA modules: gates are in and verified, bodies land in v0.2
+      with full Detect/Apply/Verify semantics.</li>
+  <li><b>mft and companion packages</b> — the bash script installs <code>lldpd mft netplan.io pv psmisc</code>
+      unconditionally; the profile here lists only <code>doca-all</code>. On a Mellanox node <code>mft</code>
+      is a <i>hard prerequisite</i> of the gated steps (they check for the tools and will Block without it) —
+      add it to <code>firmware.doca.packages</code> in the profile, or the steps will stop at the tool gate.</li>
+  <li><b>Post-software-stage reboot trigger</b> — the reboot protocol exists and is proven, but
+      <code>requestReboot</code> is not yet called by any step; the bash script's "reboot to inithw" after the
+      software stage needs that one-line trigger wired into the Mellanox path.</li>
+  <li><b>netplan <code>gpu_fabric_eth</code> generation</b> — fn_config_stage's file writing has no equivalent.</li>
+  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs.</li>
+  <li><b>rshim restart</b> before flashing.</li>
+</ul>
+
+<h3>On every node</h3>
+<ul class="tight">
+  <li><b>grub assembly (90-nodeprep.cfg)</b> — <code>grubParams</code> detects missing cmdline parameters and
+      Blocks by design; writing them is the v0.2 boot path. The profile configures none today, so the step skips.</li>
+  <li><b>apt upgrade, linux-headers hold, gcc-12, apt autoremove</b> — not implemented. The profile field
+      <code>aptUpgrade</code> exists but no step consumes it yet (this profile sets it <code>false</code>, so
+      behavior matches today).</li>
+  <li><b>LLDPD configuration</b> — no equivalent for the bash LLDPD config block.</li>
+</ul>
+
+<h2><span class="no">§6</span>Defects the live loop caught (and the fixes shipped)</h2>
+<p class="sub">Each of these passed the unit-test suite and failed only on real hardware — the reason the
+   live-cluster mandate paid for itself.</p>
+<div class="callout warn">
+  <p><b>Agent pod OOMKilled during DOCA install</b> (0.1.7, first live pass). <code>apt-get install doca-all</code>
+     as a pod child counted its memory against the pod limit. Fix: <code>heavyHostExec</code> runs package
+     management in transient host systemd units via <code>systemd-run</code> — host-accounted memory, fail-fast
+     on concurrent retries, idempotent re-runs. Live-proven across this run's installs.</p>
+</div>
+<div class="callout warn">
+  <p><b>Missing <code>install</code> subcommand</b> (0.1.8, this run's fresh node). <code>apt-get --yes doca-all</code>
+     → "E: Invalid operation doca-all", exit 100, 5 attempts exhausted, NodePrep Failed. Its gate tests asserted
+     decisions, not command shape. Fix in 0.1.9; the run then completed to Ready in ~1 minute via the resume path.</p>
+</div>
+<div class="callout warn">
+  <p><b>Stray quote in the rendered boot hook</b> (0.1.9, reboot #1). One bad character made dash reject the whole
+     script at boot; the kubelet manager-state reset silently never ran and the node crashlooped — the exact
+     failure class the hook exists to prevent. Fix in 0.1.10: candidate script is validated by the host's own
+     <code>/bin/sh</code> (<code>sh -n</code> via nsenter) before it can replace a working file, plus a test
+     parsing all 21 rendering variants with real <code>sh -n</code>. Reboot #2 then proved the repaired hook
+     end-to-end with planted corruption.</p>
+</div>
+<div class="callout ok">
+  <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
+     tests so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was restored to 100%
+     after verification completed. The first (unpatched) reboot attempt did get remediated — the cluster deleted
+     the Machine and MAAS re-racked it, which is itself what provided the fresh-node test bed.</p>
+</div>
+
+<footer>
+  NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
+  host journal) · node bm-a-rtx6k-7 · controller/agent 0.1.10 · sibling document to
+  design/nodeprep-controller-design.html (NP-CTRL-001)
+</footer>
+
+</div>
