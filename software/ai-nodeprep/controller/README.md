@@ -37,7 +37,10 @@ Real, exercised end-to-end:
   and force re-verification before the taint is released.
 - **CAPI absorption** (§6.3): Machines matching `status.nodeRef.name` are
   paused (`cluster.x-k8s.io/paused`) while prepping and unpaused at Ready;
-  a Failed NodePrep stays paused. No Machine CRD → logic skips itself.
+  a Failed NodePrep stays paused; de-adoption releases the Machine. Every
+  pause/unpause transition is logged and emitted as an event — found in live
+  testing, an applied-but-silent pause reads exactly like a missing one. No
+  Machine CRD → logic skips itself (re-probed when `capiPause` is set).
 - **Fleet windows** (§9.1): `maxConcurrentFlashes` flash admission and serial
   control-plane quorum admission, expressed as conditions the agent gates on.
 - **Inventory**: PCI scan of GPUs (0x10de) and Mellanox (0x15b3) via sysfs,
@@ -78,9 +81,9 @@ the NodePrep object describe what the bash script *would* have done.
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.6-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.6-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.6-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.7-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.7-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.7-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

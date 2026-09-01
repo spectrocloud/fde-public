@@ -389,8 +389,13 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	hb := profile.Spec.HostBoot
 	mode := hb.KubeletStateReset
-	if mode == "" || mode == "off" {
-		return v1alpha1.StepDone, "skipped: kubeletStateReset off"
+	resetWanted := mode == "always" || mode == "readyCheck"
+	// The boot hook carries two duties (design §6.2): the guarded kubelet
+	// manager-state reset and the mlnx_interface_mgr wait. Install it when
+	// either is configured — not only for the kubelet reset.
+	hookWanted := hb.BootHookOn() && (resetWanted || hb.MlnxInterfaceMgr == "wait" || hb.MlnxInterfaceMgr == "disable")
+	if !resetWanted && !hookWanted {
+		return v1alpha1.StepDone, "skipped: no boot duties configured (kubeletStateReset off, mlnxInterfaceMgr off)"
 	}
 	stale := staleKubeletStateFiles(a.hostKubeletDir)
 	if !a.mutationsAllowed(profile) {
@@ -402,6 +407,9 @@ func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 	hookMsg, err := a.ensureBootHook(profile)
 	if err != nil {
 		return v1alpha1.StepFailed, "boot hook: " + err.Error()
+	}
+	if !resetWanted {
+		return v1alpha1.StepDone, hookMsg
 	}
 	if len(stale) == 0 {
 		return v1alpha1.StepDone, hookMsg + "; kubelet manager state files absent"

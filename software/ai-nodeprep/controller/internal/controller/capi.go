@@ -41,6 +41,13 @@ func machineCRDExists(ctx context.Context, dyn dynamic.Interface) bool {
 	return false
 }
 
+// probeMachineCRD is machineCRDExists without the log lines — for periodic
+// re-probes, where a repeated "not found" would just be noise.
+func probeMachineCRD(ctx context.Context, dyn dynamic.Interface) bool {
+	_, err := dyn.Resource(machineGVR).List(ctx, metav1.ListOptions{Limit: 1})
+	return err == nil
+}
+
 // findMachineForNode locates the CAPI Machine whose status.nodeRef.name is
 // the node — same lookup as the legacy controller.
 func findMachineForNode(ctx context.Context, dyn dynamic.Interface, nodeName string) (*unstructured.Unstructured, bool) {
@@ -60,52 +67,69 @@ func findMachineForNode(ctx context.Context, dyn dynamic.Interface, nodeName str
 	return nil, false
 }
 
-func setMachinePause(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured) {
-	annotations := m.GetAnnotations()
-	if annotations != nil {
-		if _, ok := annotations[v1alpha1.CAPAPauseAnnotation]; ok {
-			return
-		}
+// setMachinePause applies the pause annotation and reports whether the
+// Machine's state actually changed. No-op when already paused.
+func setMachinePause(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured) (bool, error) {
+	if _, ok := m.GetAnnotations()[v1alpha1.CAPAPauseAnnotation]; ok {
+		return false, nil
 	}
-	patchMachineAnnotation(ctx, dyn, m, map[string]interface{}{v1alpha1.CAPAPauseAnnotation: ""})
+	return true, patchMachineAnnotation(ctx, dyn, m, map[string]interface{}{v1alpha1.CAPAPauseAnnotation: ""})
 }
 
-func clearMachinePause(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured) {
-	annotations := m.GetAnnotations()
-	if annotations == nil {
-		return
+// clearMachinePause removes the pause annotation and reports whether the
+// Machine's state actually changed. No-op when not paused.
+func clearMachinePause(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured) (bool, error) {
+	if _, ok := m.GetAnnotations()[v1alpha1.CAPAPauseAnnotation]; !ok {
+		return false, nil
 	}
-	if _, ok := annotations[v1alpha1.CAPAPauseAnnotation]; !ok {
-		return
-	}
-	patchMachineAnnotation(ctx, dyn, m, map[string]interface{}{v1alpha1.CAPAPauseAnnotation: nil})
+	return true, patchMachineAnnotation(ctx, dyn, m, map[string]interface{}{v1alpha1.CAPAPauseAnnotation: nil})
 }
 
-func patchMachineAnnotation(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured, ann map[string]interface{}) {
+func patchMachineAnnotation(ctx context.Context, dyn dynamic.Interface, m *unstructured.Unstructured, ann map[string]interface{}) error {
 	patch, err := json.Marshal(map[string]interface{}{
 		"metadata": map[string]interface{}{"annotations": ann},
 	})
 	if err != nil {
-		return
+		return err
 	}
 	_, err = dyn.Resource(machineGVR).Namespace(m.GetNamespace()).
 		Patch(ctx, m.GetName(), types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		fmt.Printf("[nodeprep] failed patching Machine %s/%s: %v\n", m.GetNamespace(), m.GetName(), err)
 	}
+	return err
 }
 
 // reconcileCAPAPause pauses the node's Machine while nodeprep owns it and
 // unpauses at Ready. A Failed NodePrep stays paused: MachineHealthCheck
 // recreating a half-flashed node is worse than a loud object (design §6.3).
-func reconcileCAPAPause(ctx context.Context, dyn dynamic.Interface, nodeName string, phase v1alpha1.Phase, paused bool) {
+// Every state change is described in the returned message so the caller can
+// log it and emit an event — a pause that is applied or fails silently is
+// invisible to exactly the operator debugging why CAPI stopped reconciling
+// (found in live testing: the annotation was believed absent because
+// nothing ever said it had been applied).
+func reconcileCAPAPause(ctx context.Context, dyn dynamic.Interface, nodeName string, phase v1alpha1.Phase, paused bool) (string, error) {
 	m, found := findMachineForNode(ctx, dyn, nodeName)
 	if !found {
-		return
+		return "", nil
 	}
+	where := fmt.Sprintf("Machine %s/%s", m.GetNamespace(), m.GetName())
 	if paused {
-		setMachinePause(ctx, dyn, m)
-	} else {
-		clearMachinePause(ctx, dyn, m)
+		changed, err := setMachinePause(ctx, dyn, m)
+		if err != nil {
+			return "", fmt.Errorf("pausing %s: %v", where, err)
+		}
+		if changed {
+			return where + " paused while nodeprep owns the node (phase " + string(phase) + ")", nil
+		}
+		return "", nil
 	}
+	changed, err := clearMachinePause(ctx, dyn, m)
+	if err != nil {
+		return "", fmt.Errorf("unpausing %s: %v", where, err)
+	}
+	if changed {
+		return where + " unpaused: nodeprep reached Ready", nil
+	}
+	return "", nil
 }

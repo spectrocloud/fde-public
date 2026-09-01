@@ -44,6 +44,11 @@ type Controller struct {
 	// noProfileLogged remembers nodes already reported as matching no
 	// profile, so the 30s informer resync does not repeat the line forever.
 	noProfileLogged map[string]bool
+	// lastCRDProbe throttles the periodic Machine-CRD re-probe: the CRD is
+	// detected once at startup, but a Machine CRD installed after the
+	// controller started (fresh-cluster bootstrap ordering) would never be
+	// seen again without it.
+	lastCRDProbe time.Time
 }
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, ns string) *Controller {
@@ -83,6 +88,18 @@ func (c *Controller) enqueue(ctx context.Context, obj interface{}) {
 	// behind the informer's delivery. A workqueue is warranted when the
 	// flash window and CP admission see production scale.
 	c.reconcileNode(ctx, node.Name)
+}
+
+// reprobeMachineCRD re-checks for the Machine CRD at most once a minute,
+// so a CRD registered after controller start is picked up without turning
+// a non-CAPI cluster's every reconcile into a List.
+func (c *Controller) reprobeMachineCRD(ctx context.Context) bool {
+	if time.Since(c.lastCRDProbe) < time.Minute {
+		return c.machineCRD
+	}
+	c.lastCRDProbe = time.Now()
+	c.machineCRD = probeMachineCRD(ctx, c.dyn)
+	return c.machineCRD
 }
 
 // matchProfile returns the first profile whose nodeSelector matches the node
@@ -163,7 +180,21 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 	if profile == nil {
 		if np != nil {
 			// De-adopted: leave the object for the operator (design §10);
-			// it stays as the audit record of what ran.
+			// it stays as the audit record of what ran. But release the
+			// Machine — a stale pause annotation would block CAPI from
+			// reconciling the Machine forever, with no NodePrep left to
+			// ever remove it.
+			if c.machineCRD || c.reprobeMachineCRD(ctx) {
+				if m, found := findMachineForNode(ctx, c.dyn, node.Name); found {
+					if changed, err := clearMachinePause(ctx, c.dyn, m); err != nil {
+						fmt.Printf("[nodeprep] de-adoption: %v\n", err)
+					} else if changed {
+						msg := fmt.Sprintf("Machine %s/%s unpaused: node %s no longer matches any profile", m.GetNamespace(), m.GetName(), node.Name)
+						k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, np.Name, corev1.EventTypeNormal, "MachineUnpaused", msg)
+						fmt.Printf("[nodeprep] %s\n", msg)
+					}
+				}
+			}
 			fmt.Printf("[nodeprep] node %s no longer matches any profile; NodePrep retained\n", nodeName)
 		} else if !c.noProfileLogged[nodeName] {
 			// The most common "nothing happens" state: the controller is up
@@ -309,8 +340,23 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 	c.applyNodeChanges(ctx, node, wantTaint, labelsWant, phase, np.Name)
 
 	// --- CAPI pause ---
-	if pol.CAPause && c.machineCRD {
-		reconcileCAPAPause(ctx, c.dyn, node.Name, phase, phase != v1alpha1.PhaseReady)
+	if pol.CAPause {
+		if !c.machineCRD {
+			c.reprobeMachineCRD(ctx)
+		}
+		if c.machineCRD {
+			if msg, err := reconcileCAPAPause(ctx, c.dyn, node.Name, phase, phase != v1alpha1.PhaseReady); err != nil {
+				k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, np.Name, corev1.EventTypeWarning, "CAPAPauseFailed", err.Error())
+				fmt.Printf("[nodeprep] %v\n", err)
+			} else if msg != "" {
+				reason := "MachinePaused"
+				if phase == v1alpha1.PhaseReady {
+					reason = "MachineUnpaused"
+				}
+				k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, np.Name, corev1.EventTypeNormal, reason, msg)
+				fmt.Printf("[nodeprep] %s\n", msg)
+			}
+		}
 	}
 
 	// --- Conditions ---
