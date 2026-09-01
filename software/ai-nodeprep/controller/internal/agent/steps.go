@@ -108,6 +108,11 @@ func stepDownloads(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 }
 
 func downloadFile(url, dest, wantSHA string) error {
+	// The spcx cache does not exist on a fresh node (found in live testing:
+	// os.Create fails with ENOENT after a perfectly good HTTP 200).
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(dest), err)
+	}
 	tmp := dest + ".tmp"
 	resp, err := http.Get(url) // #nosec G107 -- source is operator-configured (MAAS/TFTP mirror)
 	if err != nil {

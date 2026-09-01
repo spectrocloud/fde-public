@@ -53,13 +53,19 @@ type Agent struct {
 	// noPrepLogged keeps the "no NodePrep yet" line to one occurrence
 	// instead of one per poll cycle.
 	noPrepLogged bool
+
+	// backoffUntil paces re-running steps that just Failed (design §5.1
+	// retry budget): in-memory, doubling with each consecutive failure,
+	// cleared on success and on the resume annotation.
+	backoffUntil map[string]time.Time
 }
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations bool, rebootCommand string) *Agent {
 	return &Agent{
 		client: client, dyn: dyn, nodeName: nodeName, ns: ns,
 		interval: interval, allowReboot: allowReboot, hostMutations: hostMutations,
-		rebootCommand:  rebootCommand,
+		rebootCommand: rebootCommand,
+		backoffUntil:  map[string]time.Time{},
 		hostKubeletDir: "/host/var/lib/kubelet",
 		hostEtcUdev:    "/host/etc/udev/rules.d",
 		hostRunDir:     "/host/run",
@@ -230,6 +236,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	if np.Status.Phase == v1alpha1.PhaseFailed {
 		if _, ok := np.Annotations[v1alpha1.ResumeAnnotation]; ok {
 			if err := a.removeAnnotation(ctx, v1alpha1.ResumeAnnotation); err == nil {
+				a.backoffUntil = map[string]time.Time{}
 				steps := np.Status.Steps
 				for i := range steps {
 					if steps[i].State == v1alpha1.StepFailed {
@@ -309,10 +316,14 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 	ledger := ensureSteps(np.Status.Steps, steps)
 	np.Status.Steps = ledger
 
-	blocked, failed := false, false
+	blocked, failed, allDone := false, false, true
 	for i, def := range stepsForStage(phase) {
 		s := &ledger[i]
 		if s.State == v1alpha1.StepDone {
+			continue
+		}
+		if until, ok := a.backoffUntil[s.Name]; ok && time.Now().Before(until) {
+			allDone = false // pacing a recent failure; retry on a later cycle
 			continue
 		}
 		state, msg := def.run(a, np, profile)
@@ -322,12 +333,23 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 			s.State = v1alpha1.StepDone
 			now := metav1.Now()
 			s.CompletedAt = &now
+			delete(a.backoffUntil, s.Name)
 		case v1alpha1.StepBlocked:
 			s.State = v1alpha1.StepBlocked
 			blocked = true
+			allDone = false
 		case v1alpha1.StepFailed:
 			s.Attempts++
 			s.State = v1alpha1.StepFailed
+			allDone = false
+			// Pacing: hold the step back for a doubling interval so a
+			// flaky mirror cannot burn the whole budget in one poll window
+			// (in-memory only; an agent restart just resets the pacing).
+			wait := a.interval << min(s.Attempts-1, 5)
+			if wait > 2*time.Minute {
+				wait = 2 * time.Minute
+			}
+			a.backoffUntil[s.Name] = time.Now().Add(wait)
 			if s.Attempts >= maxStepAttempts {
 				failed = true
 			}
@@ -346,6 +368,9 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 	}
 	if blocked {
 		return // hold phase; the Ready condition names the blocked step
+	}
+	if !allDone {
+		return // a step is Failed under budget; hold and retry — never advance past it
 	}
 
 	// Stage complete → advance.
