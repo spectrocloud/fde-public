@@ -28,8 +28,9 @@ func TestDownloadFile(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "opt/spectrocloud/spcx/bfb", "test.bfb")
+	a := &Agent{} // logf only needs the receiver
 
-	if err := downloadFile(srv.URL+"/artifacts", dest, want); err != nil {
+	if err := a.downloadFile(srv.URL+"/artifacts", dest, want); err != nil {
 		t.Fatalf("download into a missing directory: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -43,10 +44,10 @@ func TestDownloadFile(t *testing.T) {
 		t.Fatalf("tmp file left behind")
 	}
 
-	if err := downloadFile(srv.URL+"/artifacts", dest, "deadbeef"); err == nil {
+	if err := a.downloadFile(srv.URL+"/artifacts", dest, "deadbeef"); err == nil {
 		t.Fatalf("sha256 mismatch not detected")
 	}
-	if err := downloadFile(srv.URL+"/missing", dest, ""); err == nil {
+	if err := a.downloadFile(srv.URL+"/missing", dest, ""); err == nil {
 		t.Fatalf("HTTP 404 not detected")
 	}
 }

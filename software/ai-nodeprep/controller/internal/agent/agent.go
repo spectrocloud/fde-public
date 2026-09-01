@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"os/exec"
 	"strings"
 	"time"
@@ -81,7 +82,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read boot_id: %w", err)
 	}
-	fmt.Printf("[nodeprep-agent] starting on node %s, boot %s\n", a.nodeName, bootID)
+	a.logf("starting on node %s, boot %s", a.nodeName, bootID)
 
 	t := time.NewTicker(a.interval)
 	defer t.Stop()
@@ -136,7 +137,15 @@ func (a *Agent) fetchProfile(ctx context.Context, np *v1alpha1.NodePrep) (*v1alp
 	return p, nil
 }
 
+// logf prints the agent's log line. Every host action, step result, and
+// phase transition flows through here (design §2: observable by default),
+// so pod logs alone tell an operator what the agent did and why.
+func (a *Agent) logf(format string, args ...interface{}) {
+	fmt.Printf("[nodeprep-agent] "+format+"\n", args...)
+}
+
 func (a *Agent) emit(ctx context.Context, eventType, reason, message string) {
+	a.logf("event %s %s: %s", eventType, reason, message)
 	k8sutil.Emit(ctx, a.client, v1alpha1.NodePrepKind, a.nodeName, eventType, reason, message)
 }
 
@@ -152,11 +161,10 @@ func (a *Agent) patchStatus(ctx context.Context, partial map[string]interface{})
 
 func (a *Agent) setPhase(ctx context.Context, phase v1alpha1.Phase, reason, message string) {
 	if err := a.patchStatus(ctx, map[string]interface{}{"phase": string(phase)}); err != nil {
-		fmt.Printf("[nodeprep-agent] phase patch to %s failed: %v\n", phase, err)
+		a.logf("phase patch to %s failed: %v", phase, err)
 		return
 	}
-	a.emit(ctx, corev1.EventTypeNormal, "PhaseTransition", fmt.Sprintf("phase %s: %s", phase, message))
-	fmt.Printf("[nodeprep-agent] phase -> %s (%s)\n", phase, reason)
+	a.emit(ctx, corev1.EventTypeNormal, "PhaseTransition", fmt.Sprintf("phase -> %s (%s): %s", phase, reason, message))
 }
 
 // cycle is one reconciliation pass.
@@ -168,7 +176,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		// Log once so an idle agent is explainable from its logs alone.
 		if !a.noPrepLogged {
 			a.noPrepLogged = true
-			fmt.Printf("[nodeprep-agent] no NodePrep object for node %s yet (%v); waiting for the controller to adopt it\n", a.nodeName, err)
+			a.logf("no NodePrep object for node %s yet (%v); waiting for the controller to adopt it", a.nodeName, err)
 		}
 		return
 	}
@@ -181,7 +189,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	if np.Status.Phase == "" {
 		np.Status.Phase = v1alpha1.PhasePending
 		if err := a.patchStatus(ctx, map[string]interface{}{"phase": string(v1alpha1.PhasePending)}); err != nil {
-			fmt.Printf("[nodeprep-agent] initial phase patch failed: %v\n", err)
+			a.logf("initial phase patch failed: %v", err)
 			return
 		}
 	}
@@ -222,11 +230,11 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			"conditions": conds,
 			"steps":      steps,
 		}); err != nil {
-			fmt.Printf("[nodeprep-agent] boot sync failed: %v\n", err)
+			a.logf("boot sync failed: %v", err)
 			return
 		}
 		if changedBoot {
-			a.emit(ctx, corev1.EventTypeNormal, "BootDetected", fmt.Sprintf("boot %s detected; reboot %d recorded (design §5.2)", bootID, total))
+			a.emit(ctx, corev1.EventTypeNormal, "BootDetected", fmt.Sprintf("boot changed %s -> %s; reboot #%d recorded", np.Status.BootID, bootID, total))
 			np.Status.BootID = bootID
 			np.Status.Conditions = conds
 		}
@@ -253,7 +261,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 
 	// Refresh inventory each cycle (cheap, sysfs-only in v0.1).
 	if err := a.refreshInventory(ctx, np, profile); err != nil {
-		fmt.Printf("[nodeprep-agent] inventory: %v\n", err)
+		a.logf("inventory scan failed: %v", err)
 	}
 
 	// Run the current stage.
@@ -277,13 +285,19 @@ func (a *Agent) removeAnnotation(ctx context.Context, key string) error {
 	return err
 }
 
-// refreshInventory scans sysfs and writes nics/gpus to status.
+// refreshInventory scans sysfs and writes nics/gpus to status. The patch and
+// its log line fire only when the scan changed, so an idle node does not
+// churn the NodePrep's resourceVersion every poll cycle.
 func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) error {
 	nics, gpus, mellanox, err := scanInventory(profile)
 	if err != nil {
 		return err
 	}
 	a.mellanoxFns = mellanox
+	if reflect.DeepEqual(np.Status.Nics, nics) && reflect.DeepEqual(np.Status.Gpus, gpus) {
+		return nil
+	}
+	a.logf("inventory: %d NIC(s), %d GPU(s), %d Mellanox function(s)", len(nics), len(gpus), len(mellanox))
 	np.Status.Nics = nics
 	np.Status.Gpus = gpus
 	return a.patchStatus(ctx, map[string]interface{}{
@@ -326,8 +340,10 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 			allDone = false // pacing a recent failure; retry on a later cycle
 			continue
 		}
+		prev := *s
 		state, msg := def.run(a, np, profile)
 		s.Message = msg
+		var wait time.Duration
 		switch state {
 		case v1alpha1.StepDone:
 			s.State = v1alpha1.StepDone
@@ -345,7 +361,7 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 			// Pacing: hold the step back for a doubling interval so a
 			// flaky mirror cannot burn the whole budget in one poll window
 			// (in-memory only; an agent restart just resets the pacing).
-			wait := a.interval << min(s.Attempts-1, 5)
+			wait = a.interval << min(s.Attempts-1, 5)
 			if wait > 2*time.Minute {
 				wait = 2 * time.Minute
 			}
@@ -354,9 +370,24 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 				failed = true
 			}
 		}
+		// Every step result change is logged, so pod logs alone tell an
+		// operator what ran and why (design §2). Unchanged results stay
+		// silent to keep the 5s poll from spamming.
+		if s.State != prev.State || s.Message != prev.Message || s.Attempts != prev.Attempts {
+			switch s.State {
+			case v1alpha1.StepDone:
+				a.logf("step %s done: %s", def.name, s.Message)
+			case v1alpha1.StepBlocked:
+				a.logf("step %s blocked: %s", def.name, s.Message)
+			case v1alpha1.StepFailed:
+				a.logf("step %s failed (attempt %d/%d, retry in %s): %s", def.name, s.Attempts, maxStepAttempts, wait, s.Message)
+			default:
+				a.logf("step %s -> %s: %s", def.name, s.State, s.Message)
+			}
+		}
 	}
 	if err := a.patchStatus(ctx, map[string]interface{}{"steps": ledger}); err != nil {
-		fmt.Printf("[nodeprep-agent] step ledger patch failed: %v\n", err)
+		a.logf("step ledger patch failed: %v", err)
 	}
 
 	if failed {
@@ -497,13 +528,14 @@ func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 	a.emit(ctx, corev1.EventTypeNormal, "Rebooting", "nodeprep-initiated reboot (design §5.2)")
 	go func() {
 		time.Sleep(60 * time.Second) // status-write grace, as shutdown -r +1
+		a.logf("executing reboot command: %s", a.rebootCommand)
 		parts := strings.Fields(a.rebootCommand)
 		if len(parts) == 0 {
 			return
 		}
 		cmd := exec.Command(parts[0], parts[1:]...) // #nosec G204 -- operator-configured command
 		if out, err := cmd.CombinedOutput(); err != nil {
-			fmt.Printf("[nodeprep-agent] reboot command failed: %v: %s\n", err, out)
+			a.logf("reboot command failed: %v: %s", err, out)
 		}
 	}()
 }

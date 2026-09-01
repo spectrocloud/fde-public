@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -94,26 +95,32 @@ func stepDownloads(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	}
 	if fw.BFB.Name != "" {
 		url := strings.TrimSuffix(fw.Source, "/") + "/firmware/bfb/" + fw.BFB.Name
-		if err := downloadFile(url, filepath.Join(a.bfbDir(), fw.BFB.Name), fw.BFB.SHA256); err != nil {
+		if err := a.downloadFile(url, filepath.Join(a.bfbDir(), fw.BFB.Name), fw.BFB.SHA256); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("BFB download: %v", err)
 		}
 	}
 	if fw.DOCA.Deb != "" {
 		url := strings.TrimSuffix(fw.Source, "/") + "/" + fw.DOCA.Deb
-		if err := downloadFile(url, filepath.Join(a.spcxDir(), fw.DOCA.Deb), fw.DOCA.SHA256); err != nil {
+		if err := a.downloadFile(url, filepath.Join(a.spcxDir(), fw.DOCA.Deb), fw.DOCA.SHA256); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("DOCA deb download: %v", err)
 		}
 	}
 	return v1alpha1.StepDone, "firmware artifacts present and checksum-verified"
 }
 
-func downloadFile(url, dest, wantSHA string) error {
+// downloadFile fetches url into dest and verifies the payload against
+// wantSHA when one is configured. Every download is logged start-to-finish
+// (URL, destination, bytes, duration, checksum) so pod logs audit exactly
+// what landed on the host (design §2: observable by default).
+func (a *Agent) downloadFile(url, dest, wantSHA string) error {
+	a.logf("download %s -> %s", url, dest)
 	// The spcx cache does not exist on a fresh node (found in live testing:
 	// os.Create fails with ENOENT after a perfectly good HTTP 200).
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(dest), err)
 	}
 	tmp := dest + ".tmp"
+	start := time.Now()
 	resp, err := http.Get(url) // #nosec G107 -- source is operator-configured (MAAS/TFTP mirror)
 	if err != nil {
 		return err
@@ -127,7 +134,8 @@ func downloadFile(url, dest, wantSHA string) error {
 		return err
 	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
+	n, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -135,14 +143,20 @@ func downloadFile(url, dest, wantSHA string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
+	checksum := "sha256 not verified (none configured)"
 	if wantSHA != "" {
 		got := hex.EncodeToString(h.Sum(nil))
 		if got != wantSHA {
 			os.Remove(tmp)
 			return fmt.Errorf("sha256 mismatch for %s: got %s want %s", filepath.Base(dest), got, wantSHA)
 		}
+		checksum = "sha256 verified"
 	}
-	return os.Rename(tmp, dest)
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	a.logf("downloaded %s: %d bytes in %s, %s", filepath.Base(dest), n, time.Since(start).Round(time.Millisecond), checksum)
+	return nil
 }
 
 // stepGrubParams detects the desired cmdline parameters (iommu, hugepages)
@@ -343,6 +357,7 @@ func stepDriverReady(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	if err := os.WriteFile(path, nil, 0o644); err != nil { // #nosec G306 -- marker file, world-readable by design
 		return v1alpha1.StepFailed, fmt.Sprintf("write driver-ready: %v", err)
 	}
+	a.logf("wrote driver-ready marker %s (GPU Operator GDS workaround)", path)
 	return v1alpha1.StepDone, "driver-ready marker written (GPU Operator GDS workaround)"
 }
 
