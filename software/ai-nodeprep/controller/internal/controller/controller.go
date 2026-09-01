@@ -207,7 +207,7 @@ func (c *Controller) adoptNode(ctx context.Context, node *corev1.Node, profile *
 	if hasLegacy {
 		p, err := phases.FromLegacy(legacy)
 		if err != nil {
-			k8sutil.Emit(ctx, c.client, c.ns, v1alpha1.NodePrepKind, node.Name, corev1.EventTypeWarning, "UnknownLegacyState",
+			k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, node.Name, corev1.EventTypeWarning, "UnknownLegacyState",
 				fmt.Sprintf("legacy label %s=%q is unknown; starting from Pending", v1alpha1.LegacyLabel, legacy))
 		} else {
 			phase = p
@@ -226,10 +226,6 @@ func (c *Controller) adoptNode(ctx context.Context, node *corev1.Node, profile *
 			}},
 		},
 		Spec: v1alpha1.NodePrepSpec{NodeName: node.Name, ProfileRef: v1alpha1.ProfileRef{Name: profile.Name}},
-		Status: v1alpha1.NodePrepStatus{
-			Phase:                     phase,
-			ObservedProfileGeneration: profile.Generation,
-		},
 	}
 	raw, err := json.Marshal(np)
 	if err != nil {
@@ -239,17 +235,36 @@ func (c *Controller) adoptNode(ctx context.Context, node *corev1.Node, profile *
 	if err != nil {
 		return nil, err
 	}
-	created, err := c.dyn.Resource(nodePrepsGVR).Create(ctx, u.(*unstructured.Unstructured), metav1.CreateOptions{})
+	if _, err := c.dyn.Resource(nodePrepsGVR).Create(ctx, u.(*unstructured.Unstructured), metav1.CreateOptions{}); err != nil {
+		return nil, err
+	}
+	// CRDs with a status subresource ignore status on CREATE; the initial
+	// phase has to be written through the subresource. Found in live testing:
+	// without this the agent saw an empty phase and idled in UnknownPhase.
+	patch, err := json.Marshal(map[string]interface{}{"status": map[string]interface{}{
+		"phase":                     phase,
+		"observedProfileGeneration": profile.Generation,
+	}})
 	if err != nil {
 		return nil, err
 	}
-	msg := fmt.Sprintf("adopted by profile %s at phase %s", profile.Name, phase)
+	if _, err := c.dyn.Resource(nodePrepsGVR).Patch(ctx, node.Name, types.MergePatchType, patch, metav1.PatchOptions{}, "status"); err != nil {
+		return nil, fmt.Errorf("initial status for %s: %w", node.Name, err)
+	}
+	msg := fmt.Sprintf("adopted by profile %s at phase %s", profile.ObjectMeta.Name, phase)
 	if hasLegacy {
 		msg += fmt.Sprintf(" (imported from legacy label %s=%q)", v1alpha1.LegacyLabel, legacy)
 	}
-	k8sutil.Emit(ctx, c.client, c.ns, v1alpha1.NodePrepKind, node.Name, corev1.EventTypeNormal, "Adopted", msg)
+	k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, node.Name, corev1.EventTypeNormal, "Adopted", msg)
 	fmt.Printf("[nodeprep] %s\n", msg)
-	return createdToNodePrep(created)
+	return &v1alpha1.NodePrep{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name},
+		Spec:       v1alpha1.NodePrepSpec{NodeName: node.Name, ProfileRef: v1alpha1.ProfileRef{Name: profile.ObjectMeta.Name}},
+		Status: v1alpha1.NodePrepStatus{
+			Phase:                     phase,
+			ObservedProfileGeneration: profile.Generation,
+		},
+	}, nil
 }
 
 func createdToNodePrep(u *unstructured.Unstructured) (*v1alpha1.NodePrep, error) {
@@ -344,10 +359,10 @@ func (c *Controller) applyNodeChanges(ctx context.Context, node *corev1.Node, wa
 		_, err = c.client.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
 		if err == nil {
 			if k8sutil.HasTaint(n, v1alpha1.TaintKey) && !k8sutil.HasTaint(node, v1alpha1.TaintKey) {
-				k8sutil.Emit(ctx, c.client, c.ns, v1alpha1.NodePrepKind, npName, corev1.EventTypeNormal, "TaintApplied",
+				k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, npName, corev1.EventTypeNormal, "TaintApplied",
 					"nodeprep taint held: node is owned by nodeprep")
 			} else if !k8sutil.HasTaint(n, v1alpha1.TaintKey) && k8sutil.HasTaint(node, v1alpha1.TaintKey) {
-				k8sutil.Emit(ctx, c.client, c.ns, v1alpha1.NodePrepKind, npName, corev1.EventTypeNormal, "TaintReleased",
+				k8sutil.Emit(ctx, c.client, v1alpha1.NodePrepKind, npName, corev1.EventTypeNormal, "TaintReleased",
 					fmt.Sprintf("nodeprep taint released: phase %s with boot verified", phase))
 			}
 			return

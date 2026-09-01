@@ -25,7 +25,7 @@ const defaultRebootCommand = "nsenter -t 1 -m -u -i -n -- systemctl reboot"
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig; empty uses in-cluster config")
 	nodeName := flag.String("node-name", os.Getenv("NODE_NAME"), "Kubernetes node this agent runs on (defaults to NODE_NAME)")
-	ns := flag.String("namespace", "nodeprep-system", "namespace for events and leases")
+	ns := flag.String("namespace", "nodeprep-system", "namespace for component-scoped resources (leases in v0.2); events for cluster-scoped objects are recorded in default")
 	interval := flag.Duration("interval", 5*time.Second, "reconcile poll interval")
 	allowReboot := flag.Bool("allow-reboot", false, "permit nodeprep-initiated reboots (design §5.2)")
 	hostMutations := flag.Bool("host-mutations", false, "allow steps to mutate the host (v0.2 steps; v0.1 stays detect-only without this)")

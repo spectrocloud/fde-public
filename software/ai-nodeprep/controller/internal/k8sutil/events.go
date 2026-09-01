@@ -12,15 +12,21 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Emit records an Event in ns with the given involved object. Events are the
-// human-visible progress channel required by design §2 (observable by default).
-// Failures are logged, never fatal.
-func Emit(ctx context.Context, c kubernetes.Interface, ns, involvedKind, involvedName, eventType, reason, message string) {
+// Emit records an Event for the given involved object. Every object nodeprep
+// emits for (NodePrep, NodePrepProfile, Node) is cluster-scoped, so the event
+// is recorded in the default namespace with an empty involvedObject.namespace
+// — the same combination client-go's recorder uses for Node events, and the
+// only one the API server accepts for cluster-scoped involved objects (any
+// other event namespace is rejected with "does not match event.namespace").
+// Action is set from reason: the server requires it once EventTime is set.
+// Events are the human-visible progress channel required by design §2
+// (observable by default). Failures are logged, never fatal.
+func Emit(ctx context.Context, c kubernetes.Interface, involvedKind, involvedName, eventType, reason, message string) {
 	now := metav1.Now()
 	ev := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "nodeprep-",
-			Namespace:    ns,
+			Namespace:    metav1.NamespaceDefault,
 		},
 		InvolvedObject: corev1.ObjectReference{
 			Kind:       involvedKind,
@@ -28,6 +34,7 @@ func Emit(ctx context.Context, c kubernetes.Interface, ns, involvedKind, involve
 			APIVersion: "nodeprep.spectrocloud.com/v1alpha1",
 		},
 		Reason:              reason,
+		Action:              reason,
 		Message:             message,
 		Type:                eventType,
 		FirstTimestamp:      now,
@@ -38,7 +45,7 @@ func Emit(ctx context.Context, c kubernetes.Interface, ns, involvedKind, involve
 		EventTime:           metav1.NewMicroTime(now.Time),
 		Source:              corev1.EventSource{Component: "nodeprep"},
 	}
-	_, err := c.CoreV1().Events(ns).Create(ctx, ev, metav1.CreateOptions{})
+	_, err := c.CoreV1().Events(metav1.NamespaceDefault).Create(ctx, ev, metav1.CreateOptions{})
 	if err != nil {
 		fmt.Printf("[nodeprep] event %s/%s (%s) not recorded: %v\n", involvedKind, involvedName, reason, err)
 	}

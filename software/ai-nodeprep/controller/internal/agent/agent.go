@@ -131,7 +131,7 @@ func (a *Agent) fetchProfile(ctx context.Context, np *v1alpha1.NodePrep) (*v1alp
 }
 
 func (a *Agent) emit(ctx context.Context, eventType, reason, message string) {
-	k8sutil.Emit(ctx, a.client, a.ns, v1alpha1.NodePrepKind, a.nodeName, eventType, reason, message)
+	k8sutil.Emit(ctx, a.client, v1alpha1.NodePrepKind, a.nodeName, eventType, reason, message)
 }
 
 // patchStatus merges a partial status onto the NodePrep status subresource.
@@ -167,6 +167,18 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		return
 	}
 	a.noPrepLogged = false
+
+	// Status is ignored on CREATE for CRDs with a status subresource, so a
+	// NodePrep created before the controller wrote the initial phase (or one
+	// created by hand) arrives with an empty phase. Pending is the canonical
+	// start (design §5.2); heal it instead of idling in UnknownPhase.
+	if np.Status.Phase == "" {
+		np.Status.Phase = v1alpha1.PhasePending
+		if err := a.patchStatus(ctx, map[string]interface{}{"phase": string(v1alpha1.PhasePending)}); err != nil {
+			fmt.Printf("[nodeprep-agent] initial phase patch failed: %v\n", err)
+			return
+		}
+	}
 	profile, err := a.fetchProfile(ctx, np)
 	if err != nil {
 		a.emit(ctx, corev1.EventTypeWarning, "ProfileMissing", fmt.Sprintf("profile %s unavailable: %v", np.Spec.ProfileRef.Name, err))

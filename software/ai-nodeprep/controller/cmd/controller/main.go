@@ -20,7 +20,7 @@ import (
 
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig; empty uses in-cluster config")
-	ns := flag.String("namespace", "nodeprep-system", "namespace for events and leases")
+	ns := flag.String("namespace", "nodeprep-system", "namespace for component-scoped resources (leases in v0.2); events for cluster-scoped objects are recorded in default")
 	flag.Parse()
 
 	cfg, err := loadConfig(*kubeconfig)
