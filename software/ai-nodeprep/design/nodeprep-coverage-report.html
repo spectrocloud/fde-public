@@ -128,9 +128,10 @@
      against the 979-line bash script it replaces — with the live evidence for each, and an honest list of what
      is still gated or unconverted.</p>
   <div class="verline">
-    Verified on <code>bm-a-rtx6k-7</code> (no-Mellanox worker, CAPI machine
-    <code>nodeprep-testing-worker-pool-default-b6ppf-vt85f</code>) · agent/controller <code>0.1.10</code> ·
-    profile <code>gpu-worker-v105</code> · full reprovision from bare metal via Node deletion
+    Two full bare-metal reprovisions: <code>bm-a-rtx6k-7</code> on agent/controller <code>0.1.10</code>
+    (machine <code>…b6ppf-vt85f</code>) and <code>bm-a-rtx6k-6</code> on <code>0.1.11</code>
+    (machine <code>…b6ppf-tjc9j</code>) · no-Mellanox workers · profile <code>gpu-worker-v105</code> ·
+    reprovision via Node deletion
   </div>
 </header>
 
@@ -140,12 +141,14 @@
    label, the controller adopted it, and the agent ran the full phase machine against bare metal — the same starting
    point the bash script has on a fresh rack unit. Because the box carries no Mellanox NICs, every hardware-mutating
    step exercised its detection-and-skip gate; the gates are live-verified, the mutation bodies are declared below as
-   v0.2. Two controlled reboots then proved the boot path.</p>
+   v0.2. Two controlled reboots then proved the boot path. After the full companion-package set and
+   firmware-cache reuse landed (0.1.11), the whole reprovision was repeated end-to-end on a second
+   bare-metal re-rack — the final §2 entry.</p>
 
 <div class="count">
   <span><b>7</b> bash functions fully covered</span>
   <span><b>9</b> steps gate-verified, bodies v0.2</span>
-  <span><b>10</b> v0.1 features beyond the bash script</span>
+  <span><b>11</b> v0.1 features beyond the bash script</span>
   <span><b>3</b> defects found &amp; fixed by live testing</span>
 </div>
 
@@ -212,6 +215,17 @@
       garbage file was gone; kubelet came up with <b>0</b> crash signatures and the node reached Ready in
       ~3 min. Agent recorded reboot #2 (<code>793a544d…</code>) and re-verified
       (<code>BootVerified</code>).</span></li>
+  <li><span class="t">Re-verify</span><span class="e">Full reprovision #2 (0.1.11)</span>
+      <span class="d">With the complete companion-package set and the cache-reuse behavior shipped, the Node
+      was deleted deliberately and the machine re-racked from bare metal again (~17 min MAAS; fresh node
+      <code>bm-a-rtx6k-6</code>, machine <code>…b6ppf-tjc9j</code>). Adoption at Pending, Machine paused,
+      <b>fresh downloads</b> from the empty spcx cache — 711 MB BFB in 30.8 s, 843 MB deb in 29.8 s, both
+      sha256-verified (bare metal gets no reuse; that is the point of the cache) — then the <b>full fresh
+      package install</b>: <code>dpkg --install</code> of the DOCA host deb plus
+      <code>apt-get install</code> of <code>doca-all, lldpd, mft, pv</code> (<code>netplan.io</code> and
+      <code>psmisc</code> ship in the MAAS base image and were correctly detected as present). All six
+      verified <code>installed</code> on the host afterwards. Ready <b>~2.5 min</b> after adoption;
+      Machine paused during prep and unpaused at Ready on the new Machine object.</span></li>
 </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
@@ -272,9 +286,10 @@
     <td><code>downloads</code>, <code>aptPackages</code>, <code>grubParams</code> + reboot protocol</td>
     <td><span class="pill live">Covered in part</span> spcx cache creation, sha256-verified <code>.tmp</code>+rename
         downloads, <code>dpkg --install</code>, <code>apt-get update</code>, <code>apt-get install</code> and the
-        reboot protocol all live-verified. Remaining pieces listed in §5 (apt upgrade, headers hold, gcc-12,
-        lldpd/mft/etc. packages, LLDPD config, grub assembly, rshim restart, autoremove, the post-stage
-        reboot trigger).</td>
+        reboot protocol all live-verified — including a full fresh install of the script's exact package set
+        (<code>doca-all lldpd mft netplan.io pv psmisc</code>) on reprovision #2, and verified cache reuse
+        (zero bytes re-fetched) on re-preps. Remaining pieces listed in §5 (apt upgrade, headers hold, gcc-12,
+        LLDPD config, grub assembly, rshim restart, autoremove, the post-stage reboot trigger).</td>
   </tr>
   <tr>
     <td><code>fn_init_hw_stage</code> <small>L468</small></td>
@@ -367,6 +382,9 @@
       (<code>MachinePaused</code>/<code>MachineUnpaused</code> events, annotation verified on the Machine,
       released on Ready and on de-adoption). The bash script had no notion of CAPI at all.</li>
   <li><b>sha256-verified downloads</b> with <code>.tmp</code>+rename — a truncated or MITM'd BFB cannot be flashed.</li>
+  <li><b>Firmware cache reuse</b> — a local spcx copy that still hashes to the profile's checksum is reused
+      instead of re-fetched, so re-preps move zero bytes over the wire (proven live: 1.5 GB reused);
+      without a configured checksum nothing is trusted and the fetch always runs.</li>
   <li><b>Declared, inspectable state</b> — the 15-step ledger, phase, reboot count and per-step messages are a
       kubectl object, not a file inside a container image.</li>
   <li><b>Crash-safe resume</b> — a Failed NodePrep recovers by annotation without re-imaging
@@ -394,11 +412,9 @@
   <li><b>Flash/config mutation bodies</b> — <code>bfb-install</code>, <code>mlxconfig</code>,
       <code>sriov_numvfs</code> writes, VF GUID synthesis, udev rule generation, <code>mlnx_qos</code>/<code>mlxreg</code>,
       OVS bridge convergence, ACS setpci, NFSoRDMA modules: gates are in and verified, bodies land in v0.2
-      with full Detect/Apply/Verify semantics.</li>
-  <li><b>mft and companion packages</b> — the bash script installs <code>lldpd mft netplan.io pv psmisc</code>
-      unconditionally; the profile here lists only <code>doca-all</code>. On a Mellanox node <code>mft</code>
-      is a <i>hard prerequisite</i> of the gated steps (they check for the tools and will Block without it) —
-      add it to <code>firmware.doca.packages</code> in the profile, or the steps will stop at the tool gate.</li>
+      with full Detect/Apply/Verify semantics. Their package prerequisite is met: <code>mft</code> (and the
+      other bash companion packages) are in the profile and verified installed on the test nodes, so the
+      gated steps will find their tools when the hardware arrives.</li>
   <li><b>Post-software-stage reboot trigger</b> — the reboot protocol exists and is proven, but
       <code>requestReboot</code> is not yet called by any step; the bash script's "reboot to inithw" after the
       software stage needs that one-line trigger wired into the Mellanox path.</li>
@@ -414,7 +430,8 @@
   <li><b>apt upgrade, linux-headers hold, gcc-12, apt autoremove</b> — not implemented. The profile field
       <code>aptUpgrade</code> exists but no step consumes it yet (this profile sets it <code>false</code>, so
       behavior matches today).</li>
-  <li><b>LLDPD configuration</b> — no equivalent for the bash LLDPD config block.</li>
+  <li><b>LLDPD configuration</b> — the <code>lldpd</code> package installs (verified in reprovision #2), but
+      the bash script's LLDPD config-file block has no equivalent yet.</li>
 </ul>
 
 <h2><span class="no">§6</span>Defects the live loop caught (and the fixes shipped)</h2>
@@ -448,7 +465,7 @@
 
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
-  host journal) · node bm-a-rtx6k-7 · controller/agent 0.1.10 · sibling document to
+  host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6 · controller/agent 0.1.10 → 0.1.11 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
