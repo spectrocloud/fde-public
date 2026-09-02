@@ -82,12 +82,34 @@ With either absent, steps report `Blocked` with the reason instead of
 guessing. This is the v0.1 testing posture: run everything in a lab, watch
 the NodePrep object describe what the bash script *would* have done.
 
+## Updating a NodePrepProfile without conflicts
+
+`kubectl apply -f profile.yaml` fails with *"the object has been modified;
+please apply your changes to the latest version"* when the manifest — or the
+`kubectl.kubernetes.io/last-applied-configuration` annotation recorded on
+the live object by an earlier apply — carries a stale `resourceVersion`
+(e.g. after exporting a profile from another cluster). The stale RV rides
+into the merge patch as an optimistic-concurrency guard and the API server
+rejects it.
+
+Fix on the live object (one-time per profile):
+
+```sh
+kubectl annotate nodeprepprofile <name> \
+  kubectl.kubernetes.io/last-applied-configuration-
+```
+
+Then keep profiles free of server-side metadata: strip `resourceVersion`,
+`uid`, `creationTimestamp` and `generation` from exported manifests before
+re-applying (or manage profiles with `kubectl apply --server-side -f ...`,
+which ignores the annotation entirely).
+
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.11-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.11-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.11-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.15-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.15-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.15-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

@@ -84,6 +84,7 @@ const (
 	RebootBFBFlashed       = "BFBFlashed"
 	RebootMlxConfigApplied = "MlxConfigApplied"
 	RebootGrubChanged      = "GrubChanged"
+	RebootIbCoreNetns      = "IbCoreNetns"
 )
 
 // +separate doc

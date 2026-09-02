@@ -3,8 +3,8 @@ package agent
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
@@ -16,16 +16,66 @@ type pciDevice struct {
 	vendor    string // 0x15b3, 0x10de
 	deviceID  string
 	class     string
-	rail      string // assigned rail (r0, dpu, ...) or ""
+	rail      string // assigned rail (r0, r0_p0, dpu, ...) or ""
 	linkWidth string
 	linkSpeed string
 	netdev    string
+	// MFT-enriched fields (bash arrBF 4/5/7/10/12): devType is the bash
+	// arrBF[i,4] classification (SuperNIC | DPU | ConnectX-N | Unknown),
+	// rawType the literal mlxconfig "Device type:" value (ConnectX4Lx,
+	// BlueField3, ...) used for model-specific gates, variant the bash
+	// arrBF[i,10] (Physical | Air).
+	devType string
+	rawType string
+	variant string
+	rshim   string // /dev/rshimN when the function owns one (DPUs)
+	ibdev   string // mlx5_0 from sysfs infiniband/
+	fwVer   string
+	psid    string
+}
+
+// railPort returns the bash port suffix ${pci/*\./}: the function number of
+// the PCI address ("0000:49:00.0" -> "0").
+func railPort(pci string) string {
+	parts := strings.Split(pci, ".")
+	return parts[len(parts)-1]
+}
+
+// isConnectX reports whether the device classifies as a ConnectX (non-DPU,
+// non-SuperNIC) adapter, the bash `[[ type =~ ConnectX ]]` branch.
+func (d pciDevice) isConnectX() bool {
+	return strings.Contains(d.devType, "ConnectX")
+}
+
+// isDPU reports the bash `[ type == "DPU" ]` branch.
+func (d pciDevice) isDPU() bool {
+	return d.devType == "DPU"
+}
+
+// isBluefield3 reports a BlueField-3 device from the raw mlxconfig device
+// type (ConnectX-2..4 and BlueField-2 exist, so a bare "bluefield" match is
+// not enough — only BF-3 is flashable, design §8.2).
+func (d pciDevice) isBluefield3() bool {
+	t := strings.ToLower(d.rawType)
+	return strings.Contains(t, "bluefield") && strings.Contains(t, "3")
+}
+
+// matchesConnectX79 implements the bash lossless-RoCE firmware gate
+// `[[ type =~ ConnectX[-]?[7-9] ]]`.
+func matchesConnectX79(devType string) bool {
+	for _, gen := range []string{"7", "8", "9"} {
+		if strings.Contains(devType, "ConnectX"+gen) || strings.Contains(devType, "ConnectX-"+gen) {
+			return true
+		}
+	}
+	return false
 }
 
 // scanInventory walks /sys/bus/pci/devices and classifies NVIDIA GPUs and
 // Mellanox NICs from sysfs alone (design §8.4: no lspci fork). Mellanox
-// classification beyond "Mellanox" (SuperNIC/DPU/ConnectX via mlxconfig
-// INTERNAL_CPU_OFFLOAD_ENGINE) requires MFT and lands in v0.2.
+// classification beyond "Mellanox" needs MFT and is filled in by
+// enrichMellanox. Rail naming follows the bash grammar: a card with one
+// function maps to r<N>, a multi-function card to r<N>_p<fn> per function.
 func scanInventory(profile *v1alpha1.NodePrepProfile) (nics []v1alpha1.NicStatus, gpus []v1alpha1.GpuStatus, mellanox []pciDevice, err error) {
 	entries, err := os.ReadDir("/sys/bus/pci/devices")
 	if err != nil {
@@ -65,25 +115,60 @@ func scanInventory(profile *v1alpha1.NodePrepProfile) (nics []v1alpha1.NicStatus
 				vendor:    vendor,
 				deviceID:  mustDevice(base),
 				class:     class,
-				rail:      railByFn[fn],
 				linkWidth: widthOf(base),
 				linkSpeed: speedOf(base),
 			}
 			d.netdev = firstNetdev(base)
 			mellanox = append(mellanox, d)
-			nics = append(nics, v1alpha1.NicStatus{
-				PCI:       pci,
-				Fn:        fn,
-				Type:      "Mellanox", // classification via mlxconfig lands in v0.2 (design §8.1)
-				DeviceID:  d.deviceID,
-				Rail:      railLabel(d),
-				NetDev:    d.netdev,
-				LinkWidth: d.linkWidth,
-				LinkSpeed: d.linkSpeed,
-			})
 		}
 	}
+
+	// Rail assignment, second pass so multi-function cards (two ports on
+	// one PCI device) get the bash r<N>_p<port> grammar per function.
+	fnCount := map[string]int{}
+	for _, d := range mellanox {
+		fnCount[d.fn]++
+	}
+	for i := range mellanox {
+		d := &mellanox[i]
+		base := railByFn[d.fn]
+		if base == "" {
+			continue
+		}
+		if fnCount[d.fn] > 1 {
+			d.rail = base + "_p" + railPort(d.pci)
+		} else {
+			d.rail = base
+		}
+	}
+
+	for _, d := range mellanox {
+		nics = append(nics, d.nicStatus())
+	}
 	return nics, gpus, mellanox, nil
+}
+
+// nicStatus renders the status-view of one function.
+func (d pciDevice) nicStatus() v1alpha1.NicStatus {
+	t := d.devType
+	if t == "" {
+		t = "Mellanox" // classification requires MFT; retried every refresh
+	}
+	return v1alpha1.NicStatus{
+		PCI:       d.pci,
+		Fn:        d.fn,
+		Type:      t,
+		Variant:   d.variant,
+		Firmware:  d.fwVer,
+		PSID:      d.psid,
+		Rail:      railLabel(d),
+		Rshim:     d.rshim,
+		NetDev:    d.netdev,
+		IBDev:     d.ibdev,
+		LinkWidth: d.linkWidth,
+		LinkSpeed: d.linkSpeed,
+		DeviceID:  d.deviceID,
+	}
 }
 
 // railLabel renders the rail label the bash script would have produced:
@@ -92,10 +177,178 @@ func railLabel(d pciDevice) string {
 	if d.rail != "" {
 		return d.rail
 	}
-	if d.fn != "" && strings.HasSuffix(d.fn, ".0") {
-		// Without MFT we cannot tell DPU from NIC; leave empty and let the
-		// profile rails drive rail assignment.
+	if d.isDPU() || strings.Contains(strings.ToLower(d.rawType), "bluefield") {
+		return "dpu"
+	}
+	return ""
+}
+
+// enrichMellanox fills the MFT-derived fields of every Mellanox function:
+// device classification via mlxconfig INTERNAL_CPU_OFFLOAD_ENGINE (the bash
+// fn_inventory_hw probe), firmware/PSID via flint, the rshim device (DPUs)
+// and the sysfs IB device name. mlxconfig/flint run once per PCI address per
+// agent process — the values only change on firmware operations — and
+// failures are retried on later refreshes so a classification that ran
+// before MFT was installed corrects itself.
+func (a *Agent) enrichMellanox(mellanox []pciDevice) {
+	for i := range mellanox {
+		d := &mellanox[i]
+		if c, ok := a.mftCache[d.pci]; ok {
+			d.devType, d.rawType, d.variant = c.devType, c.rawType, c.variant
+			d.fwVer, d.psid = c.fwVer, c.psid
+			d.ibdev = ibdevFor(d.pci)
+			d.rshim = rshimFor(d.fn)
+			continue
+		}
+		d.ibdev = ibdevFor(d.pci)
+		d.rshim = rshimFor(d.fn)
+		if out, err := a.hostExec(nil, 30*time.Second, "mlxconfig", "-d", d.pci, "q", "INTERNAL_CPU_OFFLOAD_ENGINE"); err == nil {
+			d.devType, d.variant = classifyMlxconfig(out)
+			d.rawType = rawDeviceType(out)
+		} else if out, ferr := a.hostExec(nil, 60*time.Second, "mlxconfig", "-d", d.pci, "q"); ferr == nil {
+			// Older adapters (ConnectX-4 generation) may not expose the
+			// INTERNAL_CPU_OFFLOAD_ENGINE key at all; the full query still
+			// carries the Device type line. A non-DPU device classifies as
+			// ConnectX/<family>, variant Air (no internal CPU).
+			d.rawType = rawDeviceType(out)
+			d.devType, d.variant = classifyDeviceType(d.rawType), "Air"
+		} else {
+			a.logf("inventory: %s not classified (mlxconfig unavailable: %v)", d.pci, err)
+			continue // classification retries once MFT is installed
+		}
+		a.logf("inventory: %s (%s) classified %s/%s fw %s psid %s rshim %s", d.pci, d.netdev, d.devType, d.variant, d.fwVer, d.psid, d.rshim)
+		if out, err := a.hostExec(nil, 60*time.Second, "flint", "-d", d.pci, "q"); err == nil {
+			d.fwVer, d.psid = parseFlint(out)
+		}
+		a.mftCache[d.pci] = mftInfo{devType: d.devType, rawType: d.rawType, variant: d.variant, fwVer: d.fwVer, psid: d.psid}
+	}
+}
+
+// mftInfo is the cached per-function MFT data.
+type mftInfo struct {
+	devType string
+	rawType string
+	variant string
+	fwVer   string
+	psid    string
+}
+
+// classifyMlxconfig mirrors the bash fn_inventory_hw classification: the
+// INTERNAL_CPU_OFFLOAD_ENGINE Description line classifies the card; when it
+// reads "N/A" the Device type line decides and the variant is Air (a
+// non-DPU NIC has no internal CPU to describe).
+func classifyMlxconfig(out string) (devType, variant string) {
+	descLine, typeLine := "", ""
+	for _, ln := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(ln, "Description:"):
+			descLine = ln
+		case strings.HasPrefix(ln, "Device type:"):
+			typeLine = ln
+		}
+	}
+	line := descLine
+	variant = "Physical"
+	if f := strings.Fields(descLine); len(f) > 1 && f[1] == "N/A" {
+		line = typeLine
+		variant = "Air"
+	}
+	switch {
+	case strings.Contains(line, "SuperNIC"):
+		return "SuperNIC", variant
+	case strings.Contains(line, "DPU"):
+		return "DPU", variant
+	case strings.Contains(line, "ConnectX"):
+		// bash: text between ':' and ';', trimmed, spaces -> underscores
+		s := line[strings.Index(line, ":")+1:]
+		if i := strings.Index(s, ";"); i >= 0 {
+			s = s[:i]
+		}
+		return strings.ReplaceAll(strings.TrimSpace(s), " ", "_"), variant
+	}
+	return "Unknown", variant
+}
+
+// rawDeviceType extracts the literal "Device type:" value (ConnectX4Lx,
+// BlueField3, ...) used by model-specific gates.
+func rawDeviceType(out string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, "Device type:") {
+			return strings.TrimSpace(strings.TrimPrefix(ln, "Device type:"))
+		}
+	}
+	return ""
+}
+
+// classifyDeviceType maps a raw mlxconfig device type onto the bash
+// classification when the INTERNAL_CPU_OFFLOAD_ENGINE probe is unavailable
+// (BlueField hardware not probed, ConnectX-N kept verbatim).
+func classifyDeviceType(rawType string) string {
+	switch {
+	case strings.Contains(rawType, "SuperNIC"):
+		return "SuperNIC"
+	case strings.Contains(rawType, "BlueField"), strings.Contains(rawType, "DPU"):
+		return "DPU"
+	case strings.Contains(rawType, "ConnectX"):
+		return strings.ReplaceAll(strings.TrimSpace(rawType), " ", "_")
+	}
+	return "Unknown"
+}
+
+// parseFlint pulls "FW Version:" and "PSID:" out of a flint query.
+func parseFlint(out string) (fwVer, psid string) {
+	for _, ln := range strings.Split(out, "\n") {
+		fields := strings.Fields(ln)
+		if len(fields) < 2 {
+			continue
+		}
+		if strings.HasPrefix(ln, "FW Version:") && len(fields) >= 3 {
+			fwVer = fields[2]
+		}
+		if strings.HasPrefix(ln, "PSID:") {
+			psid = fields[1]
+		}
+	}
+	return fwVer, psid
+}
+
+// ibdevFor returns the first IB device of the PCI function from sysfs.
+func ibdevFor(pci string) string {
+	ents, err := os.ReadDir("/sys/bus/pci/devices/" + pci + "/infiniband")
+	if err != nil || len(ents) == 0 {
 		return ""
+	}
+	return ents[0].Name()
+}
+
+// rshimFor finds the rshim device owning this function (bash: /dev/rshim*/misc
+// DEV_NAME "pcie-<bus>:<dev>.<fn>" compared up to the first dot).
+func rshimFor(fn string) string {
+	want := "pcie-0000:" + fn
+	ents, err := os.ReadDir("/dev")
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), "rshim") {
+			continue
+		}
+		b, err := os.ReadFile("/dev/" + e.Name() + "/misc")
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			if !strings.HasPrefix(ln, "DEV_NAME") {
+				continue
+			}
+			fields := strings.Fields(ln)
+			if len(fields) < 2 {
+				continue
+			}
+			if name := strings.SplitN(fields[1], ".", 2)[0]; name == want {
+				return "/dev/" + e.Name()
+			}
+		}
 	}
 	return ""
 }
@@ -158,5 +411,3 @@ func speedOf(base string) string {
 	}
 	return strings.TrimSuffix(fields[0], ".0") + "GTs"
 }
-
-var _ = filepath.Join

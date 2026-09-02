@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -44,9 +44,15 @@ type Agent struct {
 	hostRunDir     string
 	bfbDir         func() string
 	spcxDir        func() string
+	hostEtcDir     func() string
 
 	// mellanoxFns is the Mellanox PCI inventory from the latest scan.
 	mellanoxFns []pciDevice
+
+	// mftCache holds per-PCI-address MFT classification results; failures
+	// are not cached so a classification that ran before MFT was installed
+	// corrects itself on a later refresh.
+	mftCache map[string]mftInfo
 
 	// rebootIssued guards the one-shot reboot execution per boot.
 	rebootIssued bool
@@ -65,13 +71,15 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string
 	return &Agent{
 		client: client, dyn: dyn, nodeName: nodeName, ns: ns,
 		interval: interval, allowReboot: allowReboot, hostMutations: hostMutations,
-		rebootCommand: rebootCommand,
-		backoffUntil:  map[string]time.Time{},
+		rebootCommand:  rebootCommand,
+		backoffUntil:   map[string]time.Time{},
+		mftCache:       map[string]mftInfo{},
 		hostKubeletDir: "/host/var/lib/kubelet",
 		hostEtcUdev:    "/host/etc/udev/rules.d",
 		hostRunDir:     "/host/run",
 		bfbDir:         func() string { return "/host/opt/spectrocloud/spcx/bfb" },
 		spcxDir:        func() string { return "/host/opt/spectrocloud/spcx" },
+		hostEtcDir:     func() string { return "/host/etc" },
 	}
 }
 
@@ -264,6 +272,20 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		a.logf("inventory scan failed: %v", err)
 	}
 
+	// Install the boot hook before any stage can request a reboot (design
+	// §6.2): the hook carries the guarded kubelet manager-state reset into
+	// every future boot, and machines with stale memory-manager state
+	// crashloop kubelet on a reboot that happens before the Finalizing
+	// kubeletState step would have installed it. Mutations-gated like every
+	// host write; detect-only runs keep the status quo.
+	if a.mutationsAllowed(profile) {
+		if msg, err := a.ensureBootHook(profile); err != nil {
+			a.logf("boot hook install failed: %v", err)
+		} else if msg != "" {
+			a.logf("boot hook: %s", msg)
+		}
+	}
+
 	// Run the current stage.
 	switch np.Status.Phase {
 	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
@@ -292,6 +314,12 @@ func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, pro
 	nics, gpus, mellanox, err := scanInventory(profile)
 	if err != nil {
 		return err
+	}
+	if len(mellanox) > 0 {
+		a.enrichMellanox(mellanox)
+		for i := range mellanox {
+			nics[i] = mellanox[i].nicStatus()
+		}
 	}
 	a.mellanoxFns = mellanox
 	if reflect.DeepEqual(np.Status.Nics, nics) && reflect.DeepEqual(np.Status.Gpus, gpus) {
@@ -584,6 +612,13 @@ func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 			a.logf("reboot command failed: %v: %s", err, out)
 		}
 	}()
+}
+
+// requestRebootBg lets step bodies (which carry no context) raise the
+// RebootRequired condition; requestReboot only needs ctx for the status
+// writes, which a background context serves identically.
+func (a *Agent) requestRebootBg(reason, message string) {
+	a.requestReboot(context.Background(), reason, message)
 }
 
 var _ = unstructured.Unstructured{}

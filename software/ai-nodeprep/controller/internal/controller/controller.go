@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	profilesGVR = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodeprepprofiles"}
+	profilesGVR  = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodeprepprofiles"}
 	nodePrepsGVR = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodepreps"}
 )
 
@@ -38,9 +38,9 @@ type Controller struct {
 	client kubernetes.Interface
 	dyn    dynamic.Interface
 	// ns is where Events are recorded and the informer-based components live.
-	ns         string
+	ns          string
 	nodeIndexer cache.Indexer
-	machineCRD bool
+	machineCRD  bool
 	// noProfileLogged remembers nodes already reported as matching no
 	// profile, so the 30s informer resync does not repeat the line forever.
 	noProfileLogged map[string]bool

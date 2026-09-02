@@ -36,7 +36,7 @@ spec:
           operator: Exists
       containers:
         - name: agent
-          image: docker.io/kreeuwijk/ai-nodeprep:0.1.11-agent
+          image: docker.io/kreeuwijk/ai-nodeprep:0.1.15-agent
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME

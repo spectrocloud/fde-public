@@ -17,10 +17,10 @@ func TestTaintShouldExist(t *testing.T) {
 		{v1alpha1.PhaseProvisioning, false, true},
 		{v1alpha1.PhaseFlashing, false, true},
 		{v1alpha1.PhaseFinalizing, false, true},
-		{v1alpha1.PhaseReady, false, true},      // Ready but boot not verified yet
-		{v1alpha1.PhaseReady, true, false},      // the only release path (design §6.1)
-		{v1alpha1.PhaseFailed, false, true},     // Failed keeps the window held
-		{v1alpha1.PhaseFailed, true, true},      // even a stale Verified flag must not release
+		{v1alpha1.PhaseReady, false, true},  // Ready but boot not verified yet
+		{v1alpha1.PhaseReady, true, false},  // the only release path (design §6.1)
+		{v1alpha1.PhaseFailed, false, true}, // Failed keeps the window held
+		{v1alpha1.PhaseFailed, true, true},  // even a stale Verified flag must not release
 	}
 	for _, tc := range cases {
 		if got := TaintShouldExist(tc.phase, tc.bootVerified, pol); got != tc.want {

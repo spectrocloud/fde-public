@@ -45,14 +45,15 @@ var stepDefs = []stepDef{
 	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
 	{name: "ibCoreNetns", stage: v1alpha1.PhaseProvisioning, run: stepIbCoreNetns},
 	// --- Flashing (bash fn_init_hw_stage) ---
-	{name: "bfbFlash", stage: v1alpha1.PhaseFlashing, run: stepNeedsMFT("bfb-install", "BFB flash")},
+	{name: "bfbFlash", stage: v1alpha1.PhaseFlashing, run: stepBFBFlash},
 	// --- Configuring (bash fn_config_stage) ---
-	{name: "mlxconfig", stage: v1alpha1.PhaseConfiguring, run: stepNeedsMFT("mlxconfig", "adapter firmware config")},
+	{name: "mlxconfig", stage: v1alpha1.PhaseConfiguring, critical: true, run: stepMlxconfig},
+	{name: "netplanMTU", stage: v1alpha1.PhaseConfiguring, critical: true, run: stepFabricNetplan},
 	// --- Finalizing (bash fn_set_vfs et al.) ---
 	{name: "sriovNumVFs", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepSriovNumVFs},
-	{name: "vfGuids", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepNeedsMFT("mlxconfig/sysfs", "VF GUID synthesis (design §8.3)")},
+	{name: "vfGuids", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepVfGuids},
 	{name: "udevRules", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepUdevRules},
-	{name: "losslessRoce", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepNeedsMFT("mlnx_qos/mlxreg", "lossless RoCE")},
+	{name: "losslessRoce", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepLosslessRoce},
 	{name: "ovsBridges", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepOvsBridges},
 	{name: "disableACS", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepDisableACS},
 	{name: "kubeletState", stage: v1alpha1.PhaseFinalizing, run: stepKubeletState},
@@ -230,9 +231,18 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 }
 
 // stepIbCoreNetns mirrors 'options ib_core netns_mode=0' detection.
+// stepIbCoreNetns applies the profile's rdmaNetnsMode as
+// 'options ib_core netns_mode=<mode>' (bash writes the same file in its
+// SR-IOV block) and reboots when the running module still has the old
+// setting. Unlike the bash, the profile drives this directly — a profile
+// with rdmaNetnsMode set but zero VFs still gets the semantics it asked for.
 func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	if profile.Spec.EastWest.NumVFs <= 0 && profile.Spec.NorthSouth.NumVFs <= 0 {
-		return v1alpha1.StepDone, "skipped: no VFs requested"
+	mode := strings.TrimSpace(profile.Spec.HostBoot.RDMANetnsMode)
+	if mode == "" {
+		if !a.hasMellanox() {
+			return v1alpha1.StepDone, "skipped: no rdmaNetnsMode set and no Mellanox hardware"
+		}
+		return v1alpha1.StepDone, "skipped: profile does not set rdmaNetnsMode"
 	}
 	got, err := os.ReadFile("/sys/module/ib_core/parameters/netns_mode")
 	if err != nil {
@@ -241,13 +251,35 @@ func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 		return v1alpha1.StepBlocked, fmt.Sprintf("cannot read ib_core netns_mode: %v", err)
 	}
-	if strings.TrimSpace(string(got)) == profile.Spec.HostBoot.RDMANetnsMode {
-		return v1alpha1.StepDone, "ib_core netns_mode matches profile"
+	if normNetnsMode(string(got)) == normNetnsMode(mode) {
+		return v1alpha1.StepDone, fmt.Sprintf("ib_core netns_mode=%s matches profile", mode)
 	}
 	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, fmt.Sprintf("ib_core netns_mode is %q, want %q; modprobe writes need -host-mutations", strings.TrimSpace(string(got)), profile.Spec.HostBoot.RDMANetnsMode)
+		return v1alpha1.StepBlocked, fmt.Sprintf("ib_core netns_mode is %q, want %q; modprobe writes need -host-mutations", strings.TrimSpace(string(got)), mode)
 	}
-	return v1alpha1.StepBlocked, "modprobe.d writes land in v0.2"
+	conf := "options ib_core netns_mode=" + mode + "\n"
+	path := filepath.Join(a.hostEtcDir(), "modprobe.d/ib_core.conf")
+	if cur, err := os.ReadFile(path); err != nil || string(cur) != conf {
+		if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("write %s: %v", path, err)
+		}
+		a.logf("ibCoreNetns: wrote %s (running module reports %q)", path, strings.TrimSpace(string(got)))
+	}
+	a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
+		fmt.Sprintf("ib_core netns_mode is %q, want %q; reboot required to reload ib_core", normNetnsMode(string(got)), normNetnsMode(mode)))
+	return v1alpha1.StepBlocked, "modprobe.d updated; reboot requested to reload ib_core"
+}
+
+// normNetnsMode folds the parameter spellings together: sysfs reports Y/N,
+// modprobe.d and the profile speak 0/1.
+func normNetnsMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "y", "yes", "1", "true":
+		return "1"
+	case "n", "no", "0", "false":
+		return "0"
+	}
+	return strings.TrimSpace(v)
 }
 
 // stepNotConfiguredYet marks provision-side package steps deferred to v0.2;
@@ -327,7 +359,6 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
 }
 
-
 // stepNeedsMFT is the shared shape of the hardware steps that require host
 // tooling (bfb-install, mlxconfig, mlnx_qos, mlxreg): Done without Mellanox
 // hardware, Blocked with it unless mutations are enabled — and in v0.1 even
@@ -347,7 +378,10 @@ func stepNeedsMFT(tool, what string) func(*Agent, *v1alpha1.NodePrep, *v1alpha1.
 	}
 }
 
-// stepSriovNumVFs detects the requested VF count in sysfs.
+// stepSriovNumVFs detects the requested VF count in sysfs; the target is the
+// profile value verbatim (0 = no VFs at the OS level — the ≥1 clamp is a
+// firmware-config concern, see fwVFCount). Enabling VFs (writes) lands in
+// v0.2 with the rest of the VF pipeline.
 func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
@@ -362,27 +396,10 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			if !a.mutationsAllowed(profile) {
 				return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
 			}
-			return v1alpha1.StepBlocked, "sriov_numvfs writes land in v0.2"
+			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d; sriov_numvfs writes land in v0.2", nic.pci, got, want)
 		}
 	}
-	return v1alpha1.StepDone, "VF counts match profile"
-}
-
-// stepUdevRules checks the rename rule files exist where the rail grammar
-// expects them (design §7/§8: eth_rN, roce_rN).
-func stepUdevRules(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	if !a.hasMellanox() || len(railFns(profile, a)) == 0 {
-		return v1alpha1.StepDone, "skipped: no rail NICs to rename"
-	}
-	for _, f := range []string{"70-persistent-net.rules", "60-persistent-rdma.rules"} {
-		if _, err := os.Stat(filepath.Join(a.hostEtcUdev, f)); err != nil {
-			if !a.mutationsAllowed(profile) {
-				return v1alpha1.StepBlocked, fmt.Sprintf("%s missing; udev writes need -host-mutations", f)
-			}
-			return v1alpha1.StepBlocked, "udev rule generation lands in v0.2 (design §8.3 grammar)"
-		}
-	}
-	return v1alpha1.StepDone, "udev rename rules present"
+	return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
 }
 
 // stepOvsBridges checks br-rail-rN bridges exist in the OVS database when
@@ -398,17 +415,6 @@ func stepOvsBridges(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 		return v1alpha1.StepBlocked, "OVS not found on host (libovsdb integration lands in v0.2)"
 	}
 	return v1alpha1.StepBlocked, "bridge convergence via libovsdb lands in v0.2"
-}
-
-// stepDisableACS is policy-gated; reading ACS caps needs setpci (v0.2).
-func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	if !profile.Spec.Policy.DisableACS {
-		return v1alpha1.StepDone, "skipped by policy (disableACS=false)"
-	}
-	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, "ACS disable requires -host-mutations"
-	}
-	return v1alpha1.StepBlocked, "setpci ACS handling lands in v0.2"
 }
 
 // stepKubeletState clears the kubelet CPU/Memory manager state files the way
@@ -541,19 +547,13 @@ func readSysfsInt(path string) (int, error) {
 	return v, nil
 }
 
-// vfCountFor mirrors the bash semantics: east-west count for rail NICs,
-// north-south for DPUs; below 1 the bash script clamps to 1 at config time.
+// vfCountFor is the OS-level sriov_numvfs target: east-west count for rail
+// NICs, north-south for DPUs, the profile value verbatim (0 = none).
 func vfCountFor(profile *v1alpha1.NodePrepProfile, nic pciDevice) int {
 	if nic.rail == "dpu" {
-		if profile.Spec.NorthSouth.NumVFs > 0 {
-			return profile.Spec.NorthSouth.NumVFs
-		}
-		return 1
+		return profile.Spec.NorthSouth.NumVFs
 	}
-	if profile.Spec.EastWest.NumVFs > 0 {
-		return profile.Spec.EastWest.NumVFs
-	}
-	return 1
+	return profile.Spec.EastWest.NumVFs
 }
 
 // railFns returns the Mellanox devices assigned to rails by the profile.
