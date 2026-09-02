@@ -110,16 +110,19 @@ func parseMlxconfigAll(out string) map[string]string {
 // capability at all — an expected setpci error per device — so they run
 // quiet (hostExecQuiet); the step message counts the negatives. Writes are
 // rare, real mutations and stay fully logged.
+// setpciACS reads (write=="") or writes the ACS Control Register of one PCI
+// function. Both directions run quiet: the sweep touches every PCI function
+// on the node and the disableACS step message — which names every device
+// written — is the record of what changed; per-device setpci log lines are
+// hundreds of lines of noise per verify pass. A failed write is not lost:
+// it surfaces in the step's Failed message with the device address and
+// error.
 func (a *Agent) setpciACS(bdf, write string) (string, error) {
 	args := []string{"-v", "-s", bdf, "ECAP_ACS+0x6.w"}
 	if write != "" {
 		args[3] += "=" + write
 	}
-	exec := a.hostExec
-	if write == "" {
-		exec = a.hostExecQuiet
-	}
-	out, err := exec(nil, 15*time.Second, "setpci", args...)
+	out, err := a.hostExecQuiet(nil, 15*time.Second, "setpci", args...)
 	if err != nil {
 		return "", err
 	}
@@ -725,7 +728,9 @@ func (a *Agent) verifyLossless(rails []pciDevice) string {
 // stepDisableACS implements fn_disable_acs: clear the ACS Control Register
 // on every PCI device that exposes an ACS capability, with a readback
 // verify. Runtime-only (resets on reboot) — bootVerify re-runs the step,
-// matching the bash at-boot re-run.
+// matching the bash at-boot re-run. The enumeration and all setpci traffic
+// run quiet; the step message is the record: every device ACS was disabled
+// on is named, the benign buckets stay counts.
 func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !profile.Spec.Policy.DisableACS {
 		return v1alpha1.StepDone, "skipped by policy (disableACS=false)"
@@ -736,7 +741,7 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if _, err := findHostTool("setpci"); err != nil {
 		return v1alpha1.StepBlocked, fmt.Sprintf("setpci not found on host: %v", err)
 	}
-	out, err := a.hostExec(nil, 60*time.Second, "lspci", "-d", "*:*:*")
+	out, err := a.hostExecQuiet(nil, 60*time.Second, "lspci", "-d", "*:*:*")
 	if err != nil {
 		return v1alpha1.StepFailed, fmt.Sprintf("lspci: %v", err)
 	}
@@ -770,8 +775,20 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if len(failed) > 0 {
 		return v1alpha1.StepFailed, "ACS disable failures: " + strings.Join(failed, "; ")
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("ACS disabled on %d device(s), %d already clear, %d without ACS capability",
-		len(disabled), len(already), len(noACS))
+	return v1alpha1.StepDone, acsSummary(disabled, already, noACS)
+}
+
+// acsSummary renders the disableACS step message. The devices ACS was
+// actually disabled on are listed by address — that list is the step's
+// mutation record, in the operator-facing form ("disabled ACS on: ff:0f.0,
+// ff:1d.0 …"); already-clear and no-capability devices are counts, they
+// would bury the list.
+func acsSummary(disabled, already, noACS []string) string {
+	if len(disabled) == 0 {
+		return fmt.Sprintf("no ACS changes: %d already clear, %d without ACS capability", len(already), len(noACS))
+	}
+	return fmt.Sprintf("disabled ACS on: %s (%d already clear, %d without ACS capability)",
+		strings.Join(disabled, ", "), len(already), len(noACS))
 }
 
 // stepBFBFlash gates the BFB flash on hardware that may actually be flashed:

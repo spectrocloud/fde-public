@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.20</span>
+    <span>nodeprep-v105.sh → controller v0.1.22</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -282,7 +282,9 @@
       reload+trigger renamed the rail ports to <code>eth_r0_p0</code>/<code>eth_r0_p1</code>
       (<code>roce_r0_p0/1</code> IB names), both UP at mtu 9000 — default route on bond0.72 untouched.
       <b>disableACS:</b> policy-enabled, <code>setpci</code> cleared ACS on 5 capable devices (8 already
-      clear, 453 without the capability), readback <code>0000</code> verified on the rail BDF.
+      clear, 453 without the capability), readback <code>0000</code> verified on the rail BDF; the step
+      message names every device written ("disabled ACS on: …"), later sharpened to a drift-repair demo —
+      a register flipped back to nonzero on the host was detected, re-cleared, and reported by address.
       <b>sriovNumVFs</b> Done (0 VFs = profile value), <b>vfGuids</b>/<b>ovsBridges</b> skipped by config,
       <b>bfbFlash</b> Done-skip: "no BlueField-3 present to flash (only flashable class)" naming the full
       ConnectX inventory — the flash gate proven negative-case on real hardware.
@@ -391,7 +393,10 @@
     <td><span class="pill live">Covered</span> Run 1: policy <code>false</code> honored. Run 2: policy
         <code>true</code> — <code>setpci</code> walked every BDF, cleared ACS on 5 capable devices (8 already
         clear, 453 without the capability) with per-device readback; host verified <code>@236 = 0000</code>
-        on the rail BDF.</td>
+        on the rail BDF. Run 3 (0.1.22): live drift repair — a flipped register was re-cleared on the next
+        verify pass and the log/status named the device (<code>disabled ACS on: c7:03.0 (12 already clear,
+        453 without ACS capability)</code>); the enumeration and setpci traffic run quiet, the step message
+        is the mutation record.</td>
   </tr>
   <tr>
     <td><code>fn_set_vfs</code> <small>L611</small></td>
@@ -574,8 +579,12 @@
      mlxconfig detect went from one query per key to one full query per device (the boot hook's corrective
      systemctl work is likewise once per process, not per cycle). Steady state on a Ready node is now zero host
      execs between verify passes, and the ACS read sweep runs quiet — devices without the capability are an
-     expected per-device negative, counted in the step message instead of logged (0.1.18); writes stay fully
-     logged.</p>
+     expected per-device negative, counted in the step message instead of logged (0.1.18). A 0.1.22 follow-up:
+     the <code>lspci -d *:*:*</code> enumeration still dumped its full ~466-line listing every verify pass (the
+     sweep's last action, reading like a device dump); it and the per-device setpci writes now run quiet too,
+     and the step message itself is the mutation record — "disabled ACS on: &lt;devices&gt; (N already clear, M
+     without ACS capability)" — logged on change by boot-verify as well, so a drift repair is visible in logs
+     and status alike.</p>
 </div>
 <div class="callout warn">
   <p><b>NodePrepProfile updates impossible: stale resourceVersion replayed from

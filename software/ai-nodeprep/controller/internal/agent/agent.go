@@ -528,9 +528,17 @@ func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *
 			continue
 		}
 		state, msg := def.run(a, np, profile)
-		if s := stepByName(np.Status.Steps, def.name); s != nil && s.Message != msg {
-			s.Message = msg
-			changed = true
+		if s := stepByName(np.Status.Steps, def.name); s != nil {
+			// A changed result is logged as well as patched: verify passes
+			// run quiet (the sweeps are hostExecQuiet), so this line is the
+			// only log record of, say, an ACS drift repair.
+			if s.State != state || s.Message != msg {
+				a.logf("boot-verify step %s: %s — %s", def.name, state, msg)
+			}
+			if s.Message != msg {
+				s.Message = msg
+				changed = true
+			}
 		}
 		if state != v1alpha1.StepDone {
 			if changed {

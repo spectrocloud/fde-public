@@ -359,6 +359,20 @@ func TestStepDisableACSPolicySkip(t *testing.T) {
 	}
 }
 
+// The disableACS message names every device ACS was written to — the
+// operator-facing mutation record — and the steady state says "no ACS
+// changes" instead of "disabled on 0".
+func TestAcsSummary(t *testing.T) {
+	got := acsSummary([]string{"ff:0f.0", "ff:1d.0"}, []string{"ff:10.0", "ff:11.0", "ff:1e.0"}, nil)
+	want := "disabled ACS on: ff:0f.0, ff:1d.0 (3 already clear, 0 without ACS capability)"
+	if got != want {
+		t.Fatalf("acsSummary:\n%s\nwant\n%s", got, want)
+	}
+	if got := acsSummary(nil, []string{"a", "b"}, []string{"c", "d", "e"}); got != "no ACS changes: 2 already clear, 3 without ACS capability" {
+		t.Fatalf("steady-state summary = %q", got)
+	}
+}
+
 // The rename step is a no-op on InfiniBand rails (bash LINKTYPE_EW gate).
 func TestStepUdevRulesNonEthernetSkip(t *testing.T) {
 	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:49:00.0", rail: "r0"}}}

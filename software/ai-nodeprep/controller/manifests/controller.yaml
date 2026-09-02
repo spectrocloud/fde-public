@@ -29,7 +29,7 @@ spec:
           operator: Exists
       containers:
         - name: controller
-          image: docker.io/kreeuwijk/ai-nodeprep:0.1.20-controller
+          image: docker.io/kreeuwijk/ai-nodeprep:0.1.22-controller
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
