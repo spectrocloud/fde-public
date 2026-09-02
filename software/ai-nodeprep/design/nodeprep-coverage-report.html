@@ -120,36 +120,45 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.10</span>
-    <span>2026-09-01</span>
+    <span>nodeprep-v105.sh → controller v0.1.15</span>
+    <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
-  <p class="dek">Every step the controller performed on a freshly reprovisioned worker node, mapped line-by-line
-     against the 979-line bash script it replaces — with the live evidence for each, and an honest list of what
-     is still gated or unconverted.</p>
+  <p class="dek">Every step the controller performed on freshly reprovisioned and Mellanox-equipped worker nodes,
+     mapped line-by-line against the 979-line bash script it replaces — with the live evidence for each, and an
+     honest list of what is still gated or unconverted.</p>
   <div class="verline">
-    Two full bare-metal reprovisions: <code>bm-a-rtx6k-7</code> on agent/controller <code>0.1.10</code>
+    Run 1 — two bare-metal reprovisions, no-Mellanox workers: <code>bm-a-rtx6k-7</code> on <code>0.1.10</code>
     (machine <code>…b6ppf-vt85f</code>) and <code>bm-a-rtx6k-6</code> on <code>0.1.11</code>
-    (machine <code>…b6ppf-tjc9j</code>) · no-Mellanox workers · profile <code>gpu-worker-v105</code> ·
-    reprovision via Node deletion
+    (machine <code>…b6ppf-tjc9j</code>) · Run 2 — Mellanox lab cluster <code>nodeprep-test</code>: dual-port
+    ConnectX-4 Lx workers <code>bl-r1-c2-02</code>/<code>bl-r1-c2-04</code> on <code>0.1.12 → 0.1.15</code>,
+    through two nodeprep reboots to Ready · profile <code>gpu-worker-v105</code>
   </div>
 </header>
 
 <h2><span class="no">§1</span>How this was verified</h2>
-<p class="sub">The Node object for the worker was deleted, causing CAPI to deprovision and MAAS to reprovision the
-   machine from scratch (~25 min). The fresh node joined with the <code>node.spectrocloud.com/ai-worker: "true"</code>
-   label, the controller adopted it, and the agent ran the full phase machine against bare metal — the same starting
-   point the bash script has on a fresh rack unit. Because the box carries no Mellanox NICs, every hardware-mutating
-   step exercised its detection-and-skip gate; the gates are live-verified, the mutation bodies are declared below as
-   v0.2. Two controlled reboots then proved the boot path. After the full companion-package set and
+<p class="sub">Run 1: the Node object for the worker was deleted, causing CAPI to deprovision and MAAS to
+   reprovision the machine from scratch (~25 min). The fresh node joined with the
+   <code>node.spectrocloud.com/ai-worker: "true"</code> label, the controller adopted it, and the agent ran the
+   full phase machine against bare metal — the same starting point the bash script has on a fresh rack unit.
+   Because the box carries no Mellanox NICs, every hardware-mutating step exercised its detection-and-skip gate.
+   Two controlled reboots then proved the boot path. After the full companion-package set and
    firmware-cache reuse landed (0.1.11), the whole reprovision was repeated end-to-end on a second
    bare-metal re-rack — the final §2 entry.</p>
+<p class="sub">Run 2: a fresh cluster whose workers each carry a <b>dual-port ConnectX-4 Lx</b> (PCI
+   <code>0000:49:00.0/.1</code> — a real rail card at last, though no BlueField anywhere) converted from label to
+   Ready on agent/controller <code>0.1.12 → 0.1.15</code>. Both workers walked the full phase machine with real
+   MFT classification, real <code>mlxconfig</code> verification, netplan + udev writes, <code>setpci</code> ACS
+   clearing, the rdma_netns modprobe.d write with its reload reboot, and the boot-hook wait on
+   <code>mlnx_interface_mgr</code> — two nodeprep-initiated reboots each, both nodes Ready with boot-verify
+   passed and the taint released (§2b). SSH access to the workers made every host-side effect checkable
+   directly.</p>
 
 <div class="count">
-  <span><b>7</b> bash functions fully covered</span>
-  <span><b>9</b> steps gate-verified, bodies v0.2</span>
+  <span><b>11</b> bash functions fully covered</span>
+  <span><b>4</b> steps gate-verified, bodies v0.2</span>
   <span><b>11</b> v0.1 features beyond the bash script</span>
-  <span><b>3</b> defects found &amp; fixed by live testing</span>
+  <span><b>6</b> defects found &amp; fixed by live testing</span>
 </div>
 
 <h2><span class="no">§2</span>The run on a fresh worker node, as performed</h2>
@@ -228,6 +237,66 @@
       Machine paused during prep and unpaused at Ready on the new Machine object.</span></li>
 </ul>
 
+<h2><span class="no">§2b</span>Run 2 — the ConnectX-4 Lx cluster, as performed</h2>
+<p class="sub">Both workers <code>bl-r1-c2-02</code>/<code>bl-r1-c2-04</code> (dual-port CX-4 Lx at
+   <code>0000:49:00.0/.1</code> as the rail card, a second dual-port at <code>0000:16:00.0/.1</code> carrying
+   the OS via bond0) labeled <code>ai-worker=true</code> to trigger adoption. NodePrep objects
+   <code>bl-r1-c2-02</code>/<code>bl-r1-c2-04</code>, profile <code>gpu-worker-v105</code> with
+   <code>mtu 9000, numVFs 0, eswitch legacy, roceCC, disableACS, rdmaNetnsMode "0"</code>.</p>
+
+<ul class="timeline">
+  <li><span class="t">T+0</span><span class="e">Adoption + inventory</span>
+      <span class="d">Rail assignment proven against real hardware: the profile maps rail <code>r0</code> to PCI
+      function <code>49:00</code>; the agent's two-pass enumeration split the dual-port card into
+      <code>r0_p0</code>/<code>r0_p1</code> (bash grammar) and left the unmapped <code>16:00</code> card
+      rail-less. MFT classification ran for real — <code>mlxconfig q INTERNAL_CPU_OFFLOAD_ENGINE</code> is not
+      exposed by CX-4 Lx, so the full-query fallback classified all four functions
+      <code>ConnectX4LX/Air</code>, fw 14.32.1010, with IB devices and netdevs resolved.</span></li>
+  <li><span class="t">T+2 min</span><span class="e">Provisioning — downloads, packages</span>
+      <span class="d">BFB + DOCA deb fetched from the MAAS mirror and sha256-verified;
+      <code>doca-all, lldpd, mft, pv</code> installed in host transient units.</span></li>
+  <li><span class="t">Reboot #1</span><span class="e">ib_core netns reload</span>
+      <span class="d">rdmaNetnsMode <code>"0"</code>: agent wrote
+      <code>/etc/modprobe.d/ib_core.conf</code> (<code>options ib_core netns_mode=0</code>) and requested the
+      reload reboot. Kubelet then crashlooped on stale <code>memory_manager_state</code> — the boot hook that
+      clears it was only installed in Finalizing, but this first reboot happens in Provisioning (chicken-and-egg).
+      Cleared by hand; <b>0.1.14 installs the hook every cycle before any reboot-capable stage</b>.</span></li>
+  <li><span class="t">Post-reboot</span><span class="e">ib_core verified → Configuring</span>
+      <span class="d">New boot loaded ib_core with <code>netns_mode=N</code>; the step re-ran, verified
+      <code>netns_mode=0 matches profile</code>, and cleared <code>RebootRequired</code>. No loop: one reload
+      reboot, exactly the bash's "write conf, reboot, continue" semantics.</span></li>
+  <li><span class="t">Configuring</span><span class="e">mlxconfig + netplan</span>
+      <span class="d"><b>mlxconfig:</b> per-device flash set built (SRIOV_EN, LINK_TYPE_P1=2 for Ethernet,
+      DSCP-based RoCE keys query-gated so devices not exposing them are dropped rather than failing the set) and
+      verified on all 4 functions with no drift — CX-4 Lx already matched. <b>netplanMTU:</b>
+      <code>gpu_fabric_eth_r0_p0.yaml</code>/<code>_p1.yaml</code> written byte-exact (mtu 9000,
+      <code>ignore-carrier: false</code> for legacy mode).</span></li>
+  <li><span class="t">Reboot #2</span><span class="e">mlnx_interface_mgr wait</span>
+      <span class="d">Second nodeprep reboot (mlxconfig apply protocol). This time the boot hook ran
+      <b>before</b> kubelet: journal shows <code>mlnx interface manager initialized</code>, then
+      <code>re-running netplan apply to restore VLAN subinterfaces</code>, then the kubelet manager-state
+      clear. Kubelet came up clean — the chicken-and-egg fix proven on the failure that found it.</span></li>
+  <li><span class="t">Finalizing</span><span class="e">renames, ACS, gates</span>
+      <span class="d"><b>udevRules:</b> 70-persistent-net + 60-persistent-rdma written, udevadm
+      reload+trigger renamed the rail ports to <code>eth_r0_p0</code>/<code>eth_r0_p1</code>
+      (<code>roce_r0_p0/1</code> IB names), both UP at mtu 9000 — default route on bond0.72 untouched.
+      <b>disableACS:</b> policy-enabled, <code>setpci</code> cleared ACS on 5 capable devices (8 already
+      clear, 453 without the capability), readback <code>0000</code> verified on the rail BDF.
+      <b>sriovNumVFs</b> Done (0 VFs = profile value), <b>vfGuids</b>/<b>ovsBridges</b> skipped by config,
+      <b>bfbFlash</b> Done-skip: "no BlueField-3 present to flash (only flashable class)" naming the full
+      ConnectX inventory — the flash gate proven negative-case on real hardware.
+      <b>losslessRoce:</b> first version applied PFC/ECN to all rail NICs and Failed readback — on CX-4 Lx
+      the <code>ecn</code> sysfs interface doesn't even exist. The bash gates the <i>entire</i>
+      <code>fn_set_lossless_roce</code> body on SuperNIC/ConnectX-7..9; 0.1.15 restored that gate and the
+      step now skips honestly, also fixing the PFC readback parser (mlnx_qos prints a column table, not the
+      comma form).</span></li>
+  <li><span class="t">T+25 min</span><span class="e">Ready, taint released</span>
+      <span class="d">REBOOTS=2, <code>Boot Verified=True</code>, <code>nodeprep</code> taint gone,
+      legacy mirror <code>spectrocloud.com/nodeprep: complete</code>, CAPI Machines unpaused. Host checks:
+      rail interfaces renamed at mtu 9000, netplan/udev files in place, <code>netns_mode=N</code>, ACS
+      <code>0000</code>, boot-hook journal clean, kubelet active, route intact.</span></li>
+</ul>
+
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
 <p class="sub">One row per bash function (line numbers into <code>nodeprep-v105.sh</code>). "Covered" means the
    behavior ran on the fresh node with the cited evidence; "Gate-verified" means the skip/detect logic exercised
@@ -274,9 +343,11 @@
   <tr>
     <td><code>fn_inventory_hw</code> <small>L191</small></td>
     <td>Detects NICs, PCI addresses, GUIDs; branches everything downstream</td>
-    <td>Agent inventory (sysfs/pci)</td>
-    <td><span class="pill live">Covered</span> Correctly found zero Mellanox devices and routed every
-        hardware-dependent step to its skip path.</td>
+    <td>Agent inventory (sysfs/pci + MFT enrichment)</td>
+    <td><span class="pill live">Covered</span> Run 1: correctly found zero Mellanox devices. Run 2: real
+        classification — mlxconfig <code>INTERNAL_CPU_OFFLOAD_ENGINE</code> probe with full-query fallback for
+        CX-4 generation → all four functions <code>ConnectX4LX/Air</code>, flint fw/PSID, rshim + IB device
+        discovery, two-pass rail assignment (<code>r0_p0</code>/<code>r0_p1</code> on the dual-port card).</td>
   </tr>
   <tr>
     <td><code>fn_init_sw_stage</code> <small>L288</small></td>
@@ -295,44 +366,58 @@
     <td><code>fn_init_hw_stage</code> <small>L468</small></td>
     <td>Parallel <code>bfb-install</code> through rshim to both BlueField DPUs, version-checked skip</td>
     <td><code>bfbFlash</code></td>
-    <td><span class="pill gate">Gate verified</span> Skipped — "no Mellanox hardware present". The gate chain
-        (hardware → MFT tool present → host mutations allowed → apply) is implemented; the flash body is v0.2.</td>
+    <td><span class="pill gate">Gate verified</span> Run 1: skipped, no Mellanox. Run 2: the flashable-class
+        gate proven negative-case on real adapters — BlueField-3-only (<code>isBluefield3</code> on the raw
+        mlxconfig type <i>and</i> an rshim present), CX-4 Lx reported as non-flashable with the full inventory;
+        a BF-3 without a configured BFB Blocks with the reason. The <code>bfb-install</code> apply body is v0.2.</td>
   </tr>
   <tr>
     <td><code>fn_config_stage</code> <small>L506</small></td>
     <td><code>mlxconfig</code> reset+set per adapter type; netplan <code>gpu_fabric_eth</code> file generation</td>
-    <td><code>mlxconfig</code></td>
-    <td><span class="pill gate">Gate verified</span> mlxconfig: same gate chain, body v0.2.
-        <span class="pill missing">Missing</span> netplan generation: no step writes
-        <code>gpu_fabric_eth</code> files (only the boot hook's <code>netplan apply</code> re-run exists).</td>
+    <td><code>mlxconfig</code>, <code>netplanMTU</code></td>
+    <td><span class="pill live">Covered</span> Run 2: per-device flash set (SRIOV_EN, LINK_TYPE_P1, query-gated
+        DSCP/RoCE-CC keys) built, compared, and verified on all 4 CX-4 Lx functions — no drift, no write needed;
+        drift would reset+set+verify and request the apply reboot. <b>netplan</b> files written byte-exact per
+        rail (mtu 9000, <code>ignore-carrier</code> tied to eswitch mode) with detect-verify on re-run.</td>
   </tr>
   <tr>
     <td><code>fn_disable_acs</code> <small>L589</small></td>
     <td>Disables ACS on PCI bridges via setpci</td>
     <td><code>disableACS</code></td>
-    <td><span class="pill gate">Gate verified</span> Profile policy <code>disableACS=false</code> honored →
-        "skipped by policy". <code>setpci</code> body v0.2.</td>
+    <td><span class="pill live">Covered</span> Run 1: policy <code>false</code> honored. Run 2: policy
+        <code>true</code> — <code>setpci</code> walked every BDF, cleared ACS on 5 capable devices (8 already
+        clear, 453 without the capability) with per-device readback; host verified <code>@236 = 0000</code>
+        on the rail BDF.</td>
   </tr>
   <tr>
     <td><code>fn_set_vfs</code> <small>L611</small></td>
     <td>Cordon, devlink eswitch → switchdev, write <code>sriov_numvfs</code>, synthesize VF GUIDs from the
         PF <code>node_guid</code></td>
     <td><code>sriovNumVFs</code>, <code>vfGuids</code> <small>(critical)</small></td>
-    <td><span class="pill gate">Gate verified</span> <code>sriovNumVFs</code> reads the current
-        <code>sriov_numvfs</code> per device; both steps skipped on no-Mellanox. Writes are v0.2.</td>
+    <td><span class="pill live">Covered (0-VF path)</span> Run 2: profile <code>numVFs 0</code> — current
+        <code>sriov_numvfs</code> read per device, counts match, firmware <code>NUM_OF_VFS</code> clamp not
+        triggered; <code>vfGuids</code> "skipped: no VFs requested". Non-zero VF writes remain v0.2.</td>
   </tr>
   <tr>
     <td><code>fn_rename_devices</code> <small>L795</small></td>
     <td>udev 70-persistent-net / 60-persistent-rdma rules, <code>ip link up</code>, VF MTU −50</td>
     <td><code>udevRules</code> <small>(critical)</small></td>
-    <td><span class="pill gate">Gate verified</span> Rail-NIC detection ran ("no rail NICs to rename").
-        Rule generation v0.2.</td>
+    <td><span class="pill live">Covered</span> Run 2: rail ports renamed for real — udev rules written
+        (net + rdma, <code>rdma_rename NAME_FIXED roce_r0_pN</code>, ToS 96), <code>udevadm reload+trigger</code>,
+        <code>eth_r0_p0/1</code> UP at mtu 9000 with <code>roce_r0_p0/1</code> IB names, detection-compare on
+        re-run; default route on bond0.72 untouched.</td>
   </tr>
   <tr>
     <td><code>fn_set_lossless_roce</code> <small>L833</small></td>
-    <td><code>mlnx_qos</code> PFC/ECN/cnp_dscp; <code>mlxreg</code> ROCE_ACCL, PIPG, 0x5006</td>
+    <td><code>mlnx_qos</code> PFC/ECN/cnp_dscp; <code>mlxreg</code> ROCE_ACCL, PIPG, 0x5006 — <b>entire body
+        gated on SuperNIC/ConnectX-7..9</b></td>
     <td><code>losslessRoce</code> <small>(critical)</small></td>
-    <td><span class="pill gate">Gate verified</span> Skipped — no Mellanox hardware. Body v0.2.</td>
+    <td><span class="pill gate">Gate verified</span> Run 1: skipped, no Mellanox. Run 2 exposed two defects in
+        the first body (applied PFC/ECN to all rail NICs; readback parsed the wrong mlnx_qos format) — fixed in
+        0.1.15: the bash's whole-body device-class gate restored, off-class hardware skipped honestly with
+        inventory, PFC readback parses the column table. The apply body (mlnx_qos/mlnxreg) is exercised for
+        class devices only; none exist on the lab hardware, so a true lossless-RoCE application still needs
+        SuperNIC/CX-7..9 hardware.</td>
   </tr>
   <tr>
     <td><code>fn_add_pfs_to_rail_bridges</code> <small>L863</small></td>
@@ -367,8 +452,10 @@
     <td>The script re-runs state repair from rc.local at every boot</td>
     <td><code>nodeprep-boot.service</code> + hook script</td>
     <td><span class="pill live">Covered + proven</span> systemd unit ordered <code>Before=kubelet.service</code>,
-        content-hash self-check, hardware-gated mlnx wait, guarded kubelet reset — validated across both
-        reboots, including the planted-corruption proof.</td>
+        content-hash self-check, hardware-gated mlnx wait, guarded kubelet reset. Run 1: both reboots validated
+        it, including the planted-corruption proof. Run 2: the mlnx wait live-proven — journal
+        <code>mlnx interface manager initialized</code> before kubelet start — and 0.1.14 fixed the
+        chicken-and-egg by installing the hook every cycle, before any reboot-capable stage.</td>
   </tr>
   </tbody>
 </table>
@@ -404,21 +491,22 @@
 </ul>
 
 <h2><span class="no">§5</span>Honest gaps — what is not converted yet</h2>
-<p class="sub">Ordered roughly by when they would bite. The first block only matters once a Mellanox-equipped
-   system is provided; the second block applies to every node.</p>
+<p class="sub">Ordered roughly by when they would bite. Run 2 closed the ConnectX-path gaps (mlxconfig, netplan,
+   udev renames, 0-VF SR-IOV, ACS, ib_core netns); what remains needs hardware or modes the lab doesn't have.</p>
 
-<h3>On the Mellanox path (waiting on hardware)</h3>
+<h3>Needing hardware or modes beyond the lab</h3>
 <ul class="tight">
-  <li><b>Flash/config mutation bodies</b> — <code>bfb-install</code>, <code>mlxconfig</code>,
-      <code>sriov_numvfs</code> writes, VF GUID synthesis, udev rule generation, <code>mlnx_qos</code>/<code>mlxreg</code>,
-      OVS bridge convergence, ACS setpci, NFSoRDMA modules: gates are in and verified, bodies land in v0.2
-      with full Detect/Apply/Verify semantics. Their package prerequisite is met: <code>mft</code> (and the
-      other bash companion packages) are in the profile and verified installed on the test nodes, so the
-      gated steps will find their tools when the hardware arrives.</li>
-  <li><b>Post-software-stage reboot trigger</b> — the reboot protocol exists and is proven, but
-      <code>requestReboot</code> is not yet called by any step; the bash script's "reboot to inithw" after the
-      software stage needs that one-line trigger wired into the Mellanox path.</li>
-  <li><b>netplan <code>gpu_fabric_eth</code> generation</b> — fn_config_stage's file writing has no equivalent.</li>
+  <li><b>BFB flash apply</b> — the BlueField-3 gate, rshim discovery and BFB config plumbing are in and
+      gate-proven, but <code>bfb-install</code> itself needs a BlueField-3, which the lab cluster doesn't
+      carry (v0.2).</li>
+  <li><b>Non-zero VF pipeline</b> — <code>sriov_numvfs</code> writes and VF GUID synthesis from the PF
+      <code>node_guid</code> are v0.2; the lab mandate was explicitly numVFs=0 (verified) with switchdev and
+      VF modes deferred.</li>
+  <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
+      runs <code>eswitch legacy</code> (the step's gate verified).</li>
+  <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
+      implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
+      skips it, so a real application run needs that hardware class.</li>
   <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs.</li>
   <li><b>rshim restart</b> before flashing.</li>
 </ul>
@@ -456,16 +544,43 @@
      parsing all 21 rendering variants with real <code>sh -n</code>. Reboot #2 then proved the repaired hook
      end-to-end with planted corruption.</p>
 </div>
+<div class="callout warn">
+  <p><b>Boot hook installed too late for the first prep reboot</b> (0.1.14, Run 2). The hook (kubelet
+     manager-state reset + mlnx wait) was only installed during the Finalizing <code>kubeletState</code> step,
+     but the first nodeprep reboot happens in Provisioning (ib_core reload) — so both workers crashlooped
+     kubelet on stale <code>memory_manager_state</code> the moment they came back. Fix: the agent installs the
+     hook in every cycle, before any stage that can request a reboot. Proven by Run 2's second reboot: hook ran
+     pre-kubelet, journal clean, no crashloop.</p>
+</div>
+<div class="callout warn">
+  <p><b>losslessRoce overreached the bash gate and misread its own readback</b> (0.1.15, Run 2). The first body
+     applied PFC/ECN to every rail NIC when the bash gates the <i>entire</i> <code>fn_set_lossless_roce</code>
+     body on SuperNIC/ConnectX-7..9 — on CX-4 Lx the <code>ecn</code> sysfs interface doesn't exist at all, so
+     the step Failed 5 attempts and parked the NodePrep. The PFC verify also matched the comma-separated
+     <code>--pfc</code> input form against mlnx_qos output, which prints a column table. Fix: whole-body class
+     gate restored (off-class hardware skips honestly, naming its inventory), column-table parser, unit tests
+     for both.</p>
+</div>
+<div class="callout warn">
+  <p><b>NodePrepProfile updates impossible: stale resourceVersion replayed from
+     <code>last-applied-configuration</code></b> (Run 2, user-reported). Client-side apply embeds the manifest in
+     the annotation on first apply; an export from another cluster carries its old <code>resourceVersion</code>
+     into that annotation, and every subsequent apply replays it as an optimistic-concurrency guard → "the object
+     has been modified". Fix: one-time
+     <code>kubectl annotate nodeprepprofile &lt;name&gt; kubectl.kubernetes.io/last-applied-configuration-</code>,
+     keep exports free of server-side metadata (or apply with <code>--server-side</code>). Root-caused live,
+     documented in the controller README.</p>
+</div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
-     tests so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was restored to 100%
-     after verification completed. The first (unpatched) reboot attempt did get remediated — the cluster deleted
-     the Machine and MAAS re-racked it, which is itself what provided the fresh-node test bed.</p>
+     tests (both runs) so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was
+     restored to 100% after verification completed. The first (unpatched) reboot attempt did get remediated — the
+     cluster deleted the Machine and MAAS re-racked it, which is itself what provided the fresh-node test bed.</p>
 </div>
 
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
-  host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6 · controller/agent 0.1.10 → 0.1.11 · sibling document to
+  host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04 · controller/agent 0.1.10 → 0.1.15 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
