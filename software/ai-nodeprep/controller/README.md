@@ -32,9 +32,8 @@ Real, exercised end-to-end:
   `mode: labelSelector` (default) gates on `selection.nodeSelector`;
   `mode: allWorkers` adopts every non-control-plane node, no label needed;
   `mode: allNodes` also adopts control planes (with
-  `policy.controlPlanePrep: true`; quorum choreography below). The legacy
-  top-level `spec.nodeSelector` keeps working when `selection` is absent.
-  `selection.excludeLabel` ("key" or "key=value") disqualifies individual
+  `policy.controlPlanePrep: true`; quorum choreography below).
+  `selection.excludeLabel ("key" or "key=value") disqualifies individual
   nodes under every mode.
 - **Control-plane prep** (§6.4): with `policy.controlPlanePrep: true`,
   control-plane nodes run the same step machine, admitted through the quorum
@@ -142,9 +141,9 @@ which ignores the annotation entirely).
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.28-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.28-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.28-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.29-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.29-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.29-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

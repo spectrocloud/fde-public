@@ -102,10 +102,10 @@ func (c *Controller) reprobeMachineCRD(ctx context.Context) bool {
 	return c.machineCRD
 }
 
-// matchesSelection evaluates a profile's node selection against a node
-// (design §3.1): the excludeLabel disqualifies first, then the mode picks
-// the node set — labelSelector (or the legacy top-level nodeSelector) gates
-// on labels, allWorkers on "not a control plane", allNodes on everything.
+// matchesSelection evaluates a profile's selection against a node (design
+// §3.1): the excludeLabel disqualifies first, then the mode picks the node
+// set — labelSelector gates on labels, allWorkers on "not a control plane",
+// allNodes on everything. A profile with no selection block adopts nothing.
 func matchesSelection(p *v1alpha1.NodePrepProfile, node *corev1.Node) bool {
 	if ExcludeLabelMatch(p.Spec.Selection.GetExcludeLabel(), node.Labels) {
 		return false
@@ -117,9 +117,6 @@ func matchesSelection(p *v1alpha1.NodePrepProfile, node *corev1.Node) bool {
 		return true
 	default: // "", labelSelector — the label gate
 		sel := p.Spec.Selection.GetNodeSelector()
-		if sel == nil {
-			sel = p.Spec.NodeSelector
-		}
 		if sel == nil {
 			return false
 		}
@@ -223,7 +220,7 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 			// but no profile claims this node, so no NodePrep is created and
 			// the agent idles. Say so once.
 			c.noProfileLogged[nodeName] = true
-			fmt.Printf("[nodeprep] node %s matches no NodePrepProfile nodeSelector; not adopting (label the node or widen the selector)\n", nodeName)
+			fmt.Printf("[nodeprep] node %s matches no NodePrepProfile selection; not adopting (add a selection block or widen it)\n", nodeName)
 		}
 		return
 	}

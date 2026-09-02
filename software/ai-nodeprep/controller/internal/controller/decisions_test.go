@@ -164,12 +164,6 @@ func TestMatchesSelection(t *testing.T) {
 		return &metav1.LabelSelector{MatchLabels: map[string]string{k: v}}
 	}
 
-	// Legacy top-level nodeSelector still gates when selection is absent.
-	legacy := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{NodeSelector: ls("node.spectrocloud.com/ai-worker", "true")}}
-	if !matchesSelection(legacy, worker) || matchesSelection(legacy, cp) {
-		t.Error("legacy nodeSelector must keep working")
-	}
-
 	// labelSelector inside selection.
 	lab := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
 		Selection: &v1alpha1.SelectionSpec{Mode: "labelSelector", NodeSelector: ls("node.spectrocloud.com/ai-worker", "true")},
@@ -215,7 +209,8 @@ func TestMatchesSelection(t *testing.T) {
 		t.Error("bare-key exclusion must match any value")
 	}
 
-	// No selector anywhere: no match.
+	// No selection block anywhere: no match (the legacy top-level
+	// nodeSelector no longer exists — selection is the only gate).
 	empty := &v1alpha1.NodePrepProfile{}
 	if matchesSelection(empty, worker) {
 		t.Error("a profile with no selection must adopt nothing")

@@ -99,13 +99,9 @@ type NodePrepProfile struct {
 }
 
 type NodePrepProfileSpec struct {
-	// NodeSelector decides which Nodes are adopted. Legacy spelling — the
-	// selection block supersedes it; both may not be set at once.
-	// +optional
-	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
-
-	// Selection decides which Nodes are adopted (§3.1). When unset, the
-	// top-level nodeSelector is the gate.
+	// Selection decides which Nodes are adopted (§3.1) — the single
+	// selection control. When unset, no nodes are adopted: a profile must
+	// declare how it picks its nodes.
 	// +optional
 	Selection *SelectionSpec `json:"selection,omitempty"`
 
@@ -142,7 +138,7 @@ type SelectionSpec struct {
 	ExcludeLabel string `json:"excludeLabel,omitempty"`
 }
 
-// Nil-safe accessors: a nil Selection means the legacy nodeSelector gate.
+// Nil-safe accessors: a nil Selection adopts nothing.
 
 func (s *SelectionSpec) GetMode() string {
 	if s == nil {

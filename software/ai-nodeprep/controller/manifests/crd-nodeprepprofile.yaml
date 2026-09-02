@@ -38,33 +38,8 @@ spec:
             spec:
               type: object
               properties:
-                nodeSelector:
-                  description: |
-                    Legacy adoption gate; superseded by spec.selection. Which
-                    Nodes are adopted into NodePrep objects.
-                  type: object
-                  properties:
-                    matchLabels:
-                      type: object
-                      additionalProperties:
-                        type: string
-                    matchExpressions:
-                      type: array
-                      items:
-                        type: object
-                        required: [key, operator]
-                        properties:
-                          key:
-                            type: string
-                          operator:
-                            type: string
-                            enum: [In, NotIn, Exists, DoesNotExist]
-                          values:
-                            type: array
-                            items:
-                              type: string
                 selection:
-                  description: Node adoption selection (§3.1) — supersedes nodeSelector.
+                  description: Node adoption selection (§3.1) — the profile's single selection control.
                   type: object
                   properties:
                     mode:
