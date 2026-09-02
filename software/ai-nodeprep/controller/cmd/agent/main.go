@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,7 +31,14 @@ func main() {
 	allowReboot := flag.Bool("allow-reboot", false, "permit nodeprep-initiated reboots (design §5.2)")
 	hostMutations := flag.Bool("host-mutations", false, "allow steps to mutate the host (v0.2 steps; v0.1 stays detect-only without this)")
 	rebootCommand := flag.String("reboot-command", defaultRebootCommand, "command executed for nodeprep-initiated reboots")
+	verbose := flag.Bool("verbose", false, "log every host exec in full — quiet sweeps and tool dumps (mlxconfig/flint queries, ACS lspci/setpci traffic) become visible; for troubleshooting")
 	flag.Parse()
+	// NODEPREP_VERBOSE=true turns verbose on without touching the manifest
+	// args: kubectl -n nodeprep-system set env daemonset/nodeprep-agent
+	// NODEPREP_VERBOSE=true (and NODEPREP_VERBOSE- to turn it back off).
+	if envVerbose(os.Getenv("NODEPREP_VERBOSE")) {
+		*verbose = true
+	}
 
 	if *nodeName == "" {
 		fmt.Fprintln(os.Stderr, "node name required: set NODE_NAME or pass -node-name")
@@ -64,9 +72,13 @@ func main() {
 	if *allowReboot {
 		rebootMode = "reboots ENABLED"
 	}
-	fmt.Printf("[nodeprep-agent] mode: %s, %s\n", mode, rebootMode)
+	logMode := "compact logs"
+	if *verbose {
+		logMode = "verbose logs"
+	}
+	fmt.Printf("[nodeprep-agent] mode: %s, %s, %s\n", mode, rebootMode, logMode)
 
-	a := agent.New(client, dyn, *nodeName, *ns, *interval, *allowReboot, *hostMutations, *rebootCommand)
+	a := agent.New(client, dyn, *nodeName, *ns, *interval, *allowReboot, *hostMutations, *verbose, *rebootCommand)
 	if err := a.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "agent exited: %v\n", err)
 		os.Exit(1)
@@ -78,4 +90,13 @@ func loadConfig(path string) (*rest.Config, error) {
 		return rest.InClusterConfig()
 	}
 	return clientcmd.BuildConfigFromFlags("", path)
+}
+
+// envVerbose reads the NODEPREP_VERBOSE toggle: true/1/yes enable.
+func envVerbose(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes":
+		return true
+	}
+	return false
 }

@@ -27,19 +27,21 @@ func (a *Agent) hostExec(env []string, timeout time.Duration, name string, args 
 	return a.hostExecV(env, timeout, name, false, args...)
 }
 
-// hostExecQuiet is hostExec without per-invocation logging, for sweeps whose
-// expected outcome is a benign negative for the overwhelming majority of
-// devices — the ACS capability probe reads every PCI function on the node
-// and most expose no ACS capability, so printing each expected setpci error
-// buried the log (~900 lines per verify pass on the lab workers). Outcomes
-// still return to the caller, which aggregates them into the step message;
-// the ledger stays the audit trail. Only the genuinely unexpected — a
-// timeout — still logs.
+// hostExecQuiet is hostExec without per-invocation logging, for sweeps and
+// tool queries whose per-invocation output is steady-state noise: the ACS
+// probe reads every PCI function and most expose no capability (~900 lines
+// per verify pass on the lab workers), the mlxconfig device queries dump
+// their full configuration table, the lspci enumeration lists every device.
+// Outcomes still return to the caller, which aggregates them into the step
+// message; the ledger stays the audit trail. Only the genuinely unexpected
+// — a timeout, or a failed exec when the outcome is not aggregated — still
+// logs. With -verbose (troubleshooting) quiet execs log like normal ones.
 func (a *Agent) hostExecQuiet(env []string, timeout time.Duration, name string, args ...string) (string, error) {
 	return a.hostExecV(env, timeout, name, true, args...)
 }
 
 func (a *Agent) hostExecV(env []string, timeout time.Duration, name string, quiet bool, args ...string) (string, error) {
+	quiet = quiet && !a.verbose // -verbose (troubleshooting) logs everything
 	cmdline := strings.Join(append([]string{name}, args...), " ")
 	if !quiet {
 		a.logf("host exec: %s", cmdline)
@@ -130,7 +132,8 @@ func heavyEnvForward(e string) bool {
 // runLogged is the shared execution-and-audit body of hostExec and
 // heavyHostExec: run, time, log the outcome with a bounded output tail.
 // quiet (hostExecQuiet) suppresses the attempt and outcome lines; a timeout
-// still logs there because it is never an expected result.
+// still logs there because it is never an expected result. (hostExecV
+// already folded -verbose into quiet.)
 func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline string, cmd *exec.Cmd, quiet bool) (string, error) {
 	start := time.Now()
 	out, err := cmd.CombinedOutput()

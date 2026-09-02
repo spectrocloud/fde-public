@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.22</span>
+    <span>nodeprep-v105.sh → controller v0.1.23</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -584,7 +584,12 @@
      sweep's last action, reading like a device dump); it and the per-device setpci writes now run quiet too,
      and the step message itself is the mutation record — "disabled ACS on: &lt;devices&gt; (N already clear, M
      without ACS capability)" — logged on change by boot-verify as well, so a drift repair is visible in logs
-     and status alike.</p>
+     and status alike. The remaining tool dumps followed (0.1.23): <code>mlxconfig</code>/<code>flint</code>
+     device queries and <code>mlnx_qos</code> readbacks also run quiet, all behind a troubleshooting toggle —
+     <code>-verbose</code> or <code>NODEPREP_VERBOSE=true</code> (kubectl set env) — that restores every exec
+     and dump in full (verified both ways: 15-line startup log compact, ~1700 lines verbose, back to 15). A
+     Ready node's steady-state log is now mode line, classification lines, and boot-hook install — nothing
+     else between verify passes.</p>
 </div>
 <div class="callout warn">
   <p><b>NodePrepProfile updates impossible: stale resourceVersion replayed from

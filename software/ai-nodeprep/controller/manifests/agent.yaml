@@ -36,7 +36,7 @@ spec:
           operator: Exists
       containers:
         - name: agent
-          image: docker.io/kreeuwijk/ai-nodeprep:0.1.22-agent
+          image: docker.io/kreeuwijk/ai-nodeprep:0.1.23-agent
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME
@@ -49,6 +49,12 @@ spec:
             # the binary; uncomment to let steps mutate the host / reboot it.
             # - -host-mutations
             # - -allow-reboot
+            # Verbose host-exec logging (troubleshooting): every exec and
+            # tool dump is logged in full. Can also be toggled on a running
+            # cluster without editing this file:
+            #   kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE=true
+            #   kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE-
+            # - -verbose
           securityContext:
             privileged: true
           volumeMounts:

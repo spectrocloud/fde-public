@@ -206,7 +206,11 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 		}
 		d.ibdev = ibdevFor(d.pci)
 		d.rshim = rshimFor(d.fn)
-		if out, err := a.hostExec(nil, 60*time.Second, "mlxconfig", "-d", d.pci, "q"); err == nil {
+		// Both tool dumps run quiet (the one-line classification log below
+		// is the record; -verbose shows the full output): mlxconfig prints
+		// the device's whole configuration table, flint the whole image
+		// info block.
+		if out, err := a.hostExecQuiet(nil, 60*time.Second, "mlxconfig", "-d", d.pci, "q"); err == nil {
 			d.rawType = rawDeviceType(out)
 			d.devType, d.variant = classifyMlxconfig(out)
 		} else {
@@ -214,7 +218,7 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 			continue // classification retries once MFT is installed
 		}
 		a.logf("inventory: %s (%s) classified %s/%s fw %s psid %s rshim %s", d.pci, d.netdev, d.devType, d.variant, d.fwVer, d.psid, d.rshim)
-		if out, err := a.hostExec(nil, 60*time.Second, "flint", "-d", d.pci, "q"); err == nil {
+		if out, err := a.hostExecQuiet(nil, 60*time.Second, "flint", "-d", d.pci, "q"); err == nil {
 			d.fwVer, d.psid = parseFlint(out)
 		}
 		a.mftCache[d.pci] = mftInfo{devType: d.devType, rawType: d.rawType, variant: d.variant, fwVer: d.fwVer, psid: d.psid}

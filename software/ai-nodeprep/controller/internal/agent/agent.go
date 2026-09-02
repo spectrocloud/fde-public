@@ -77,6 +77,11 @@ type Agent struct {
 	// hookDone remembers the boot-hook content already verified/enabled this
 	// process lifetime, so the steady-state cycle costs zero host execs.
 	hookDone string
+
+	// verbose (-verbose / NODEPREP_VERBOSE=true, troubleshooting) logs every
+	// host exec in full: quiet sweeps and tool dumps (mlxconfig/flint
+	// queries, the ACS lspci+setpci traffic) become visible again.
+	verbose bool
 }
 
 // bootVerifyInterval paces the Ready-phase re-verification. A new boot
@@ -84,10 +89,11 @@ type Agent struct {
 // runs on this maintenance cadence, not every poll cycle.
 const bootVerifyInterval = 5 * time.Minute
 
-func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations bool, rebootCommand string) *Agent {
+func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations, verbose bool, rebootCommand string) *Agent {
 	return &Agent{
 		client: client, dyn: dyn, nodeName: nodeName, ns: ns,
 		interval: interval, allowReboot: allowReboot, hostMutations: hostMutations,
+		verbose:        verbose,
 		rebootCommand:  rebootCommand,
 		backoffUntil:   map[string]time.Time{},
 		mftCache:       map[string]mftInfo{},

@@ -65,9 +65,11 @@ func (a *Agent) mlxconfigGet(pci, key string) (string, bool, error) {
 // KEY VALUE line. The per-key form costs one mlxconfig invocation per key
 // (the Ready-phase verify passes re-read all of them every pass); a single
 // full query carries the same lines. Keys the device does not expose are
-// simply absent from the map.
+// simply absent from the map. The query dumps the device's whole
+// configuration table, so it runs quiet — the step message (and, with
+// -verbose, the exec log) carries the detail.
 func (a *Agent) mlxconfigGetAll(pci string) (map[string]string, error) {
-	out, err := a.hostExec(nil, 30*time.Second, "mlxconfig", "-d", pci, "q")
+	out, err := a.hostExecQuiet(nil, 30*time.Second, "mlxconfig", "-d", pci, "q")
 	if err != nil {
 		return nil, err
 	}
@@ -700,7 +702,7 @@ func (a *Agent) verifyLossless(rails []pciDevice) string {
 		if dev == "" {
 			continue
 		}
-		out, err := a.hostExec(nil, 30*time.Second, "mlnx_qos", "-i", dev)
+		out, err := a.hostExecQuiet(nil, 30*time.Second, "mlnx_qos", "-i", dev) // -verbose shows the readback
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: mlnx_qos query: %v", dev, err))
 			continue

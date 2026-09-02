@@ -82,6 +82,23 @@ With either absent, steps report `Blocked` with the reason instead of
 guessing. This is the v0.1 testing posture: run everything in a lab, watch
 the NodePrep object describe what the bash script *would* have done.
 
+## Verbose host-exec logging
+
+By default the agent logs compactly: sweeps and tool queries whose output is
+steady-state noise — the ACS `lspci`/`setpci` traffic over every PCI device,
+`mlxconfig`/`flint` device queries (each dumps the device's full
+configuration/image table), `mlnx_qos` readbacks — run quiet, and the step
+message in the NodePrep status is the record ("disabled ACS on: …"). To see
+every host exec in full while troubleshooting, either pass `-verbose` to the
+agent or toggle it on a running cluster without touching the manifest:
+
+```sh
+kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE=true   # on
+kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE-      # off
+```
+
+Both roll the agent pods; with verbose off again, quiet sweeps go silent.
+
 ## Updating a NodePrepProfile without conflicts
 
 `kubectl apply -f profile.yaml` fails with *"the object has been modified;
