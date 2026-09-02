@@ -184,12 +184,16 @@ func railLabel(d pciDevice) string {
 }
 
 // enrichMellanox fills the MFT-derived fields of every Mellanox function:
-// device classification via mlxconfig INTERNAL_CPU_OFFLOAD_ENGINE (the bash
-// fn_inventory_hw probe), firmware/PSID via flint, the rshim device (DPUs)
-// and the sysfs IB device name. mlxconfig/flint run once per PCI address per
-// agent process — the values only change on firmware operations — and
-// failures are retried on later refreshes so a classification that ran
-// before MFT was installed corrects itself.
+// device classification from the mlxconfig device header, firmware/PSID via
+// flint, the rshim device (DPUs) and the sysfs IB device name. One full
+// `mlxconfig q` per PCI address classifies it — mlxconfig prints the
+// Description and Device type header on every query, whether or not the
+// device supports the probed key (the bash reads the same header from its
+// INTERNAL_CPU_OFFLOAD_ENGINE probe without checking the probe's exit
+// code). mlxconfig/flint run once per PCI address per agent process — the
+// values only change on firmware operations — and failures are retried on
+// later refreshes so a classification that ran before MFT was installed
+// corrects itself.
 func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 	for i := range mellanox {
 		d := &mellanox[i]
@@ -202,16 +206,9 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 		}
 		d.ibdev = ibdevFor(d.pci)
 		d.rshim = rshimFor(d.fn)
-		if out, err := a.hostExec(nil, 30*time.Second, "mlxconfig", "-d", d.pci, "q", "INTERNAL_CPU_OFFLOAD_ENGINE"); err == nil {
+		if out, err := a.hostExec(nil, 60*time.Second, "mlxconfig", "-d", d.pci, "q"); err == nil {
+			d.rawType = rawDeviceType(out)
 			d.devType, d.variant = classifyMlxconfig(out)
-			d.rawType = rawDeviceType(out)
-		} else if out, ferr := a.hostExec(nil, 60*time.Second, "mlxconfig", "-d", d.pci, "q"); ferr == nil {
-			// Older adapters (ConnectX-4 generation) may not expose the
-			// INTERNAL_CPU_OFFLOAD_ENGINE key at all; the full query still
-			// carries the Device type line. A non-DPU device classifies as
-			// ConnectX/<family>, variant Air (no internal CPU).
-			d.rawType = rawDeviceType(out)
-			d.devType, d.variant = classifyDeviceType(d.rawType), "Air"
 		} else {
 			a.logf("inventory: %s not classified (mlxconfig unavailable: %v)", d.pci, err)
 			continue // classification retries once MFT is installed
@@ -233,10 +230,16 @@ type mftInfo struct {
 	psid    string
 }
 
-// classifyMlxconfig mirrors the bash fn_inventory_hw classification: the
-// INTERNAL_CPU_OFFLOAD_ENGINE Description line classifies the card; when it
-// reads "N/A" the Device type line decides and the variant is Air (a
-// non-DPU NIC has no internal CPU to describe).
+// classifyMlxconfig mirrors the bash fn_inventory_hw classification. The
+// Description line decides the variant: every real device carries an actual
+// description, so "N/A" means the device is emulated (NVIDIA DSX Air) —
+// variant Air — and the Device type line is read instead. Physical
+// classification uses the description, the only place a BlueField-3
+// SuperNIC ("…HHHL SuperNIC; …") differs from a BlueField-3 DPU ("…DPU;
+// …"): both report Device type "BlueField3". ConnectX devices take the
+// bash family form (text between ':' and ';', trimmed, spaces →
+// underscores); anything else is Unknown — a DSX Air BlueField-3 included,
+// exactly as the bash classifies it.
 func classifyMlxconfig(out string) (devType, variant string) {
 	descLine, typeLine := "", ""
 	for _, ln := range strings.Split(out, "\n") {
@@ -278,21 +281,6 @@ func rawDeviceType(out string) string {
 		}
 	}
 	return ""
-}
-
-// classifyDeviceType maps a raw mlxconfig device type onto the bash
-// classification when the INTERNAL_CPU_OFFLOAD_ENGINE probe is unavailable
-// (BlueField hardware not probed, ConnectX-N kept verbatim).
-func classifyDeviceType(rawType string) string {
-	switch {
-	case strings.Contains(rawType, "SuperNIC"):
-		return "SuperNIC"
-	case strings.Contains(rawType, "BlueField"), strings.Contains(rawType, "DPU"):
-		return "DPU"
-	case strings.Contains(rawType, "ConnectX"):
-		return strings.ReplaceAll(strings.TrimSpace(rawType), " ", "_")
-	}
-	return "Unknown"
 }
 
 // parseFlint pulls "FW Version:" and "PSID:" out of a flint query.

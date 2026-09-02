@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.18</span>
+    <span>nodeprep-v105.sh → controller v0.1.20</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -249,9 +249,10 @@
       <span class="d">Rail assignment proven against real hardware: the profile maps rail <code>r0</code> to PCI
       function <code>49:00</code>; the agent's two-pass enumeration split the dual-port card into
       <code>r0_p0</code>/<code>r0_p1</code> (bash grammar) and left the unmapped <code>16:00</code> card
-      rail-less. MFT classification ran for real — <code>mlxconfig q INTERNAL_CPU_OFFLOAD_ENGINE</code> is not
-      exposed by CX-4 Lx, so the full-query fallback classified all four functions
-      <code>ConnectX4LX/Air</code>, fw 14.32.1010, with IB devices and netdevs resolved.</span></li>
+      rail-less. MFT classification ran for real — one full <code>mlxconfig q</code> per function: the
+      Description line (present on every query, key support or not) classified all four functions
+      <code>Physical</code> with Description-derived types (<code>ConnectX-4_Lx_EN_LOM</code> /
+      <code>ConnectX-4_Lx_mezz_card</code>), fw 14.32.1010, with IB devices and netdevs resolved.</span></li>
   <li><span class="t">T+2 min</span><span class="e">Provisioning — downloads, packages</span>
       <span class="d">BFB + DOCA deb fetched from the MAAS mirror and sha256-verified;
       <code>doca-all, lldpd, mft, pv</code> installed in host transient units.</span></li>
@@ -345,9 +346,12 @@
     <td>Detects NICs, PCI addresses, GUIDs; branches everything downstream</td>
     <td>Agent inventory (sysfs/pci + MFT enrichment)</td>
     <td><span class="pill live">Covered</span> Run 1: correctly found zero Mellanox devices. Run 2: real
-        classification — mlxconfig <code>INTERNAL_CPU_OFFLOAD_ENGINE</code> probe with full-query fallback for
-        CX-4 generation → all four functions <code>ConnectX4LX/Air</code>, flint fw/PSID, rshim + IB device
-        discovery, two-pass rail assignment (<code>r0_p0</code>/<code>r0_p1</code> on the dual-port card).</td>
+        classification from the full <code>mlxconfig q</code> Description line — <code>N/A</code> means DSX
+        Air emulated (variant Air, Device type decides); otherwise Physical with the description as
+        identity (the only SuperNIC-vs-DPU discriminator for BlueField-3, whose Device type is always
+        <code>BlueField3</code>) → all four functions <code>Physical</code>
+        (<code>ConnectX-4_Lx_EN_LOM</code>/<code>ConnectX-4_Lx_mezz_card</code>), flint fw/PSID, rshim +
+        IB device discovery, two-pass rail assignment (<code>r0_p0</code>/<code>r0_p1</code>).</td>
   </tr>
   <tr>
     <td><code>fn_init_sw_stage</code> <small>L288</small></td>

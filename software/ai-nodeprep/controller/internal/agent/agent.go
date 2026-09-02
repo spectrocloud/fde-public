@@ -466,7 +466,7 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 
 // finalizeAndVerify runs boot-verify before entering Ready (design §6.1).
 func (a *Agent) finalizeAndVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) {
-	if a.bootVerify(np, profile) {
+	if a.bootVerify(ctx, np, profile) {
 		conds := np.Status.Conditions
 		k8sutil.SetCondition(&conds, v1alpha1.ConditionBootVerified, "True", v1alpha1.ReasonVerified,
 			"runtime-critical steps verified on boot "+np.Status.BootID, 0)
@@ -495,7 +495,7 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 	}
 	verified := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionBootVerified) == "True"
 	defer func() { a.lastBootVerify.bootID, a.lastBootVerify.at = bootID, time.Now() }()
-	if a.bootVerify(np, profile) {
+	if a.bootVerify(ctx, np, profile) {
 		if !verified {
 			conds := np.Status.Conditions
 			k8sutil.SetCondition(&conds, v1alpha1.ConditionBootVerified, "True", v1alpha1.ReasonVerified,
@@ -517,14 +517,31 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 }
 
 // bootVerify re-runs Detect over the runtime-critical steps (design §6.1).
-func (a *Agent) bootVerify(np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) bool {
+// Fresh messages are written into the step ledger as it goes — a verify
+// pass is the step's latest outcome while Ready, and a provisioning-era
+// message would otherwise keep describing state (e.g. a superseded
+// inventory classification) for the life of the boot.
+func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) bool {
+	changed := false
 	for _, def := range stepDefs {
 		if !def.critical {
 			continue
 		}
-		state, _ := def.run(a, np, profile)
+		state, msg := def.run(a, np, profile)
+		if s := stepByName(np.Status.Steps, def.name); s != nil && s.Message != msg {
+			s.Message = msg
+			changed = true
+		}
 		if state != v1alpha1.StepDone {
+			if changed {
+				_ = a.patchStatus(ctx, map[string]interface{}{"steps": np.Status.Steps})
+			}
 			return false
+		}
+	}
+	if changed {
+		if err := a.patchStatus(ctx, map[string]interface{}{"steps": np.Status.Steps}); err != nil {
+			a.logf("boot-verify step patch failed: %v", err)
 		}
 	}
 	return true

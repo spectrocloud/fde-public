@@ -9,41 +9,51 @@ import (
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
-// Classification mirrors the bash fn_inventory_hw probe parsing.
+// Classification mirrors the bash fn_inventory_hw description parsing: the
+// Description line decides variant AND identity; "N/A" (DSX Air emulated)
+// falls back to the Device type line.
 func TestClassifyMlxconfig(t *testing.T) {
-	// ConnectX-4 Lx: the offload-engine Description reads N/A, so the
-	// Device type line decides and the variant is Air.
-	cx4lx := "Device #1:\n----------\nDevice type:    ConnectX4Lx\nDescription:    N/A\nName:           " +
-		"MCX4121A-XCAT\nINTERNAL_CPU_OFFLOAD_ENGINE N/A\n"
+	// A real ConnectX-4 Lx (the lab hardware): mlxconfig prints the device
+	// header — with the actual description — even when the device rejects
+	// the probed key, so the bash classifies it Physical despite the probe
+	// failing; so does the full-query parse.
+	cx4lx := "Device #1:\n----------\nDevice type:    ConnectX4Lx\nDescription:    ConnectX-4 Lx EN LOM; 25GbE dual-port BP; PCIe3.0 x8\n" +
+		"Name:           MCX4121A-XCAT\n\nConfigurations:                                         Next Boot\n" +
+		"-E- The Device doesn't support INTERNAL_CPU_OFFLOAD_ENGINE parameter\n"
 	typ, variant := classifyMlxconfig(cx4lx)
-	if typ != "ConnectX4Lx" || variant != "Air" {
-		t.Fatalf("cx4lx classified %s/%s, want ConnectX4Lx/Air", typ, variant)
+	if typ != "ConnectX-4_Lx_EN_LOM" || variant != "Physical" {
+		t.Fatalf("cx4lx classified %s/%s, want ConnectX-4_Lx_EN_LOM/Physical", typ, variant)
 	}
 	if got := rawDeviceType(cx4lx); got != "ConnectX4Lx" {
 		t.Fatalf("rawDeviceType = %q, want ConnectX4Lx", got)
 	}
 
-	// BlueField: the Description carries the DPU marker and stays Physical.
-	bf3 := "Device #1:\n----------\nDevice type:    BlueField3\nDescription:    NVIDIA BlueField-3 DPU; 400Gb/s; ... ;\n" +
-		"INTERNAL_CPU_OFFLOAD_ENGINE ECPF(0)\n"
-	typ, variant = classifyMlxconfig(bf3)
+	// BlueField-3 DPU and SuperNIC both report Device type "BlueField3" —
+	// only the Description tells them apart (the mlxfwmanager B3140H
+	// SuperNIC description).
+	bf3dpu := "Device type:    BlueField3\nDescription:    NVIDIA BlueField-3 DPU; 400Gb/s; ... ;\nINTERNAL_CPU_OFFLOAD_ENGINE ECPF(0)\n"
+	typ, variant = classifyMlxconfig(bf3dpu)
 	if typ != "DPU" || variant != "Physical" {
-		t.Fatalf("bf3 classified %s/%s, want DPU/Physical", typ, variant)
+		t.Fatalf("bf3 dpu classified %s/%s, want DPU/Physical", typ, variant)
 	}
-
-	snic := "Device type:    ConnectX7\nDescription:    NVIDIA SuperNIC ConnectX-7; ...;\nINTERNAL_CPU_OFFLOAD_ENGINE ECPF(0)\n"
-	typ, variant = classifyMlxconfig(snic)
+	bf3snic := "Device type:    BlueField3\nDescription:    Nvidia BlueField-3 B3140H E-series HHHL SuperNIC; 400GbE (default mode) / NDR IB; " +
+		"Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on board DDR; integrated BMC; Crypto Enabled\n"
+	typ, variant = classifyMlxconfig(bf3snic)
 	if typ != "SuperNIC" || variant != "Physical" {
-		t.Fatalf("supernic classified %s/%s, want SuperNIC/Physical", typ, variant)
+		t.Fatalf("bf3 supernic classified %s/%s, want SuperNIC/Physical", typ, variant)
 	}
 
-	// A non-DPU device whose offload key is absent falls back to the full
-	// query's Device type.
-	if got := classifyDeviceType("ConnectX4Lx"); got != "ConnectX4Lx" {
-		t.Fatalf("classifyDeviceType(ConnectX4Lx) = %q", got)
+	// DSX Air emulated devices resolve Description to N/A: variant Air and
+	// the Device type line decides. A BlueField-3 carries no marker there
+	// and classifies Unknown (as the bash does); an emulated ConnectX
+	// keeps its type.
+	airBF3 := "Device type:    BlueField3\nDescription:    N/A\n"
+	if typ, variant = classifyMlxconfig(airBF3); typ != "Unknown" || variant != "Air" {
+		t.Fatalf("dsx-air bf3 classified %s/%s, want Unknown/Air", typ, variant)
 	}
-	if got := classifyDeviceType("BlueField3"); got != "DPU" {
-		t.Fatalf("classifyDeviceType(BlueField3) = %q, want DPU", got)
+	airCx := "Device type:    ConnectX6DX\nDescription:    N/A\n"
+	if typ, variant = classifyMlxconfig(airCx); typ != "ConnectX6DX" || variant != "Air" {
+		t.Fatalf("dsx-air cx classified %s/%s, want ConnectX6DX/Air", typ, variant)
 	}
 }
 
@@ -68,7 +78,7 @@ func TestBFBFlashGate(t *testing.T) {
 		{"connectx-7", "ConnectX7", false},
 	}
 	for _, tc := range cases {
-		d := pciDevice{devType: classifyDeviceType(tc.rawType), rawType: tc.rawType, rshim: "/dev/rshim0"}
+		d := pciDevice{devType: tc.rawType, rawType: tc.rawType, rshim: "/dev/rshim0"}
 		if got := d.isBluefield3(); got != tc.flash {
 			t.Fatalf("%s: isBluefield3 = %v, want %v", tc.name, got, tc.flash)
 		}
@@ -212,8 +222,8 @@ func TestPfcEnabled(t *testing.T) {
 // live lab hardware).
 func TestStepLosslessRoceOffClassSkip(t *testing.T) {
 	a := &Agent{mellanoxFns: []pciDevice{
-		{pci: "0000:49:00.0", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Air", rail: "r0_p0"},
-		{pci: "0000:49:00.1", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Air", rail: "r0_p1"},
+		{pci: "0000:49:00.0", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Physical", rail: "r0_p0"},
+		{pci: "0000:49:00.1", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Physical", rail: "r0_p1"},
 	}}
 	profile := profileForTest(9000, "legacy", true)
 	profile.Spec.EastWest.RoceCC = true
@@ -297,8 +307,8 @@ func TestMutationGate(t *testing.T) {
 // inventory it saw — the ConnectX-4 Lx case of the test cluster.
 func TestStepBFBFlashNoBluefield(t *testing.T) {
 	a := &Agent{mellanoxFns: []pciDevice{
-		{pci: "0000:16:00.0", devType: "ConnectX4Lx", rawType: "ConnectX4Lx", variant: "Air"},
-		{pci: "0000:16:00.1", devType: "ConnectX4Lx", rawType: "ConnectX4Lx", variant: "Air"},
+		{pci: "0000:16:00.0", devType: "ConnectX4Lx", rawType: "ConnectX4Lx", variant: "Physical"},
+		{pci: "0000:16:00.1", devType: "ConnectX4Lx", rawType: "ConnectX4Lx", variant: "Physical"},
 	}}
 	profile := profileForTest(9000, "legacy", true)
 	profile.Spec.Firmware = v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf-fwbundle-3.4.0-92_26.04-prod.bfb"}}
