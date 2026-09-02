@@ -717,8 +717,8 @@
      matches any profile". Remediation was a stopgap: re-apply the working-tree CRD and re-add selection with
      <code>kubectl patch --type=json</code> — JSON patches do not touch
      <code>last-applied-configuration</code>, so prefer them over <code>apply</code> for live profile edits.
-     The durable rule: CRD changes must land in the external management system first; applying them directly
-     to the cluster is temporary by construction.</p>
+     The durable rule: CRD <i>and RBAC</i> manifest changes must land in the external management system first;
+     applying them directly to the cluster is temporary by construction.</p>
 </div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot

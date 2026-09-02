@@ -138,6 +138,19 @@ Then keep profiles free of server-side metadata: strip `resourceVersion`,
 re-applying (or manage profiles with `kubectl apply --server-side -f ...`,
 which ignores the annotation entirely).
 
+## Cluster manifests are externally managed
+
+On clusters where CRDs and RBAC are installed and enforced by an external
+management system (GitOps/cluster-API-style drift reversion), the
+`manifests/crd-*.yaml` and `manifests/rbac.yaml` files cannot be changed by
+applying to the cluster directly — the external system reverts the drift,
+and a reverted CRD silently **prunes** any spec fields it no longer knows
+(nodes de-adopt with "no longer matches any profile"). Land CRD and RBAC
+changes in the external system first; `kubectl apply` of those manifests is
+a stopgap. For live profile edits prefer JSON patches
+(`kubectl patch --type=json`), which never replay
+`last-applied-configuration`.
+
 ## Try it (kind)
 
 ```sh
