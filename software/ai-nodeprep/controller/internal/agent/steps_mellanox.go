@@ -50,13 +50,44 @@ type mlxconfigKV struct {
 // Values arrive as "2(Ethernet)" / "True(1)" / "ETH(2)" — the parenthesised
 // content wins when it is numeric, mirroring what the bash script compares.
 func (a *Agent) mlxconfigGet(pci, key string) (string, bool, error) {
-	out, err := a.hostExec(nil, 30*time.Second, "mlxconfig", "-d", pci, "q", key)
+	vals, err := a.mlxconfigGetAll(pci)
 	if err != nil {
 		return "", false, err
 	}
+	v, ok := vals[key]
+	if !ok {
+		return "", false, fmt.Errorf("key %s not in mlxconfig output", key)
+	}
+	return v, true, nil
+}
+
+// mlxconfigGetAll runs one full `mlxconfig q` per device and parses every
+// KEY VALUE line. The per-key form costs one mlxconfig invocation per key
+// (the Ready-phase verify passes re-read all of them every pass); a single
+// full query carries the same lines. Keys the device does not expose are
+// simply absent from the map.
+func (a *Agent) mlxconfigGetAll(pci string) (map[string]string, error) {
+	out, err := a.hostExec(nil, 30*time.Second, "mlxconfig", "-d", pci, "q")
+	if err != nil {
+		return nil, err
+	}
+	return parseMlxconfigAll(out), nil
+}
+
+// parseMlxconfigAll extracts the KEY VALUE config lines from a full
+// mlxconfig query: UPPER_SNAKE keys only — headers like "Device type:" and
+// "Configurations:" carry punctuation and are skipped. Values arrive as
+// "2(Ethernet)" / "True(1)" / "ETH(2)"; the parenthesised content wins when
+// it is numeric, mirroring what the bash script compares.
+func parseMlxconfigAll(out string) map[string]string {
+	vals := map[string]string{}
 	for _, ln := range strings.Split(out, "\n") {
 		fields := strings.Fields(ln)
-		if len(fields) < 2 || fields[0] != key {
+		if len(fields) < 2 {
+			continue
+		}
+		key := fields[0]
+		if strings.ContainsAny(key, ":#") || strings.ToUpper(key) != key || vals[key] != "" {
 			continue
 		}
 		v := fields[len(fields)-1]
@@ -68,9 +99,9 @@ func (a *Agent) mlxconfigGet(pci, key string) (string, bool, error) {
 				v = v[:i]
 			}
 		}
-		return v, true, nil
+		vals[key] = v
 	}
-	return "", false, fmt.Errorf("key %s not in mlxconfig output", key)
+	return vals
 }
 
 // setpciACS reads or writes the ACS Control Register (offset +0x6.w of the
@@ -132,12 +163,18 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			a.logf("mlxconfig: control of DPUs is not allowed by policy, skipping %s", d.pci)
 			continue
 		}
-		flash := buildFlashSet(a, d, mlxconfigParams{lt: lt, ltNS: ltNS, roceCC: roceCC, dpuOffload: dpuOffload,
+		// one full query per device gates the set build AND the drift check
+		vals, err := a.mlxconfigGetAll(d.pci)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: query: %v", d.pci, err))
+			continue
+		}
+		flash := buildFlashSet(a, d, vals, mlxconfigParams{lt: lt, ltNS: ltNS, roceCC: roceCC, dpuOffload: dpuOffload,
 			cnxVFs: fwVFCount(ew.NumVFs), dpuVFs: fwVFCount(ns.NumVFs)})
 		if len(flash) == 0 {
 			continue
 		}
-		changed, errs := applyMlxconfig(a, d, flash)
+		changed, errs := applyMlxconfig(a, d, flash, vals)
 		failures = append(failures, errs...)
 		if len(errs) > 0 {
 			continue
@@ -170,10 +207,10 @@ type mlxconfigParams struct {
 
 // addKV appends a config item, or drops it (logged) when the device does not
 // expose the key. The bash sets every key unconditionally, which fails the
-// entire set on hardware lacking one key; querying first keeps the supported
-// superset applied.
-func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, key, val string) []mlxconfigKV {
-	if _, ok, err := a.mlxconfigGet(d.pci, key); err != nil || !ok {
+// entire set on hardware lacking one key; checking the device's query map
+// first keeps the supported superset applied.
+func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, key, val string) []mlxconfigKV {
+	if _, ok := vals[key]; !ok {
 		a.logf("mlxconfig: %s does not expose %s, skipping key", d.pci, key)
 		return flash
 	}
@@ -181,20 +218,21 @@ func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, key, val string) []mlxcon
 }
 
 // buildFlashConfig assembles the per-device mlxconfig set, bash
-// fn_config_stage lines 506-589.
-func buildFlashSet(a *Agent, d pciDevice, p mlxconfigParams) []mlxconfigKV {
+// fn_config_stage lines 506-589. vals is the device's full mlxconfig query
+// (one exec per device), used for the key-support gating.
+func buildFlashSet(a *Agent, d pciDevice, vals map[string]string, p mlxconfigParams) []mlxconfigKV {
 	var flash []mlxconfigKV
-	flash = addKV(a, d, flash, "SRIOV_EN", "1")
+	flash = addKV(a, d, flash, vals, "SRIOV_EN", "1")
 	isSuper := d.devType == "SuperNIC"
 	isCx79 := matchesConnectX79(d.devType)
 	if p.lt == 2 {
-		flash = addKV(a, d, flash, "ROCE_RTT_RESP_DSCP_P1", "48")
-		flash = addKV(a, d, flash, "ROCE_RTT_RESP_DSCP_MODE_P1", "1")
+		flash = addKV(a, d, flash, vals, "ROCE_RTT_RESP_DSCP_P1", "48")
+		flash = addKV(a, d, flash, vals, "ROCE_RTT_RESP_DSCP_MODE_P1", "1")
 		if isSuper || isCx79 {
-			flash = addKV(a, d, flash, "ROCE_ADAPTIVE_ROUTING_EN", p.roceCC)
-			flash = addKV(a, d, flash, "USER_PROGRAMMABLE_CC", p.roceCC)
-			flash = addKV(a, d, flash, "TX_SCHEDULER_LOCALITY_MODE", "2")
-			flash = addKV(a, d, flash, "ROCE_CC_STEERING_EXT", "2")
+			flash = addKV(a, d, flash, vals, "ROCE_ADAPTIVE_ROUTING_EN", p.roceCC)
+			flash = addKV(a, d, flash, vals, "USER_PROGRAMMABLE_CC", p.roceCC)
+			flash = addKV(a, d, flash, vals, "TX_SCHEDULER_LOCALITY_MODE", "2")
+			flash = addKV(a, d, flash, vals, "ROCE_CC_STEERING_EXT", "2")
 		}
 	}
 	switch {
@@ -202,30 +240,30 @@ func buildFlashSet(a *Agent, d pciDevice, p mlxconfigParams) []mlxconfigKV {
 		flash = append(flash, mlxconfigKV{"LINK_TYPE_P1", strconv.Itoa(p.lt)})
 		flash = append(flash, mlxconfigKV{"NUM_OF_VFS", strconv.Itoa(p.cnxVFs)})
 		if p.lt == 2 {
-			flash = addKV(a, d, flash, "MULTIPATH_DSCP", "0")
+			flash = addKV(a, d, flash, vals, "MULTIPATH_DSCP", "0")
 		}
-		flash = addP2(a, d, flash, p.lt)
+		flash = addP2(a, d, flash, vals, p.lt)
 	case d.isConnectX() && d.variant == "Physical":
-		flash = addKV(a, d, flash, "LINK_TYPE_P1", strconv.Itoa(p.lt))
+		flash = addKV(a, d, flash, vals, "LINK_TYPE_P1", strconv.Itoa(p.lt))
 		flash = append(flash, mlxconfigKV{"NUM_OF_VFS", strconv.Itoa(p.cnxVFs)})
 		if p.lt == 2 && isCx79 {
-			flash = addKV(a, d, flash, "MULTIPATH_DSCP", "0")
+			flash = addKV(a, d, flash, vals, "MULTIPATH_DSCP", "0")
 		}
-		flash = addP2(a, d, flash, p.lt)
+		flash = addP2(a, d, flash, vals, p.lt)
 	case d.isConnectX() && d.variant == "Air":
 		flash = append(flash, mlxconfigKV{"LINK_TYPE_P1", strconv.Itoa(p.lt)})
 		flash = append(flash, mlxconfigKV{"NUM_OF_VFS", strconv.Itoa(p.cnxVFs)})
 		if p.lt == 2 {
-			flash = addKV(a, d, flash, "ROCE_CC_RTT_TIMESTAMP_FORMAT", "0")
+			flash = addKV(a, d, flash, vals, "ROCE_CC_RTT_TIMESTAMP_FORMAT", "0")
 		}
 	case d.isDPU():
 		flash = append(flash, mlxconfigKV{"LINK_TYPE_P1", strconv.Itoa(p.ltNS)})
 		flash = append(flash, mlxconfigKV{"NUM_OF_VFS", strconv.Itoa(p.dpuVFs)})
 		if p.ltNS == 2 {
-			flash = addKV(a, d, flash, "MULTIPATH_DSCP", "0")
+			flash = addKV(a, d, flash, vals, "MULTIPATH_DSCP", "0")
 		}
-		flash = addKV(a, d, flash, "INTERNAL_CPU_OFFLOAD_ENGINE", p.dpuOffload)
-		flash = addP2(a, d, flash, p.ltNS)
+		flash = addKV(a, d, flash, vals, "INTERNAL_CPU_OFFLOAD_ENGINE", p.dpuOffload)
+		flash = addP2(a, d, flash, vals, p.ltNS)
 	default:
 		a.logf("mlxconfig: %s class %s/%s has no config set, skipping", d.pci, d.devType, d.variant)
 		return nil
@@ -235,27 +273,29 @@ func buildFlashSet(a *Agent, d pciDevice, p mlxconfigParams) []mlxconfigKV {
 
 // addP2 adds the port-2 keys when the device exposes LINK_TYPE_P2 (bash: a
 // bare query decides; single-port devices drop the block).
-func addP2(a *Agent, d pciDevice, flash []mlxconfigKV, lt int) []mlxconfigKV {
-	if _, ok, err := a.mlxconfigGet(d.pci, "LINK_TYPE_P2"); err != nil || !ok {
+func addP2(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, lt int) []mlxconfigKV {
+	if _, ok := vals["LINK_TYPE_P2"]; !ok {
 		return flash
 	}
 	flash = append(flash, mlxconfigKV{"LINK_TYPE_P2", strconv.Itoa(lt)})
 	if lt == 2 {
-		flash = addKV(a, d, flash, "ROCE_RTT_RESP_DSCP_P2", "48")
-		flash = addKV(a, d, flash, "ROCE_RTT_RESP_DSCP_MODE_P2", "1")
+		flash = addKV(a, d, flash, vals, "ROCE_RTT_RESP_DSCP_P2", "48")
+		flash = addKV(a, d, flash, vals, "ROCE_RTT_RESP_DSCP_MODE_P2", "1")
 	}
 	return flash
 }
 
 // applyMlxconfig detects drift, applies reset+set when needed, and verifies;
-// it reports whether the device was written and any errors.
-func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV) (bool, []string) {
+// it reports whether the device was written and any errors. vals is the
+// device's full query already fetched by the caller (detect reads it; the
+// post-set verify re-fetches once).
+func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string) (bool, []string) {
 	var errs []string
 	need := false
 	for _, kv := range flash {
-		cur, ok, err := a.mlxconfigGet(d.pci, kv.key)
-		if err != nil || !ok {
-			errs = append(errs, fmt.Sprintf("%s: query %s: %v", d.pci, kv.key, err))
+		cur, ok := vals[kv.key]
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: key %s absent from query", d.pci, kv.key))
 			continue
 		}
 		if cur != kv.val {
@@ -275,10 +315,13 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV) (bool, []string)
 	if _, err := a.hostExec(nil, 120*time.Second, "mlxconfig", args...); err != nil {
 		return true, append(errs, fmt.Sprintf("%s: set: %v", d.pci, err))
 	}
+	fresh, err := a.mlxconfigGetAll(d.pci)
+	if err != nil {
+		return true, append(errs, fmt.Sprintf("%s: verify query: %v", d.pci, err))
+	}
 	for _, kv := range flash {
-		cur, ok, err := a.mlxconfigGet(d.pci, kv.key)
-		if err != nil || !ok || cur != kv.val {
-			errs = append(errs, fmt.Sprintf("%s: verify %s: want %s got %s (err %v)", d.pci, kv.key, kv.val, cur, err))
+		if cur := fresh[kv.key]; cur != kv.val {
+			errs = append(errs, fmt.Sprintf("%s: verify %s: want %s got %q", d.pci, kv.key, kv.val, cur))
 		}
 	}
 	return true, errs

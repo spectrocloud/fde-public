@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.15</span>
+    <span>nodeprep-v105.sh → controller v0.1.17</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -158,7 +158,7 @@
   <span><b>11</b> bash functions fully covered</span>
   <span><b>4</b> steps gate-verified, bodies v0.2</span>
   <span><b>11</b> v0.1 features beyond the bash script</span>
-  <span><b>6</b> defects found &amp; fixed by live testing</span>
+  <span><b>7</b> defects found &amp; fixed by live testing</span>
 </div>
 
 <h2><span class="no">§2</span>The run on a fresh worker node, as performed</h2>
@@ -560,6 +560,16 @@
      <code>--pfc</code> input form against mlnx_qos output, which prints a column table. Fix: whole-body class
      gate restored (off-class hardware skips honestly, naming its inventory), column-table parser, unit tests
      for both.</p>
+</div>
+<div class="callout warn">
+  <p><b>Ready-phase boot-verify re-ran every step body every poll cycle</b> (0.1.16/0.1.17, Run 2). On a Ready
+     node the agent's 5-second cycle re-ran the full critical-step bodies for drift detection: ~40
+     <code>mlxconfig</code> per-key queries plus an ACS <code>setpci</code> sweep over every BDF — hundreds of
+     host commands, forever. Fix, two parts: Ready-phase verification is throttled (immediately on a boot
+     change, otherwise at most every 5 minutes, matching the design's "drift or a new boot re-verifies"), and the
+     mlxconfig detect went from one query per key to one full query per device (the boot hook's corrective
+     systemctl work is likewise once per process, not per cycle). Steady state on a Ready node is now zero host
+     execs between verify passes.</p>
 </div>
 <div class="callout warn">
   <p><b>NodePrepProfile updates impossible: stale resourceVersion replayed from

@@ -164,6 +164,37 @@ func TestLosslessGate(t *testing.T) {
 	}
 }
 
+// The full-query parser must pull config keys out of the real mlxconfig
+// output shape — headers skipped, parenthesised values normalized — and it
+// is what makes one-query-per-device detection possible.
+func TestParseMlxconfigAll(t *testing.T) {
+	out := "Device #1:\n----------\nDevice type:        ConnectX4LX\n" +
+		"Name:               Super_Micro_B13DET_CX4LX_2p_x8_25g_Ax\n" +
+		"Description:        ConnectX-4 Lx EN LOM; 25GbE dual-port BP; PCIe3.0 x8\n" +
+		"Device:             0000:16:00.1\n\n" +
+		"Configurations:                                         Next Boot\n" +
+		"        SRIOV_EN                                        True(1)\n" +
+		"        ROCE_RTT_RESP_DSCP_P1                           48\n" +
+		"        ROCE_RTT_RESP_DSCP_MODE_P1                      FIXED_VALUE(1)\n" +
+		"        LINK_TYPE_P1                                    ETH(2)\n" +
+		"        NUM_OF_VFS                                      1\n"
+	vals := parseMlxconfigAll(out)
+	if vals["SRIOV_EN"] != "1" || vals["ROCE_RTT_RESP_DSCP_P1"] != "48" ||
+		vals["ROCE_RTT_RESP_DSCP_MODE_P1"] != "1" || vals["LINK_TYPE_P1"] != "2" ||
+		vals["NUM_OF_VFS"] != "1" {
+		t.Fatalf("parse wrong: %v", vals)
+	}
+	for _, hdr := range []string{"Device", "Name", "Description", "Configurations", "Device type"} {
+		if _, ok := vals[hdr]; ok {
+			t.Fatalf("header %q must not be parsed as a config key", hdr)
+		}
+	}
+	// a device that does not expose a key simply lacks it — the addKV gate
+	if _, ok := vals["LINK_TYPE_P2"]; ok {
+		t.Fatalf("LINK_TYPE_P2 must be absent for single-port gating")
+	}
+}
+
 // The PFC readback is a column table, not the comma-separated --pfc input
 // form; the parser must read the enabled row.
 func TestPfcEnabled(t *testing.T) {

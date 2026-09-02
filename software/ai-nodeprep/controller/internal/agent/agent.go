@@ -65,7 +65,24 @@ type Agent struct {
 	// retry budget): in-memory, doubling with each consecutive failure,
 	// cleared on success and on the resume annotation.
 	backoffUntil map[string]time.Time
+
+	// lastBootVerify paces Ready-phase boot-verify: verify runs immediately
+	// on a boot change, otherwise at most every bootVerifyInterval (the
+	// critical-step bodies cost hundreds of host commands per pass).
+	lastBootVerify struct {
+		bootID string
+		at     time.Time
+	}
+
+	// hookDone remembers the boot-hook content already verified/enabled this
+	// process lifetime, so the steady-state cycle costs zero host execs.
+	hookDone string
 }
+
+// bootVerifyInterval paces the Ready-phase re-verification. A new boot
+// always verifies immediately (design §6.1); between boots the drift check
+// runs on this maintenance cadence, not every poll cycle.
+const bootVerifyInterval = 5 * time.Minute
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations bool, rebootCommand string) *Agent {
 	return &Agent{
@@ -291,7 +308,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
 		a.runStage(ctx, np, profile)
 	case v1alpha1.PhaseReady:
-		a.verifyReady(ctx, np, profile)
+		a.verifyReady(ctx, np, profile, bootID)
 	case v1alpha1.PhaseFailed:
 		// Hold; recovery is the resume annotation (design §5.2).
 	default:
@@ -467,8 +484,17 @@ func (a *Agent) finalizeAndVerify(ctx context.Context, np *v1alpha1.NodePrep, pr
 // verifyReady re-checks a Ready node: boot-verify must pass on the current
 // boot before BootVerified stays True. Drift flips BootVerified to False,
 // which re-applies the taint — the maintenance-window re-entry (design §6.1).
-func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) {
+// A boot change verifies immediately; between boots the check runs at most
+// every bootVerifyInterval — the critical-step bodies cost hundreds of host
+// commands (mlxconfig queries, an ACS setpci sweep) per pass, and running
+// them every poll cycle was continuous exec spam on the node.
+func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile, bootID string) {
+	newBoot := a.lastBootVerify.bootID != bootID
+	if !newBoot && time.Since(a.lastBootVerify.at) < bootVerifyInterval {
+		return
+	}
 	verified := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionBootVerified) == "True"
+	defer func() { a.lastBootVerify.bootID, a.lastBootVerify.at = bootID, time.Now() }()
 	if a.bootVerify(np, profile) {
 		if !verified {
 			conds := np.Status.Conditions
@@ -479,6 +505,8 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 		}
 		return
 	}
+	// A failed pass flips the condition (and re-taints) once; the retry is
+	// paced by the interval like a passing one.
 	if verified {
 		conds := np.Status.Conditions
 		k8sutil.SetCondition(&conds, v1alpha1.ConditionBootVerified, "False", v1alpha1.ReasonDriftDetected,

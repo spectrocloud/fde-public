@@ -153,6 +153,19 @@ func (a *Agent) ensureBootHook(profile *v1alpha1.NodePrepProfile) (string, error
 	}
 	env := os.Environ()
 
+	unit, script := renderBootHook(a.nodeName, hb)
+	unitPath := filepath.Join(hostEtcSystemd, filepath.Base(bootHookUnitPath))
+	scriptPath := filepath.Join(hostUsrLocalSbin, filepath.Base(bootHookScriptPath))
+	oldUnit, errU := os.ReadFile(unitPath)
+	oldScript, errS := os.ReadFile(scriptPath)
+	unchanged := errU == nil && errS == nil && string(oldUnit) == unit && string(oldScript) == script
+	// Steady state: files current AND already checked this process lifetime —
+	// no execs. The corrective systemctl work below runs once per process
+	// (and again whenever the rendered content changes), not every cycle.
+	if unchanged && a.hookDone == unit+"\x00"+script {
+		return "", nil
+	}
+
 	// mlnx_interface_mgr handling (design §6.2): wait is the hook's
 	// hardware-gated wait; disable masks the manager outright; ignore and
 	// "" leave the host alone.
@@ -167,12 +180,8 @@ func (a *Agent) ensureBootHook(profile *v1alpha1.NodePrepProfile) (string, error
 		_, _ = a.hostExec(env, 30*time.Second, "systemctl", "unmask", "mlnx_interface_mgr.service")
 	}
 
-	unit, script := renderBootHook(a.nodeName, hb)
-	unitPath := filepath.Join(hostEtcSystemd, filepath.Base(bootHookUnitPath))
-	scriptPath := filepath.Join(hostUsrLocalSbin, filepath.Base(bootHookScriptPath))
-	oldUnit, errU := os.ReadFile(unitPath)
-	oldScript, errS := os.ReadFile(scriptPath)
-	if errU == nil && errS == nil && string(oldUnit) == unit && string(oldScript) == script {
+	if unchanged {
+		a.hookDone = unit + "\x00" + script
 		if _, err := a.hostExec(env, 30*time.Second, "systemctl", "is-enabled", "--quiet", bootHookUnitName); err != nil {
 			if _, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", bootHookUnitName); err != nil {
 				return "", fmt.Errorf("enabling %s: %v", bootHookUnitName, err)
@@ -217,6 +226,7 @@ func (a *Agent) ensureBootHook(profile *v1alpha1.NodePrepProfile) (string, error
 	if _, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", bootHookUnitName); err != nil {
 		return "", fmt.Errorf("enabling %s: %v", bootHookUnitName, err)
 	}
+	a.hookDone = unit + "\x00" + script
 	return "boot hook rendered (" + bootHookUnitPath + ", Before=kubelet.service)" + maskMsg, nil
 }
 
