@@ -24,15 +24,33 @@ import (
 // Steps do not carry a context in v0.1, so each call enforces its own
 // timeout locally; a pod deletion kills the child process regardless.
 func (a *Agent) hostExec(env []string, timeout time.Duration, name string, args ...string) (string, error) {
+	return a.hostExecV(env, timeout, name, false, args...)
+}
+
+// hostExecQuiet is hostExec without per-invocation logging, for sweeps whose
+// expected outcome is a benign negative for the overwhelming majority of
+// devices — the ACS capability probe reads every PCI function on the node
+// and most expose no ACS capability, so printing each expected setpci error
+// buried the log (~900 lines per verify pass on the lab workers). Outcomes
+// still return to the caller, which aggregates them into the step message;
+// the ledger stays the audit trail. Only the genuinely unexpected — a
+// timeout — still logs.
+func (a *Agent) hostExecQuiet(env []string, timeout time.Duration, name string, args ...string) (string, error) {
+	return a.hostExecV(env, timeout, name, true, args...)
+}
+
+func (a *Agent) hostExecV(env []string, timeout time.Duration, name string, quiet bool, args ...string) (string, error) {
 	cmdline := strings.Join(append([]string{name}, args...), " ")
-	a.logf("host exec: %s", cmdline)
+	if !quiet {
+		a.logf("host exec: %s", cmdline)
+	}
 
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	full := append([]string{"-t", "1", "-m", "-u", "-i", "-n", "--", name}, args...)
 	cmd := exec.CommandContext(cctx, "nsenter", full...)
 	cmd.Env = env
-	out, err := a.runLogged(cctx, timeout, cmdline, cmd)
+	out, err := a.runLogged(cctx, timeout, cmdline, cmd, quiet)
 	if cctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("%s: timed out after %s", cmdline, timeout)
 	}
@@ -68,7 +86,7 @@ func (a *Agent) heavyHostExec(env []string, timeout time.Duration, name string, 
 	full = append(full, args...)
 	cmd := exec.CommandContext(cctx, "nsenter", full...)
 	cmd.Env = env
-	out, err := a.runLogged(cctx, timeout, cmdline, cmd)
+	out, err := a.runLogged(cctx, timeout, cmdline, cmd, false)
 	if cctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("%s: timed out after %s (host unit %s keeps running; dpkg state makes the retry idempotent)", cmdline, timeout, unit)
 	}
@@ -111,7 +129,9 @@ func heavyEnvForward(e string) bool {
 
 // runLogged is the shared execution-and-audit body of hostExec and
 // heavyHostExec: run, time, log the outcome with a bounded output tail.
-func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline string, cmd *exec.Cmd) (string, error) {
+// quiet (hostExecQuiet) suppresses the attempt and outcome lines; a timeout
+// still logs there because it is never an expected result.
+func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline string, cmd *exec.Cmd, quiet bool) (string, error) {
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -119,12 +139,14 @@ func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline s
 	if err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			a.logf("host exec TIMED OUT after %s: %s", timeout, cmdline)
-		} else {
+		} else if !quiet {
 			a.logf("host exec failed after %s: %s", dur, tail)
 		}
 		return string(out), err
 	}
-	a.logf("host exec ok (%s): %s", dur, tail)
+	if !quiet {
+		a.logf("host exec ok (%s): %s", dur, tail)
+	}
 	return string(out), nil
 }
 

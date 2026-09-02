@@ -107,9 +107,9 @@ which ignores the annotation entirely).
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.17-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.17-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.17-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.18-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.18-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.18-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

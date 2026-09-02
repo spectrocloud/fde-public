@@ -105,13 +105,21 @@ func parseMlxconfigAll(out string) map[string]string {
 }
 
 // setpciACS reads or writes the ACS Control Register (offset +0x6.w of the
-// ACS extended capability), returning the value as four hex digits.
+// ACS extended capability), returning the value as four hex digits. Reads
+// sweep every PCI function on the node and most devices have no ACS
+// capability at all — an expected setpci error per device — so they run
+// quiet (hostExecQuiet); the step message counts the negatives. Writes are
+// rare, real mutations and stay fully logged.
 func (a *Agent) setpciACS(bdf, write string) (string, error) {
 	args := []string{"-v", "-s", bdf, "ECAP_ACS+0x6.w"}
 	if write != "" {
 		args[3] += "=" + write
 	}
-	out, err := a.hostExec(nil, 15*time.Second, "setpci", args...)
+	exec := a.hostExec
+	if write == "" {
+		exec = a.hostExecQuiet
+	}
+	out, err := exec(nil, 15*time.Second, "setpci", args...)
 	if err != nil {
 		return "", err
 	}
