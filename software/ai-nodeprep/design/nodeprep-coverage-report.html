@@ -120,19 +120,21 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.23</span>
+    <span>nodeprep-v105.sh → controller v0.1.28</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
-  <p class="dek">Every step the controller performed on freshly reprovisioned and Mellanox-equipped worker nodes,
-     mapped line-by-line against the 979-line bash script it replaces — with the live evidence for each, and an
-     honest list of what is still gated or unconverted.</p>
+  <p class="dek">Every step the controller performed — on freshly reprovisioned workers, Mellanox-equipped
+     workers, and a three-node control plane — mapped line-by-line against the 979-line bash script it
+     replaces, with the live evidence for each and an honest list of what is still gated or unconverted.</p>
   <div class="verline">
     Run 1 — two bare-metal reprovisions, no-Mellanox workers: <code>bm-a-rtx6k-7</code> on <code>0.1.10</code>
     (machine <code>…b6ppf-vt85f</code>) and <code>bm-a-rtx6k-6</code> on <code>0.1.11</code>
     (machine <code>…b6ppf-tjc9j</code>) · Run 2 — Mellanox lab cluster <code>nodeprep-test</code>: dual-port
     ConnectX-4 Lx workers <code>bl-r1-c2-02</code>/<code>bl-r1-c2-04</code> on <code>0.1.12 → 0.1.15</code>,
-    through two nodeprep reboots to Ready · profile <code>gpu-worker-v105</code>
+    through two nodeprep reboots to Ready · profile <code>gpu-worker-v105</code> · Run 3 — the successor lab
+    cluster (also <code>nodeprep-test</code>) on <code>0.1.24 → 0.1.28</code>: three-node control plane,
+    selection modes, the §6.4 quorum window, and the first real <code>aptUpgrade</code>/<code>nfsRdma</code> runs
   </div>
 </header>
 
@@ -153,12 +155,19 @@
    <code>mlnx_interface_mgr</code> — two nodeprep-initiated reboots each, both nodes Ready with boot-verify
    passed and the taint released (§2b). SSH access to the workers made every host-side effect checkable
    directly.</p>
+<p class="sub">Run 3: the successor lab cluster (also <code>nodeprep-test</code>) — workers
+   <code>bl-r1-c2-05</code>/<code>bl-r1-c2-06</code> with the same dual-port CX-4 Lx rail card, plus a control
+   plane grown to <b>three</b> VMs so the quorum logic could be observed. Workers arrived <i>without</i> the
+   <code>ai-worker</code> label and one node carried a disqualifying label, exercising the new selection modes;
+   the profile then moved to <code>allNodes</code> to adopt the control planes, and flipped
+   <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
+   runs. NodePrep versions <code>0.1.24 → 0.1.28</code>.</p>
 
 <div class="count">
-  <span><b>11</b> bash functions fully covered</span>
-  <span><b>4</b> steps gate-verified, bodies v0.2</span>
-  <span><b>11</b> v0.1 features beyond the bash script</span>
-  <span><b>7</b> defects found &amp; fixed by live testing</span>
+  <span><b>12</b> bash functions fully covered</span>
+  <span><b>3</b> steps gate-verified, bodies v0.2</span>
+  <span><b>14</b> v0.1 features beyond the bash script</span>
+  <span><b>12</b> defects found &amp; fixed by live testing</span>
 </div>
 
 <h2><span class="no">§2</span>The run on a fresh worker node, as performed</h2>
@@ -300,6 +309,55 @@
       <code>0000</code>, boot-hook journal clean, kubelet active, route intact.</span></li>
 </ul>
 
+<h2><span class="no">§2c</span>Run 3 — selection modes and the control-plane quorum window</h2>
+<p class="sub">The successor lab cluster (also <code>nodeprep-test</code>): workers <code>bl-r1-c2-05</code>/
+   <code>bl-r1-c2-06</code> carry the same dual-port CX-4 Lx rail card; the control plane is <b>three</b> VMs
+   (<code>vm-cp-pool-13/15/14</code> — a fourth, <code>pool-16</code>, hung mid-prep and was machine-replaced;
+   §6). Profile <code>gpu-worker-v105</code> generation 9: selection exercised as <code>allWorkers</code> then
+   <code>allNodes</code> with <code>excludeLabel nodeprep-test/skip=true</code>,
+   <code>policy.controlPlanePrep: true</code>, CP strategy <code>serial</code>, and
+   <code>firmware.aptUpgrade</code>/<code>nfsRdma.enabled</code> switched on.</p>
+
+<ul class="timeline">
+  <li><span class="t">Selection</span><span class="e">The label becomes optional</span>
+      <span class="d">Fresh workers joined <b>without</b> <code>node.spectrocloud.com/ai-worker</code> and were
+      adopted under <code>selection.mode: allWorkers</code> — no label required.
+      <code>bl-r1-c2-06</code>, carrying <code>nodeprep-test/skip=true</code>, was never adopted: the
+      excludeLabel disqualifies under every mode. Under <code>allNodes</code> + <code>controlPlanePrep</code>
+      the three control-plane nodes adopted as well; the mode alone never touches a CP.</span></li>
+  <li><span class="t">Provisioning</span><span class="e">aptUpgrade + nfsRdma, first real runs</span>
+      <span class="d"><code>firmware.aptUpgrade=true</code> ran <code>apt-get update</code> +
+      <code>apt-get upgrade</code> in a host transient unit: <b>120 packages upgraded</b>, kernel 6.14.0-37
+      included. An idempotent re-run honestly reported 0 upgradable. <code>nfsRdma.enabled=true</code>
+      installed <code>nfs-common</code> + <code>mlnx-nfsrdma-dkms</code>, wrote the
+      <code>modules-load.d/nfsrdma.conf</code> triplet (rpcrdma/xprtrdma/svcrdma), and verified
+      <code>rpcrdma</code> loaded — confirmed on the host (<code>dpkg -s</code>, <code>lsmod</code>, conf
+      file).</span></li>
+  <li><span class="t">Provisioning</span><span class="e">Initramfs reboot loop</span>
+      <span class="d">The ib_core netns step wrote its modprobe.d option and rebooted — seven times. Root cause
+      and fix in §6 (0.1.25): <code>ib_core.ko</code> loads from the initramfs, whose modprobe.d snapshot was
+      baked minutes earlier by the same stage's apt upgrade; <code>update-initramfs -u</code> before the reboot
+      request closed the loop — one reboot, then <code>netns_mode=0 matches profile</code>.</span></li>
+  <li><span class="t">CP window</span><span class="e">One at a time</span>
+      <span class="d">With three CPs adopted, the §6.4 window held <b>exactly one</b> member mid-prep
+      (expected − quorum = 1): <code>pool-13</code> walked Provisioning → Flashing → Configuring → Finalizing →
+      Ready while <code>pool-15</code>/<code>pool-14</code> parked at
+      <code>MaintenanceAdmitted=False (QuorumFloor)</code>; then <code>pool-15</code>, then
+      <code>pool-14</code>. The first counter deadlocked — it counted the waiting peers as busy (§6, 0.1.27) —
+      after which serialization was exact.</span></li>
+  <li><span class="t">CP window</span><span class="e">A reboot under quorum</span>
+      <span class="d"><code>pool-14</code> rebooted mid-prep (the ib_core reload) while
+      <code>pool-13</code>/<code>pool-15</code> served etcd: quorum 2/3, the API endpoint (behind a load
+      balancer) steady, kubectl uninterrupted. Queued CPs do not move without
+      <code>MaintenanceAdmitted=True</code> — the agent now fails closed on a missing condition rather than
+      reading silence as consent (§6, 0.1.28).</span></li>
+  <li><span class="t">Converged</span><span class="e">End state</span>
+      <span class="d">All three CPs Ready with boot verified: nodeprep taint released (only the control-plane
+      taint remains), legacy mirror <code>complete</code>, CAPI Machines unpaused at Ready, and the worker-role
+      label never landed on a CP. <code>bl-r1-c2-05</code> Ready; <code>bl-r1-c2-06</code> untouched, as the
+      exclusion demands.</span></li>
+</ul>
+
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
 <p class="sub">One row per bash function (line numbers into <code>nodeprep-v105.sh</code>). "Covered" means the
    behavior ran on the fresh node with the cited evidence; "Gate-verified" means the skip/detect logic exercised
@@ -365,8 +423,10 @@
         downloads, <code>dpkg --install</code>, <code>apt-get update</code>, <code>apt-get install</code> and the
         reboot protocol all live-verified — including a full fresh install of the script's exact package set
         (<code>doca-all lldpd mft netplan.io pv psmisc</code>) on reprovision #2, and verified cache reuse
-        (zero bytes re-fetched) on re-preps. Remaining pieces listed in §5 (apt upgrade, headers hold, gcc-12,
-        LLDPD config, grub assembly, rshim restart, autoremove, the post-stage reboot trigger).</td>
+        (zero bytes re-fetched) on re-preps. Run 3 also closed <b>apt upgrade</b>: <code>aptUpgrade=true</code>
+        ran update + upgrade in a host transient unit (120 packages, kernel included) with honest idempotent
+        re-runs. Remaining pieces listed in §5 (headers hold, gcc-12, LLDPD config, grub assembly, rshim
+        restart, autoremove, the post-stage reboot trigger).</td>
   </tr>
   <tr>
     <td><code>fn_init_hw_stage</code> <small>L468</small></td>
@@ -446,8 +506,10 @@
     <td><code>fn_setup_nfsrdma</code> <small>L884</small></td>
     <td>nfs-common + mlnx-nfsrdma-dkms, rpcrdma modules, modules-load.d</td>
     <td><code>nfsRdma</code></td>
-    <td><span class="pill gate">Gate verified</span> Profile <code>nfsRdma.enabled=false</code> honored →
-        "skipped by policy". Body v0.2.</td>
+    <td><span class="pill live">Covered</span> Run 3: <code>enabled=true</code> installed <code>nfs-common</code>
+        + <code>mlnx-nfsrdma-dkms</code> in host units, wrote <code>/etc/modules-load.d/nfsrdma.conf</code>, and
+        verified <code>rpcrdma</code> loaded — all confirmed on the host. Run 2: <code>false</code> honored →
+        "skipped by policy".</td>
   </tr>
   <tr>
     <td><i>(bash complete stage, GPU-operator workaround)</i></td>
@@ -497,11 +559,23 @@
       replace a working file (the 0.1.10 fix from reboot #1).</li>
   <li><b>Auditability</b> — every host command, download and transition is logged with duration and bounded
       output, and surfaced as Kubernetes events.</li>
+  <li><b>Selection modes</b> — adoption no longer requires the <code>ai-worker</code> label:
+      <code>selection.mode</code> is <code>labelSelector</code> (legacy behavior, still the default),
+      <code>allWorkers</code>, or <code>allNodes</code> (control planes included, and only together with
+      <code>policy.controlPlanePrep</code>); <code>selection.excludeLabel</code> disqualifies nodes under every
+      mode. All proven live in Run 3.</li>
+  <li><b>Control-plane quorum window</b> — at most expected−quorum CP members mid-prep at once (1 of 3, 2 of 5),
+      serialized further by strategy, admitted via the <code>MaintenanceAdmitted</code> condition, re-checked
+      fail-closed inside the agent; Machines pause on adoption and unpause at Ready. Proven on the 3-node CP:
+      one at a time, and one reboot mid-prep with etcd quorum 2/3 held.</li>
+  <li><b>Profile-edit re-walk</b> — bumping the profile generation re-opens every step and rewinds the NodePrep
+      to Provisioning, so a changed profile can't hide behind stale "Done" steps.</li>
 </ul>
 
 <h2><span class="no">§5</span>Honest gaps — what is not converted yet</h2>
-<p class="sub">Ordered roughly by when they would bite. Run 2 closed the ConnectX-path gaps (mlxconfig, netplan,
-   udev renames, 0-VF SR-IOV, ACS, ib_core netns); what remains needs hardware or modes the lab doesn't have.</p>
+<p class="sub">Ordered roughly by when they would bite. Runs 2 and 3 closed the ConnectX-path gaps (mlxconfig,
+   netplan, udev renames, 0-VF SR-IOV, ACS, ib_core netns) and the every-node gaps apt upgrade and NFSoRDMA;
+   what remains needs hardware or modes the lab doesn't have.</p>
 
 <h3>Needing hardware or modes beyond the lab</h3>
 <ul class="tight">
@@ -524,9 +598,8 @@
 <ul class="tight">
   <li><b>grub assembly (90-nodeprep.cfg)</b> — <code>grubParams</code> detects missing cmdline parameters and
       Blocks by design; writing them is the v0.2 boot path. The profile configures none today, so the step skips.</li>
-  <li><b>apt upgrade, linux-headers hold, gcc-12, apt autoremove</b> — not implemented. The profile field
-      <code>aptUpgrade</code> exists but no step consumes it yet (this profile sets it <code>false</code>, so
-      behavior matches today).</li>
+  <li><b>linux-headers hold, gcc-12, apt autoremove</b> — not implemented (<b>apt upgrade</b> itself landed in
+      0.1.24 and is covered in §2c/§3).</li>
   <li><b>LLDPD configuration</b> — the <code>lldpd</code> package installs (verified in reprovision #2), but
       the bash script's LLDPD config-file block has no equivalent yet.</li>
 </ul>
@@ -601,16 +674,66 @@
      keep exports free of server-side metadata (or apply with <code>--server-side</code>). Root-caused live,
      documented in the controller README.</p>
 </div>
+<div class="callout warn">
+  <p><b>The initramfs ate the modprobe.d write — ib_core rebooted forever</b> (0.1.25, Run 3). The ib_core netns
+     step writes <code>/etc/modprobe.d/ib_core.conf</code> and reboots to reload the module, but
+     <code>ib_core.ko</code> can ship inside the initramfs — whose copy of <code>/etc/modprobe.d</code> is baked
+     when the package set is installed. With <code>aptUpgrade</code> in the same stage that bake happened four
+     seconds <i>before</i> the write; the module loaded from the initramfs with the compiled-in default, every
+     reboot came back unchanged, and the loop burned seven reboots. Fix: <code>update-initramfs -u</code> after
+     the write, before the reboot request. The next run rebooted exactly once and verified
+     <code>netns_mode=0 matches profile</code> — with the conf confirmed inside the refreshed initramfs.</p>
+</div>
+<div class="callout warn">
+  <p><b>Profile edits never re-opened Done steps</b> (0.1.26, Run 3). The design's profile-generation check
+     existed but <code>observedProfileGeneration</code> was only written at adoption and the per-step hash was
+     dead code — flipping <code>aptUpgrade</code>/<code>nfsRdma</code> on a converged fleet changed nothing.
+     Fix: the agent's cycle compares <code>profile.Generation</code> against the status on every pass; a bump
+     resets every step to Pending and rewinds to Provisioning, and the steps re-verify idempotently (each of
+     Run 3's profile bumps re-walked the fleet this way). Per-step input hashing lands with real Apply.</p>
+</div>
+<div class="callout warn">
+  <p><b>The quorum window deadlocked on its own queue</b> (0.1.27, Run 3). The §6.4 busy-counter counted every
+     non-Ready control-plane NodePrep — including peers parked at
+     <code>MaintenanceAdmitted=False (QuorumFloor)</code> — so with three CPs each member saw "2 other
+     control-plane node(s) mid-prep" and none could ever be admitted. Fix: <code>BusyControlPlane</code> —
+     <i>waiting is not busy</i>; a peer consumes the window only once admitted or past Provisioning. Verified
+     live: strict cp13 → cp15 → cp14 serialization, one member mid-prep at a time.</p>
+</div>
+<div class="callout warn">
+  <p><b>The agent failed open on missing admission — and its reboots clobbered conditions</b> (0.1.28, Run 3).
+     Two defects on the same gate. (1) A queued CP whose <code>MaintenanceAdmitted</code> condition had not
+     arrived yet fell through the agent's check as if consented and could walk Provisioning outside the window
+     (<code>pool-16</code> prepped un-admitted this way). Fix: the agent fails closed for control planes — a
+     missing condition is not consent — with the node's role cached for a minute. (2) <code>requestReboot</code>
+     patched the whole conditions array from a stale copy every cycle, deleting the controller-written
+     conditions, including the admission itself. Fix: single-condition patches via fresh read-modify-write.</p>
+</div>
+<div class="callout warn">
+  <p><b>The cluster's NodePrepProfile CRD was swapped back to the pre-selection schema</b> (Run 3,
+     operational). Applying manifests from a clean checkout reinstalled the old CRD;
+     <code>spec.selection</code> became an unknown field and was <b>silently pruned on every write</b> — the
+     whole fleet de-adopted with "no longer matches any profile". Fix: reinstall the CRD from the working tree
+     and re-add selection with <code>kubectl patch --type=json</code> — JSON patches do not touch
+     <code>last-applied-configuration</code>, so they cannot replay the pruning; prefer them over
+     <code>apply</code> for live profile edits.</p>
+</div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
-     tests (both runs) so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was
-     restored to 100% after verification completed. The first (unpatched) reboot attempt did get remediated — the
-     cluster deleted the Machine and MAAS re-racked it, which is itself what provided the fresh-node test bed.</p>
+     tests (all runs) so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was
+     restored to 100% after each verification completed. The first (unpatched) reboot attempt did get remediated —
+     the cluster deleted the Machine and MAAS re-racked it, which is itself what provided the fresh-node test bed.
+     One Run 3 infrastructure incident, not a controller defect: <code>vm-cp-pool-16</code> hung mid-prep (kernel
+     up, sshd and kubelet dead for hours) with the nodeprep pause annotation on its Machine, which blocked CAPI
+     remediation; unpausing and deleting the Machine let the machine controller replace it
+     (<code>vm-cp-pool-14</code>), which joined and prepped cleanly. Worth a hypervisor look if it recurs —
+     <code>pool-13</code> survived the identical sequence.</p>
 </div>
 
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
-  host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04 · controller/agent 0.1.10 → 0.1.15 · sibling document to
+  host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.28 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
