@@ -133,3 +133,30 @@ func reconcileCAPAPause(ctx context.Context, dyn dynamic.Interface, nodeName str
 	}
 	return "", nil
 }
+
+var kcpGVR = schema.GroupVersionResource{
+	Group:    "controlplane.cluster.x-k8s.io",
+	Version:  "v1beta1",
+	Resource: "kubeadmcontrolplanes",
+}
+
+// kcpReplicas returns the KubeadmControlPlane replica count for the quorum
+// math (design §6.4): the first KCP found with spec.replicas set — there is
+// exactly one per cluster. Absent CRD or unset replicas is an error so the
+// caller falls back to counting CP nodes.
+func kcpReplicas(ctx context.Context, dyn dynamic.Interface) (int, error) {
+	list, err := dyn.Resource(kcpGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, err
+	}
+	for i := range list.Items {
+		r, found, err := unstructured.NestedInt64(list.Items[i].Object, "spec", "replicas")
+		if err != nil {
+			continue
+		}
+		if found && r > 0 {
+			return int(r), nil
+		}
+	}
+	return 0, fmt.Errorf("no KubeadmControlPlane with spec.replicas found")
+}

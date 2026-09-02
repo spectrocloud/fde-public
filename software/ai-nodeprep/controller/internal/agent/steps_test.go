@@ -7,7 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
 // downloadFile must create the destination directory (found in live testing:
@@ -115,5 +118,55 @@ func TestDownloadFileReplacesMismatchedLocalCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(dest + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("tmp file left behind")
+	}
+}
+
+// stepAptUpgrade gates: policy off skips, detect-only blocks; the simulation
+// parser reads apt's plan summary.
+func TestStepAptUpgradeGates(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	profile := &v1alpha1.NodePrepProfile{}
+
+	if state, msg := stepAptUpgrade(&Agent{}, np, profile); state != v1alpha1.StepDone || !strings.Contains(msg, "aptUpgrade=false") {
+		t.Fatalf("policy off must skip: %s %s", state, msg)
+	}
+	yes := true
+	on := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		Firmware: v1alpha1.FirmwareSource{AptUpgrade: true},
+		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	if state, msg := stepAptUpgrade(&Agent{}, np, on); state != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
+		t.Fatalf("detect-only must block: %s %s", state, msg)
+	}
+}
+
+func TestParseUpgradableCount(t *testing.T) {
+	out := "Reading package lists...\nBuilding dependency tree...\nCalculating upgrade...\n" +
+		"The following packages have been kept back:\n" +
+		"5 upgraded, 2 newly installed, 0 to remove and 1 not upgraded.\n"
+	if got := parseUpgradableCount(out); got != 5 {
+		t.Fatalf("parseUpgradableCount = %d, want 5", got)
+	}
+	if got := parseUpgradableCount("0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"); got != 0 {
+		t.Fatalf("clean system must read 0, got %d", got)
+	}
+	if got := parseUpgradableCount(""); got != 0 {
+		t.Fatalf("empty output must read 0, got %d", got)
+	}
+}
+
+// stepNfsRdma gates: policy off skips, detect-only blocks.
+func TestStepNfsRdmaGates(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	if state, msg := stepNfsRdma(&Agent{}, np, &v1alpha1.NodePrepProfile{}); state != v1alpha1.StepDone || !strings.Contains(msg, "nfsRdma disabled") {
+		t.Fatalf("policy off must skip: %s %s", state, msg)
+	}
+	yes := true
+	on := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		NFSRDMA: v1alpha1.NFSRDMASpec{Enabled: true},
+		Policy:  v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	if state, msg := stepNfsRdma(&Agent{}, np, on); state != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
+		t.Fatalf("detect-only must block: %s %s", state, msg)
 	}
 }

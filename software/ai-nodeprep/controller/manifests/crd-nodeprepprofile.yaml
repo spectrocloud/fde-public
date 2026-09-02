@@ -37,10 +37,11 @@ spec:
               type: object
             spec:
               type: object
-              required: [nodeSelector]
               properties:
                 nodeSelector:
-                  description: Which Nodes are adopted into NodePrep objects.
+                  description: |
+                    Legacy adoption gate; superseded by spec.selection. Which
+                    Nodes are adopted into NodePrep objects.
                   type: object
                   properties:
                     matchLabels:
@@ -62,6 +63,46 @@ spec:
                             type: array
                             items:
                               type: string
+                selection:
+                  description: Node adoption selection (§3.1) — supersedes nodeSelector.
+                  type: object
+                  properties:
+                    mode:
+                      description: |
+                        labelSelector (default) gates on nodeSelector; allWorkers
+                        adopts every non-control-plane node; allNodes also adopts
+                        control planes (requires policy.controlPlanePrep; quorum
+                        choreography per §6.4).
+                      type: string
+                      enum: [labelSelector, allWorkers, allNodes, ""]
+                    nodeSelector:
+                      description: Label gate for mode labelSelector.
+                      type: object
+                      properties:
+                        matchLabels:
+                          type: object
+                          additionalProperties:
+                            type: string
+                        matchExpressions:
+                          type: array
+                          items:
+                            type: object
+                            required: [key, operator]
+                            properties:
+                              key:
+                                type: string
+                              operator:
+                                type: string
+                                enum: [In, NotIn, Exists, DoesNotExist]
+                              values:
+                                type: array
+                                items:
+                                  type: string
+                    excludeLabel:
+                      description: >
+                        Disqualifying label ("key" matches any value, "key=value"
+                        an exact one) — nodes carrying it are never adopted.
+                      type: string
                 firmware:
                   type: object
                   properties:

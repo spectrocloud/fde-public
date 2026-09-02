@@ -1,7 +1,7 @@
 GO      ?= go
 GOFLAGS ?= -mod=mod
 IMG     ?= docker.io/kreeuwijk/ai-nodeprep
-VERSION ?= 0.1.23
+VERSION ?= 0.1.28
 PLATFORMS ?= linux/amd64,linux/arm64
 
 # One repo, two binaries: the component rides in the tag because a single

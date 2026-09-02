@@ -99,8 +99,15 @@ type NodePrepProfile struct {
 }
 
 type NodePrepProfileSpec struct {
-	// NodeSelector decides which Nodes are adopted.
-	NodeSelector *metav1.LabelSelector `json:"nodeSelector"`
+	// NodeSelector decides which Nodes are adopted. Legacy spelling — the
+	// selection block supersedes it; both may not be set at once.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
+
+	// Selection decides which Nodes are adopted (§3.1). When unset, the
+	// top-level nodeSelector is the gate.
+	// +optional
+	Selection *SelectionSpec `json:"selection,omitempty"`
 
 	Firmware     FirmwareSource   `json:"firmware,omitempty"`
 	EastWest     EastWestSpec     `json:"eastWest,omitempty"`
@@ -111,6 +118,51 @@ type NodePrepProfileSpec struct {
 	DPUBMC       DPUBMCSpec       `json:"dpuBMC,omitempty"`
 	NFSRDMA      NFSRDMASpec      `json:"nfsRdma,omitempty"`
 	ControlPlane ControlPlaneSpec `json:"controlPlane,omitempty"`
+}
+
+// SelectionSpec picks the node set a profile claims. Mode labelSelector
+// (default) gates on a label selector; allWorkers adopts every non-control-
+// plane node; allNodes adopts workers and control planes alike (CP prep
+// still requires policy.controlPlanePrep and follows the §6.4 quorum
+// choreography). ExcludeLabel disqualifies individual nodes under every
+// mode — an escape hatch for a node that must never be touched.
+type SelectionSpec struct {
+	// Mode picks how nodes are selected: "" / "labelSelector" (gate on
+	// NodeSelector), "allWorkers" (every node without a control-plane
+	// role), "allNodes" (workers and control planes).
+	// +kubebuilder:validation:Enum=labelSelector;allWorkers;allNodes
+	Mode string `json:"mode,omitempty"`
+	// NodeSelector is the label gate for mode labelSelector. Optional
+	// there too: an empty selector matches every node.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
+	// ExcludeLabel disqualifies nodes carrying it, in any mode: "key"
+	// matches any value, "key=value" an exact one.
+	// +optional
+	ExcludeLabel string `json:"excludeLabel,omitempty"`
+}
+
+// Nil-safe accessors: a nil Selection means the legacy nodeSelector gate.
+
+func (s *SelectionSpec) GetMode() string {
+	if s == nil {
+		return ""
+	}
+	return s.Mode
+}
+
+func (s *SelectionSpec) GetNodeSelector() *metav1.LabelSelector {
+	if s == nil {
+		return nil
+	}
+	return s.NodeSelector
+}
+
+func (s *SelectionSpec) GetExcludeLabel() string {
+	if s == nil {
+		return ""
+	}
+	return s.ExcludeLabel
 }
 
 type FirmwareSource struct {

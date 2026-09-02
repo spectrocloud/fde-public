@@ -57,6 +57,12 @@ type Agent struct {
 	// rebootIssued guards the one-shot reboot execution per boot.
 	rebootIssued bool
 
+	// cpRole caches the node's control-plane role label for ~1min; the §6.4
+	// admission gate fails closed on it (nodeIsControlPlane).
+	cpRole      bool
+	cpRoleKnown bool
+	cpRoleUntil time.Time
+
 	// noPrepLogged keeps the "no NodePrep yet" line to one occurrence
 	// instead of one per poll cycle.
 	noPrepLogged bool
@@ -230,6 +236,39 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		return
 	}
 
+	// Profile edit (design §5.1, the coarse v0.1 form of inputsHash): a new
+	// profile generation invalidates every step — the machine re-walks from
+	// Provisioning and each step re-converges. All steps are idempotent
+	// (detect first, apply only what's missing), so a no-op edit just
+	// re-verifies. The observed generation is advanced here so the re-open
+	// happens exactly once per edit; per-step input hashing lands with real
+	// Apply.
+	if profile.Generation != np.Status.ObservedProfileGeneration {
+		a.logf("profile %s generation %d -> %d; re-opening all steps",
+			np.Spec.ProfileRef.Name, np.Status.ObservedProfileGeneration, profile.Generation)
+		steps := np.Status.Steps
+		for i := range steps {
+			if steps[i].State == v1alpha1.StepPending {
+				continue
+			}
+			steps[i] = v1alpha1.StepStatus{Name: steps[i].Name, Stage: steps[i].Stage, State: v1alpha1.StepPending}
+		}
+		if err := a.patchStatus(ctx, map[string]interface{}{
+			"steps":                     steps,
+			"observedProfileGeneration": profile.Generation,
+		}); err != nil {
+			a.logf("profile-change reset failed: %v", err)
+			return
+		}
+		np.Status.Steps = steps
+		np.Status.ObservedProfileGeneration = profile.Generation
+		a.emit(ctx, corev1.EventTypeNormal, "ProfileChanged",
+			fmt.Sprintf("profile %s generation %d; all steps re-opened", np.Spec.ProfileRef.Name, profile.Generation))
+		a.setPhase(ctx, v1alpha1.PhaseProvisioning, "profile changed",
+			fmt.Sprintf("profile generation %d applied; steps re-opened", profile.Generation))
+		return
+	}
+
 	// Boot protocol (design §5.2): detect boot_id changes, clear the
 	// RebootRequired condition, count the reboot, and re-verify at boot.
 	changedBoot := np.Status.BootID != "" && np.Status.BootID != bootID
@@ -322,6 +361,27 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	}
 }
 
+// nodeIsControlPlane reports whether this node carries the control-plane
+// role label (design §6.4 gate). Cached ~1min; until the first successful
+// read it conservatively reports control plane so the admission gate fails
+// closed — a worker merely idles one cycle, a CP never preps un-admitted.
+func (a *Agent) nodeIsControlPlane(ctx context.Context) bool {
+	if time.Now().Before(a.cpRoleUntil) {
+		return a.cpRole
+	}
+	node, err := a.client.CoreV1().Nodes().Get(ctx, a.nodeName, metav1.GetOptions{})
+	if err != nil {
+		if !a.cpRoleKnown {
+			a.logf("control-plane role check failed (%v); holding CP admission gate until the node is readable", err)
+			return true
+		}
+		return a.cpRole // stale but recent answer
+	}
+	_, cp := node.Labels["node-role.kubernetes.io/control-plane"]
+	a.cpRole, a.cpRoleKnown, a.cpRoleUntil = cp, true, time.Now().Add(time.Minute)
+	return cp
+}
+
 func (a *Agent) removeAnnotation(ctx context.Context, key string) error {
 	patch, _ := json.Marshal(map[string]interface{}{
 		"metadata": map[string]interface{}{"annotations": map[string]interface{}{key: nil}},
@@ -372,7 +432,13 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		if k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionFlashAdmitted) == "False" {
 			return // controller will flip the condition; next cycle proceeds
 		}
-		if k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionMaintenanceAdmitted) == "False" {
+		// A missing MaintenanceAdmitted condition is NOT consent: the
+		// controller sets it on its first reconcile, and prepping before
+		// that would let a freshly adopted CP run in parallel with an
+		// admitted peer (found live: a queued CP walked Provisioning and
+		// requested a reboot while another member was mid-prep).
+		if a.nodeIsControlPlane(ctx) &&
+			k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionMaintenanceAdmitted) != "True" {
 			return
 		}
 	}
@@ -643,13 +709,34 @@ func nextStage(p v1alpha1.Phase) (v1alpha1.Phase, bool) {
 	return "", false
 }
 
+// patchCondition merges ONE condition into the NodePrep's CURRENT conditions
+// (fresh read, modify, write). Patching a whole conditions array built from
+// a stale or partial copy (found live) deletes conditions the controller
+// wrote in the meantime — its MaintenanceAdmitted gate disappeared and a
+// queued control plane started prepping un-admitted.
+func (a *Agent) patchCondition(ctx context.Context, c metav1.Condition) {
+	np, err := a.fetchNodePrep(ctx)
+	if err != nil {
+		a.logf("condition patch skipped: %v", err)
+		return
+	}
+	conds := np.Status.Conditions
+	k8sutil.SetCondition(&conds, c.Type, string(c.Status), c.Reason, c.Message, c.ObservedGeneration)
+	if err := a.patchStatus(ctx, map[string]interface{}{"conditions": conds}); err != nil {
+		a.logf("condition patch failed: %v", err)
+	}
+}
+
 // requestReboot records the requirement in status; execution honors the
 // -allow-reboot flag (design §5.2 protocol step 3). v0.1 steps do not yet
 // set RebootRequired; the path is exercised in the lab.
 func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
-	conds := []metav1.Condition{}
-	k8sutil.SetCondition(&conds, v1alpha1.ConditionRebootRequired, "True", reason, message, 0)
-	_ = a.patchStatus(ctx, map[string]interface{}{"conditions": conds})
+	a.patchCondition(ctx, metav1.Condition{
+		Type:    v1alpha1.ConditionRebootRequired,
+		Status:  metav1.ConditionTrue,
+		Reason:  reason,
+		Message: message,
+	})
 	if !a.allowReboot {
 		a.emit(ctx, corev1.EventTypeWarning, "RebootSuppressed", fmt.Sprintf("reboot requested (%s) but -allow-reboot is false", reason))
 		return

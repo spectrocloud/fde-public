@@ -1,6 +1,10 @@
 package controller
 
 import (
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
@@ -24,14 +28,62 @@ func AdmitFlashing(busyOthers, max int) bool {
 	return max <= 0 || busyOthers < max
 }
 
-// AdmitControlPlane implements serial control-plane admission (design §6.4,
-// quorum-safe strategy): at most one control-plane node may be mid-prep.
-// Background strategy (single-CP clusters) admits unconditionally.
-func AdmitControlPlane(busyOthers int, strategy string) bool {
+// AdmitControlPlane implements the quorum admission window (design §6.4):
+// at most CPMaxConcurrent(expected) control-plane nodes mid-prep at once.
+// Background strategy (single-CP clusters) admits unconditionally — the
+// work must happen even though the math allows zero disruptions.
+func AdmitControlPlane(busyOthers, maxConcurrent int, strategy string) bool {
 	if strategy == "background" {
 		return true
 	}
-	return busyOthers == 0
+	return busyOthers < maxConcurrent
+}
+
+// BusyControlPlane reports whether a control-plane NodePrep consumes the
+// §6.4 maintenance window: any stage past Provisioning (the host is being
+// worked on), or an admission already granted while still queued. Waiting
+// peers (MaintenanceAdmitted=False in Pending/Provisioning) do not count —
+// counting them deadlocks the window, since every member would wait on
+// every other.
+func BusyControlPlane(phase v1alpha1.Phase, maintenanceAdmitted string) bool {
+	switch phase {
+	case v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
+		return true
+	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning:
+		return maintenanceAdmitted == string(metav1.ConditionTrue)
+	default: // Ready, Failed, "" — converged or not started
+		return false
+	}
+}
+
+// CPMaxConcurrent computes how many control-plane nodes may be mid-prep
+// concurrently: expected − quorum(expected) — 1 for a 3-node CP, 2 for
+// 5 — with a floor of 1 so prep always makes progress (a 2-node CP is
+// pathological either way; document, don't deadlock).
+func CPMaxConcurrent(expected int) int {
+	if expected < 1 {
+		return 1
+	}
+	quorum := expected/2 + 1
+	n := expected - quorum
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// ExcludeLabelMatch reports whether a node is disqualified by the profile's
+// excludeLabel ("key" matches any value, "key=value" an exact one).
+func ExcludeLabelMatch(exclude string, labels map[string]string) bool {
+	if exclude == "" {
+		return false
+	}
+	key, want, hasVal := strings.Cut(exclude, "=")
+	got, ok := labels[key]
+	if !ok {
+		return false
+	}
+	return !hasVal || got == want
 }
 
 // WorkerLabelOp is the tri-state decision for the worker-role label.

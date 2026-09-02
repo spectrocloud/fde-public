@@ -25,9 +25,27 @@ Phases map 1:1 onto the bash label values:
 
 Real, exercised end-to-end:
 
-- **Adoption**: nodes matching a profile's `nodeSelector` get a NodePrep; the
+- **Adoption**: nodes matching a profile's selection get a NodePrep; the
   legacy `spectrocloud.com/nodeprep` label is imported and mirrored
   (`policy.labelCompat: v1`).
+- **Node selection** (§3.1): `spec.selection` picks the node set —
+  `mode: labelSelector` (default) gates on `selection.nodeSelector`;
+  `mode: allWorkers` adopts every non-control-plane node, no label needed;
+  `mode: allNodes` also adopts control planes (with
+  `policy.controlPlanePrep: true`; quorum choreography below). The legacy
+  top-level `spec.nodeSelector` keeps working when `selection` is absent.
+  `selection.excludeLabel` ("key" or "key=value") disqualifies individual
+  nodes under every mode.
+- **Control-plane prep** (§6.4): with `policy.controlPlanePrep: true`,
+  control-plane nodes run the same step machine, admitted through the quorum
+  window — at most `expected − quorum(expected)` members mid-prep
+  concurrently (1 of 3, 2 of 5), computed from the KubeadmControlPlane
+  replicas (`controlPlane.expectedCount` overrides). While one member is
+  mid-prep the others hold etcd quorum; `MaintenanceAdmitted=False`
+  (reason `QuorumFloor`) holds the rest until it reaches Ready with boot
+  verified. The admission count fails closed: an unreliable count holds
+  admission rather than risking a second member. The worker-role label is
+  never applied to control-plane nodes.
 - **Taint contract** (design §6.1): `spectrocloud.com/nodeprep:NoSchedule` is
   applied at adoption and released **only** when the node reaches Ready with
   boot-verify passed on the current boot. Because taints live in etcd, a
@@ -124,9 +142,9 @@ which ignores the annotation entirely).
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.18-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.18-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.18-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.28-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.28-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.28-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ type stepDef struct {
 var stepDefs = []stepDef{
 	// --- Provisioning (bash fn_init_sw_stage) ---
 	{name: "downloads", stage: v1alpha1.PhaseProvisioning, run: stepDownloads},
+	{name: "aptUpgrade", stage: v1alpha1.PhaseProvisioning, run: stepAptUpgrade},
 	{name: "aptPackages", stage: v1alpha1.PhaseProvisioning, run: stepAptPackages},
 	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
 	{name: "ibCoreNetns", stage: v1alpha1.PhaseProvisioning, run: stepIbCoreNetns},
@@ -71,12 +73,8 @@ func stepsForStage(stage v1alpha1.Phase) []stepDef {
 	return out
 }
 
-// stepHash makes a Done step re-open when the profile generation changes
-// (design §5.1 inputsHash; full input-sensitivity lands with real Apply).
-func stepHash(np *v1alpha1.NodePrep, name string, extra string) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%d/%s/%s", np.Status.ObservedProfileGeneration, name, extra)))
-	return hex.EncodeToString(h[:8])
-}
+// Profile edits re-open steps via the generation check in cycle (design
+// §5.1); per-step inputsHash lands with real Apply.
 
 func (a *Agent) hasMellanox() bool { return len(a.mellanoxFns) > 0 }
 
@@ -265,9 +263,21 @@ func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 		a.logf("ibCoreNetns: wrote %s (running module reports %q)", path, strings.TrimSpace(string(got)))
 	}
+	// ib_core.ko can ship in the initramfs, whose copy of /etc/modprobe.d was
+	// baked at kernel/package install time — often minutes before this write
+	// (an aptUpgrade in the same stage rebuilds the initramfs first). A module
+	// loaded from the initramfs never sees this file, so a bare reboot comes
+	// back with the compiled-in default and the step would loop. Refresh the
+	// snapshot so the early-load path reads the option too, and only then
+	// request the reboot.
+	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	if out, err := a.heavyHostExec(env, 10*time.Minute, "update-initramfs", "-u"); err != nil {
+		return v1alpha1.StepBlocked, fmt.Sprintf("update-initramfs -u failed (%v); reboot deferred: %s",
+			err, strings.TrimSpace(out))
+	}
 	a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
 		fmt.Sprintf("ib_core netns_mode is %q, want %q; reboot required to reload ib_core", normNetnsMode(string(got)), normNetnsMode(mode)))
-	return v1alpha1.StepBlocked, "modprobe.d updated; reboot requested to reload ib_core"
+	return v1alpha1.StepBlocked, "modprobe.d updated and initramfs refreshed; reboot requested to reload ib_core"
 }
 
 // normNetnsMode folds the parameter spellings together: sysfs reports Y/N,
@@ -357,6 +367,54 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		parts = append(parts, "packages "+strings.Join(missing, ","))
 	}
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
+}
+
+// stepAptUpgrade implements the bash APT_UPDATE gate (nodeprep-v105.sh
+// fn_init_sw_stage): bring package lists current, then upgrade the system
+// with conffiles preserved on conflict. Runs before the DOCA packages step
+// (the bash upgrades first too). apt work is heavy — host systemd unit —
+// and NEEDRESTART_MODE=l keeps services from restarting mid-prep. Detection
+// is the upgrade simulation after the list refresh: nothing upgradable
+// reads as already current, so re-runs are cheap.
+func stepAptUpgrade(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	if !profile.Spec.Firmware.AptUpgrade {
+		return v1alpha1.StepDone, "skipped by policy (firmware.aptUpgrade=false)"
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "apt upgrade requires -host-mutations and policy.hostMutations"
+	}
+	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=l")
+	if _, err := a.heavyHostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("apt-get update: %v", err)
+	}
+	sim, err := a.hostExec(env, 5*time.Minute, "apt-get", "-s", "upgrade")
+	if err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("apt-get -s upgrade: %v", err)
+	}
+	upgradable := parseUpgradableCount(sim)
+	if upgradable == 0 {
+		return v1alpha1.StepDone, "apt update completed; 0 packages upgradable"
+	}
+	if _, err := a.heavyHostExec(env, 60*time.Minute, "apt-get", "upgrade", "--yes", "--quiet",
+		"-o", "Dpkg::Options::=--force-confold"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("apt-get upgrade (%d packages): %v", upgradable, err)
+	}
+	return v1alpha1.StepDone, fmt.Sprintf("apt update + upgrade completed (%d packages upgraded)", upgradable)
+}
+
+// parseUpgradableCount reads "N upgraded" from apt-get's plan summary.
+func parseUpgradableCount(simOut string) int {
+	for _, ln := range strings.Split(simOut, "\n") {
+		if i := strings.Index(ln, " upgraded"); i > 0 {
+			f := strings.Fields(strings.TrimSpace(ln[:i]))
+			if len(f) > 0 {
+				if n, err := strconv.Atoi(f[len(f)-1]); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // stepNeedsMFT is the shared shape of the hardware steps that require host
@@ -496,11 +554,84 @@ func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 	return v1alpha1.StepDone, fmt.Sprintf("%s; cleared stale kubelet state %v (%s)", hookMsg, removed, restarted)
 }
 
+// stepNfsRdma implements the bash fn_setup_nfsrdma: ensure nfs-common,
+// install the OFED-compatible mlnx-nfsrdma-dkms package (requires the DOCA
+// apt repository — the aptPackages step bootstraps it in the same prep),
+// load the RDMA NFS transport modules, and persist them in
+// /etc/modules-load.d so every future boot loads them too. A module that
+// refuses to load is the bash's WARN-and-continue case (a reboot after the
+// dkms install usually settles it) — reported in the message, not a
+// failure.
 func stepNfsRdma(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !profile.Spec.NFSRDMA.Enabled {
 		return v1alpha1.StepDone, "skipped by policy (nfsRdma disabled)"
 	}
-	return v1alpha1.StepBlocked, "NFSoRDMA package/module handling lands in v0.2"
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "NFSoRDMA installation requires -host-mutations and policy.hostMutations"
+	}
+	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=l")
+	confPath := filepath.Join(a.hostEtcDir(), "modules-load.d", "nfsrdma.conf")
+	confWant := "rpcrdma\nxprtrdma\nsvcrdma\n"
+
+	// Detect: both packages, the module, and the auto-load config.
+	nfsCommon := a.pkgInstalled(env, "nfs-common")
+	dkms := a.pkgInstalled(env, "mlnx-nfsrdma-dkms")
+	confNow, confErr := os.ReadFile(confPath)
+	confOK := confErr == nil && string(confNow) == confWant
+	loaded := a.moduleLoaded("rpcrdma")
+	if nfsCommon && dkms && confOK && loaded {
+		return v1alpha1.StepDone, "NFSoRDMA verified: nfs-common, mlnx-nfsrdma-dkms installed; rpcrdma loaded; modules-load.d/nfsrdma.conf present"
+	}
+
+	var did []string
+	if !nfsCommon {
+		if _, err := a.heavyHostExec(env, 15*time.Minute, "apt-get", "install", "--yes", "nfs-common"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("apt-get install nfs-common: %v", err)
+		}
+		did = append(did, "nfs-common installed")
+	}
+	if !dkms {
+		// The package ships with the DOCA repository; without it apt fails
+		// and the message points at the real cause.
+		if _, err := a.heavyHostExec(env, 30*time.Minute, "apt-get", "install", "--yes", "mlnx-nfsrdma-dkms"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("apt-get install mlnx-nfsrdma-dkms: %v (the package comes from the DOCA repo; check firmware.doca in the profile)", err)
+		}
+		did = append(did, "mlnx-nfsrdma-dkms installed")
+	}
+	if !confOK {
+		if err := os.MkdirAll(filepath.Dir(confPath), 0o755); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("mkdir modules-load.d: %v", err)
+		}
+		if err := os.WriteFile(confPath, []byte(confWant), 0o644); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("write %s: %v", confPath, err)
+		}
+		did = append(did, "modules-load.d/nfsrdma.conf written")
+	}
+	if !loaded {
+		for _, m := range []string{"rpcrdma", "xprtrdma", "svcrdma"} {
+			_, _ = a.hostExec(env, 30*time.Second, "modprobe", m) // bash: || true
+		}
+		if a.moduleLoaded("rpcrdma") {
+			did = append(did, "rpcrdma module loaded")
+		} else {
+			did = append(did, "WARNING rpcrdma not loaded (may need reboot)")
+		}
+	}
+	return v1alpha1.StepDone, "NFSoRDMA configured: " + strings.Join(did, "; ")
+}
+
+// moduleLoaded asks the host lsmod for a module.
+func (a *Agent) moduleLoaded(name string) bool {
+	out, err := a.hostExecQuiet(nil, 30*time.Second, "lsmod")
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		if f := strings.Fields(ln); len(f) > 0 && f[0] == name {
+			return true
+		}
+	}
+	return false
 }
 
 func stepDriverReady(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {

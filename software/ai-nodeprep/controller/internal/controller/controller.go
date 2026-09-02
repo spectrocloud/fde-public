@@ -102,7 +102,36 @@ func (c *Controller) reprobeMachineCRD(ctx context.Context) bool {
 	return c.machineCRD
 }
 
-// matchProfile returns the first profile whose nodeSelector matches the node
+// matchesSelection evaluates a profile's node selection against a node
+// (design §3.1): the excludeLabel disqualifies first, then the mode picks
+// the node set — labelSelector (or the legacy top-level nodeSelector) gates
+// on labels, allWorkers on "not a control plane", allNodes on everything.
+func matchesSelection(p *v1alpha1.NodePrepProfile, node *corev1.Node) bool {
+	if ExcludeLabelMatch(p.Spec.Selection.GetExcludeLabel(), node.Labels) {
+		return false
+	}
+	switch p.Spec.Selection.GetMode() {
+	case "allWorkers":
+		return !isControlPlane(node)
+	case "allNodes":
+		return true
+	default: // "", labelSelector — the label gate
+		sel := p.Spec.Selection.GetNodeSelector()
+		if sel == nil {
+			sel = p.Spec.NodeSelector
+		}
+		if sel == nil {
+			return false
+		}
+		s, err := metav1.LabelSelectorAsSelector(sel)
+		if err != nil {
+			return false
+		}
+		return s.Matches(labels.Set(node.Labels))
+	}
+}
+
+// matchProfile returns the first profile whose selection matches the node
 // (deterministic by name order). nil when no profile claims the node.
 func (c *Controller) matchProfile(ctx context.Context, node *corev1.Node) (*v1alpha1.NodePrepProfile, error) {
 	list, err := c.dyn.Resource(profilesGVR).List(ctx, metav1.ListOptions{})
@@ -122,14 +151,7 @@ func (c *Controller) matchProfile(ctx context.Context, node *corev1.Node) (*v1al
 	sortStrings(names)
 	for _, name := range names {
 		p := byName[name]
-		if p.Spec.NodeSelector == nil {
-			continue
-		}
-		sel, err := metav1.LabelSelectorAsSelector(p.Spec.NodeSelector)
-		if err != nil {
-			continue
-		}
-		if sel.Matches(labels.Set(node.Labels)) {
+		if matchesSelection(p, node) {
 			return p, nil
 		}
 	}
@@ -330,11 +352,15 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 			labelsWant[v1alpha1.LegacyLabel] = v
 		}
 	}
-	switch WorkerLabelDecision(phase, pol) {
-	case WorkerLabelSet:
-		labelsWant[v1alpha1.WorkerRoleLabel] = ""
-	case WorkerLabelRemove:
-		labelsWant[v1alpha1.WorkerRoleLabel] = "\x00delete"
+	// The worker-role label describes the WORKER role; control-plane nodes
+	// must never gain (or lose) it because of a prep cycle.
+	if !isCP {
+		switch WorkerLabelDecision(phase, pol) {
+		case WorkerLabelSet:
+			labelsWant[v1alpha1.WorkerRoleLabel] = ""
+		case WorkerLabelRemove:
+			labelsWant[v1alpha1.WorkerRoleLabel] = "\x00delete"
+		}
 	}
 	wantTaint := TaintShouldExist(phase, bootVerified, pol)
 	c.applyNodeChanges(ctx, node, wantTaint, labelsWant, phase, np.Name)
@@ -361,7 +387,7 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 
 	// --- Conditions ---
 	conds := np.Status.Conditions
-	if changed := c.refreshAdmissionConditions(ctx, np, phase, pol, isCP, &conds); changed {
+	if changed := c.refreshAdmissionConditions(ctx, np, phase, pol, profile.Spec.ControlPlane, isCP, &conds); changed {
 		c.patchConditions(ctx, np.Name, conds)
 	}
 	// Ready mirrors the phase; reasons name what is holding it back.
@@ -420,7 +446,7 @@ func (c *Controller) applyNodeChanges(ctx context.Context, node *corev1.Node, wa
 
 // refreshAdmissionConditions computes FlashAdmitted and (for control planes)
 // MaintenanceAdmitted from the fleet state. Returns true when conditions changed.
-func (c *Controller) refreshAdmissionConditions(ctx context.Context, np *v1alpha1.NodePrep, phase v1alpha1.Phase, pol v1alpha1.PolicySpec, isCP bool, conds *[]metav1.Condition) bool {
+func (c *Controller) refreshAdmissionConditions(ctx context.Context, np *v1alpha1.NodePrep, phase v1alpha1.Phase, pol v1alpha1.PolicySpec, cp v1alpha1.ControlPlaneSpec, isCP bool, conds *[]metav1.Condition) bool {
 	changed := false
 	maxFlash := pol.MaxConcurrentFlashes
 	busyFlash := c.countBusyFlashers(ctx, np.Name)
@@ -434,26 +460,61 @@ func (c *Controller) refreshAdmissionConditions(ctx context.Context, np *v1alpha
 		}
 	}
 	if isCP {
-		busyCP := c.countBusyControlPlanes(ctx, np.Name)
-		if AdmitControlPlane(busyCP, "") {
+		// Quorum admission (design §6.4): at most expected − quorum(expected)
+		// control-plane nodes mid-prep, so a 3-node CP is never more than one
+		// member short of quorum while another reboots.
+		busyCP, err := c.countBusyControlPlanes(ctx, np.Name)
+		maxCP := CPMaxConcurrent(c.expectedControlPlaneCount(ctx, cp))
+		switch {
+		case err != nil:
+			// Fail closed: without a reliable count, do not risk a second
+			// member going down; the next resync retries.
+			changed = k8sutil.SetCondition(conds, v1alpha1.ConditionMaintenanceAdmitted, "False", "CPCountFailed",
+				fmt.Sprintf("cannot count mid-prep control planes (%v); admission held", err), 0) || changed
+		case AdmitControlPlane(busyCP, maxCP, cp.Strategy):
 			changed = k8sutil.SetCondition(conds, v1alpha1.ConditionMaintenanceAdmitted, "True", v1alpha1.ReasonAdmitted,
-				"serial control-plane window available", 0) || changed
-		} else {
+				fmt.Sprintf("control-plane window available (%d/%d mid-prep)", busyCP, maxCP), 0) || changed
+		default:
 			changed = k8sutil.SetCondition(conds, v1alpha1.ConditionMaintenanceAdmitted, "False", v1alpha1.ReasonQuorumFloor,
-				"another control-plane node is mid-prep; quorum floor is one member short", 0) || changed
+				fmt.Sprintf("%d other control-plane node(s) mid-prep; window holds %d (quorum floor)", busyCP, maxCP), 0) || changed
 		}
 	}
 	return changed
+}
+
+// expectedControlPlaneCount resolves the CP replica count for the quorum
+// math: the profile's explicit expectedCount, else the KubeadmControlPlane
+// replicas (design §6.4), else the CP nodes present on the cluster.
+func (c *Controller) expectedControlPlaneCount(ctx context.Context, cp v1alpha1.ControlPlaneSpec) int {
+	if cp.ExpectedCount > 0 {
+		return cp.ExpectedCount
+	}
+	if n, err := kcpReplicas(ctx, c.dyn); err == nil && n > 0 {
+		return n
+	}
+	n := 0
+	for _, obj := range c.nodeIndexer.List() {
+		if isControlPlane(obj.(*corev1.Node)) {
+			n++
+		}
+	}
+	return n
 }
 
 func (c *Controller) countBusyFlashers(ctx context.Context, exclude string) int {
 	return c.countInPhase(ctx, exclude, v1alpha1.PhaseFlashing)
 }
 
-func (c *Controller) countBusyControlPlanes(ctx context.Context, exclude string) int {
+// countBusyControlPlanes counts control-plane NodePreps that are consuming
+// the maintenance window (design §6.4): past Provisioning, or admitted while
+// still in Provisioning/Pending. A peer parked with MaintenanceAdmitted=False
+// is waiting, not busy — counting it deadlocks the window (every member
+// waits on every other). Self is excluded by name; the reconciled node's own
+// admission is decided from the returned count.
+func (c *Controller) countBusyControlPlanes(ctx context.Context, exclude string) (int, error) {
 	list, err := c.dyn.Resource(nodePrepsGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n := 0
 	for i := range list.Items {
@@ -461,20 +522,29 @@ func (c *Controller) countBusyControlPlanes(ctx context.Context, exclude string)
 		if item.GetName() == exclude {
 			continue
 		}
+		if node, ok, _ := c.nodeIndexer.GetByKey(item.GetName()); !ok || !isControlPlane(node.(*corev1.Node)) {
+			continue
+		}
 		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
-		if v1alpha1.Phase(phase) == v1alpha1.PhasePending ||
-			v1alpha1.Phase(phase) == v1alpha1.PhaseProvisioning ||
-			v1alpha1.Phase(phase) == v1alpha1.PhaseFlashing ||
-			v1alpha1.Phase(phase) == v1alpha1.PhaseConfiguring ||
-			v1alpha1.Phase(phase) == v1alpha1.PhaseFinalizing {
-			if node, ok, _ := c.nodeIndexer.GetByKey(item.GetName()); ok {
-				if isControlPlane(node.(*corev1.Node)) {
-					n++
+		admitted := ""
+		conds, _, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
+		for _, cnd := range conds {
+			m, ok := cnd.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if m["type"] == v1alpha1.ConditionMaintenanceAdmitted {
+				if s, ok := m["status"].(string); ok {
+					admitted = s
 				}
+				break
 			}
 		}
+		if BusyControlPlane(v1alpha1.Phase(phase), admitted) {
+			n++
+		}
 	}
-	return n
+	return n, nil
 }
 
 func (c *Controller) countInPhase(ctx context.Context, exclude string, phase v1alpha1.Phase) int {
