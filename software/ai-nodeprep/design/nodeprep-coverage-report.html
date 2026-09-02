@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.17</span>
+    <span>nodeprep-v105.sh → controller v0.1.18</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -569,7 +569,9 @@
      change, otherwise at most every 5 minutes, matching the design's "drift or a new boot re-verifies"), and the
      mlxconfig detect went from one query per key to one full query per device (the boot hook's corrective
      systemctl work is likewise once per process, not per cycle). Steady state on a Ready node is now zero host
-     execs between verify passes.</p>
+     execs between verify passes, and the ACS read sweep runs quiet — devices without the capability are an
+     expected per-device negative, counted in the step message instead of logged (0.1.18); writes stay fully
+     logged.</p>
 </div>
 <div class="callout warn">
   <p><b>NodePrepProfile updates impossible: stale resourceVersion replayed from
