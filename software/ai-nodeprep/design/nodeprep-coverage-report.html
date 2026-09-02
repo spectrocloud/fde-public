@@ -710,13 +710,15 @@
      conditions, including the admission itself. Fix: single-condition patches via fresh read-modify-write.</p>
 </div>
 <div class="callout warn">
-  <p><b>The cluster's NodePrepProfile CRD was swapped back to the pre-selection schema</b> (Run 3,
-     operational). Applying manifests from a clean checkout reinstalled the old CRD;
-     <code>spec.selection</code> became an unknown field and was <b>silently pruned on every write</b> — the
-     whole fleet de-adopted with "no longer matches any profile". Fix: reinstall the CRD from the working tree
-     and re-add selection with <code>kubectl patch --type=json</code> — JSON patches do not touch
-     <code>last-applied-configuration</code>, so they cannot replay the pruning; prefer them over
-     <code>apply</code> for live profile edits.</p>
+  <p><b>The cluster's NodePrepProfile CRD was reverted to the pre-selection schema</b> (Run 3, operational).
+     The CRDs on this cluster are enforced by an external management system that reverts any drift to its own
+     copy — so the pre-selection schema came back on its own, <code>spec.selection</code> became an unknown
+     field and was <b>silently pruned on every write</b>, and the whole fleet de-adopted with "no longer
+     matches any profile". Remediation was a stopgap: re-apply the working-tree CRD and re-add selection with
+     <code>kubectl patch --type=json</code> — JSON patches do not touch
+     <code>last-applied-configuration</code>, so prefer them over <code>apply</code> for live profile edits.
+     The durable rule: CRD changes must land in the external management system first; applying them directly
+     to the cluster is temporary by construction.</p>
 </div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
