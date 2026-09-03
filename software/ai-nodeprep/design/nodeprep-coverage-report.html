@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.28</span>
+    <span>nodeprep-v105.sh → controller v0.1.30</span>
     <span>2026-09-02</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -133,8 +133,9 @@
     (machine <code>…b6ppf-tjc9j</code>) · Run 2 — Mellanox lab cluster <code>nodeprep-test</code>: dual-port
     ConnectX-4 Lx workers <code>bl-r1-c2-02</code>/<code>bl-r1-c2-04</code> on <code>0.1.12 → 0.1.15</code>,
     through two nodeprep reboots to Ready · profile <code>gpu-worker-v105</code> · Run 3 — the successor lab
-    cluster (also <code>nodeprep-test</code>) on <code>0.1.24 → 0.1.28</code>: three-node control plane,
-    selection modes, the §6.4 quorum window, and the first real <code>aptUpgrade</code>/<code>nfsRdma</code> runs
+    cluster (also <code>nodeprep-test</code>) on <code>0.1.24 → 0.1.30</code>: three-node control plane,
+    selection modes, the §6.4 quorum window, the first real <code>aptUpgrade</code>/<code>nfsRdma</code> runs,
+    and the build-deps/lldpd/rshim fixes
   </div>
 </header>
 
@@ -161,13 +162,13 @@
    <code>ai-worker</code> label and one node carried a disqualifying label, exercising the new selection modes;
    the profile then moved to <code>allNodes</code> to adopt the control planes, and flipped
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
-   runs. NodePrep versions <code>0.1.24 → 0.1.28</code>.</p>
+   runs, followed by an operator audit that closed three more every-node gaps (0.1.30). NodePrep versions <code>0.1.24 → 0.1.30</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
   <span><b>3</b> steps gate-verified, bodies v0.2</span>
   <span><b>14</b> v0.1 features beyond the bash script</span>
-  <span><b>12</b> defects found &amp; fixed by live testing</span>
+  <span><b>13</b> defects found &amp; fixed by live testing</span>
 </div>
 
 <h2><span class="no">§2</span>The run on a fresh worker node, as performed</h2>
@@ -351,6 +352,20 @@
       balancer) steady, kubectl uninterrupted. Queued CPs do not move without
       <code>MaintenanceAdmitted=True</code> — the agent now fails closed on a missing condition rather than
       reading silence as consent (§6, 0.1.28).</span></li>
+  <li><span class="t">Audit round</span><span class="e">Operator finds three gaps (0.1.30)</span>
+      <span class="d">A host audit of <code>bl-r1-c2-05</code> surfaced what the profile had never asked for:
+      <code>gcc-12</code>/<code>libgcc-12-dev</code> absent, no headers for the running kernel, no LLDPD config,
+      rshim neither enabled nor started. The profile gained
+      <code>linux-headers-$(uname -r)</code>/<code>gcc-12</code>/<code>libgcc-12-dev</code> — and the agent
+      learned to expand the one placeholder <code>$(uname -r)</code> from the host kernel release (it execs
+      argv arrays, never a shell: apt saw the literal text and failed exit 100 fleet-wide before the fix).
+      Freshly installed <code>linux-headers-*</code> are now <code>apt-mark hold</code>'d, bash-faithful
+      (v105 L325). Two new Provisioning steps closed the rest — <code>lldpdConfig</code> (v105 L363-368:
+      write <code>/etc/lldpd.d/rcp-lldpd.conf</code>, enable, restart on config change) and
+      <code>rshimService</code> (v105 L452-460: enable → restart → verify active, skipping nodes without the
+      unit). Host-verified on <code>bl-r1-c2-05</code>: all three packages installed (headers held), conf
+      exact, lldpd and rshim enabled + active. The gen-10 re-walk that surfaced the expansion gap also
+      re-proved the profile-edit re-open path.</span></li>
   <li><span class="t">Converged</span><span class="e">End state</span>
       <span class="d">All three CPs Ready with boot verified: nodeprep taint released (only the control-plane
       taint remains), legacy mirror <code>complete</code>, CAPI Machines unpaused at Ready, and the worker-role
@@ -425,8 +440,10 @@
         (<code>doca-all lldpd mft netplan.io pv psmisc</code>) on reprovision #2, and verified cache reuse
         (zero bytes re-fetched) on re-preps. Run 3 also closed <b>apt upgrade</b>: <code>aptUpgrade=true</code>
         ran update + upgrade in a host transient unit (120 packages, kernel included) with honest idempotent
-        re-runs. Remaining pieces listed in §5 (headers hold, gcc-12, LLDPD config, grub assembly, rshim
-        restart, autoremove, the post-stage reboot trigger).</td>
+        re-runs — and the audit round closed <b>headers + gcc-12</b> (<code>$(uname -r)</code> expansion,
+        <code>apt-mark hold</code>, host-verified), <b>LLDPD config</b> (<code>lldpdConfig</code>) and
+        <b>rshim</b> (<code>rshimService</code>). Remaining pieces listed in §5 (grub assembly, autoremove,
+        the post-stage reboot trigger).</td>
   </tr>
   <tr>
     <td><code>fn_init_hw_stage</code> <small>L468</small></td>
@@ -590,18 +607,18 @@
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class.</li>
-  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs.</li>
-  <li><b>rshim restart</b> before flashing.</li>
+  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs. (The rshim
+      <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
+      is rshim discovery as part of a real BlueField flash.)</li>
 </ul>
 
 <h3>On every node</h3>
 <ul class="tight">
   <li><b>grub assembly (90-nodeprep.cfg)</b> — <code>grubParams</code> detects missing cmdline parameters and
       Blocks by design; writing them is the v0.2 boot path. The profile configures none today, so the step skips.</li>
-  <li><b>linux-headers hold, gcc-12, apt autoremove</b> — not implemented (<b>apt upgrade</b> itself landed in
-      0.1.24 and is covered in §2c/§3).</li>
-  <li><b>LLDPD configuration</b> — the <code>lldpd</code> package installs (verified in reprovision #2), but
-      the bash script's LLDPD config-file block has no equivalent yet.</li>
+  <li><b>apt autoremove</b> — not implemented (<b>apt upgrade</b> landed in 0.1.24; the <b>headers hold</b>
+      and <b>gcc-12</b> installs in 0.1.30; both covered in §2c/§3). <b>LLDPD configuration</b> landed in
+      0.1.30 as <code>lldpdConfig</code> (§2c).</li>
 </ul>
 
 <h2><span class="no">§6</span>Defects the live loop caught (and the fixes shipped)</h2>
@@ -720,6 +737,16 @@
      The durable rule: CRD <i>and RBAC</i> manifest changes must land in the external management system first;
      applying them directly to the cluster is temporary by construction.</p>
 </div>
+<div class="callout warn">
+  <p><b>Apt saw the literal <code>$(uname -r)</code></b> (0.1.30, Run 3 audit round). The profile lists
+     <code>linux-headers-$(uname -r)</code> — the bash expands it because the bash <i>is</i> a shell. The agent
+     execs argv arrays through nsenter with no shell, so apt received the literal text and failed exit 100; the
+     gen-10 profile bump re-opened every step and the whole fleet exhausted its retry budget on
+     <code>aptPackages</code> within minutes. Fix: the agent expands the one supported placeholder from the
+     host's <code>uname -r</code> before detect or install, refuses any other shell expression instead of
+     passing it to apt, and <code>apt-mark hold</code>s freshly installed <code>linux-headers-*</code> (bash
+     L325). Host-verified: <code>hold ok installed</code> for the running kernel's headers.</p>
+</div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
      tests (all runs) so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was
@@ -735,7 +762,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.28 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.30 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
