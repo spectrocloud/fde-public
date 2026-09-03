@@ -121,6 +121,34 @@ func TestDownloadFileReplacesMismatchedLocalCopy(t *testing.T) {
 	}
 }
 
+// expandPkg: the one supported placeholder expands from the host kernel
+// release; any other shell expression is refused rather than handed to apt
+// as literal text.
+func TestExpandPkg(t *testing.T) {
+	got, err := expandPkg("linux-headers-$(uname -r)", "6.14.0-37-generic")
+	if err != nil || got != "linux-headers-6.14.0-37-generic" {
+		t.Fatalf("headers placeholder = %q, %v; want linux-headers-6.14.0-37-generic, nil", got, err)
+	}
+	if got, err := expandPkg("gcc-12", "6.14.0-37-generic"); err != nil || got != "gcc-12" {
+		t.Fatalf("plain package must pass through: %q, %v", got, err)
+	}
+	if _, err := expandPkg("foo-$(whoami)", "x"); err == nil {
+		t.Fatal("a non-uname command substitution must be refused")
+	}
+	if _, err := expandPkg("foo`id`", "x"); err == nil {
+		t.Fatal("backticks must be refused")
+	}
+	if _, err := expandPkg("a-$(b)-$(uname -r)", "k"); err == nil {
+		t.Fatal("a mix of supported and unsupported substitutions must be refused")
+	}
+	if _, err := expandPkg("linux-headers-$uramen-$(uname -r)", "k"); err == nil {
+		t.Fatal("the placeholder must match exactly — $uramen is still an unsupported expression")
+	}
+	if got, err := expandPkg("x-$(uname -r)-y", "k"); err != nil || got != "x-k-y" {
+		t.Fatalf("placeholder between other text = %q, %v; want x-k-y, nil", got, err)
+	}
+}
+
 // stepAptUpgrade gates: policy off skips, detect-only blocks; the simulation
 // parser reads apt's plan summary.
 func TestStepAptUpgradeGates(t *testing.T) {

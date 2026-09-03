@@ -80,7 +80,16 @@ host via `nsenter` — heavy commands run in a host systemd transient unit
 (`systemd-run --wait --pipe`) so apt/dpkg memory is accounted to the host,
 not the pod cgroup; found in live testing, `apt-get install doca-all` as a
 pod child OOM-killed the agent — deliberately with no Mellanox-hardware
-gate), the
+gate). Package names may carry the one supported shell-style placeholder
+`$(uname -r)` — the agent expands it from the host kernel release (e.g.
+`linux-headers-$(uname -r)`), holds freshly installed `linux-headers-*`
+packages (`apt-mark hold`, as the bash script does) so later kernel churn
+cannot strand the running kernel, and refuses any other shell expression
+instead of passing it to apt. `lldpdConfig` writes
+`/etc/lldpd.d/rcp-lldpd.conf` and enables (and, when the config changed,
+restarts) `lldpd`; `rshimService` daemon-reloads, enables, restarts and
+verifies `rshim` (skipping nodes without the unit) so the BlueField flash
+path finds a live rshim. Also the
 `driverReadyMarker` write to `/run/mellanox/drivers`, and `kubeletState` —
 the guarded stop → rm manager-state → restart from `fn_ensure_state`, plus
 the boot hook: the agent renders `nodeprep-boot.service` + its script onto
@@ -154,9 +163,9 @@ a stopgap. For live profile edits prefer JSON patches
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.29-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.29-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.29-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.30-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.30-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.30-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

@@ -175,8 +175,12 @@ type BFBSource struct {
 }
 
 type DOCASource struct {
-	Deb      string   `json:"deb,omitempty"`
-	SHA256   string   `json:"sha256,omitempty"`
+	Deb    string `json:"deb,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	// Packages installs with the deb's apt transaction. The one supported
+	// shell-style placeholder is $(uname -r), expanded by the agent from
+	// the host kernel release (e.g. linux-headers-$(uname -r)); any other
+	// shell expression is a step error, never a pass-through.
 	Packages []string `json:"packages,omitempty"`
 }
 

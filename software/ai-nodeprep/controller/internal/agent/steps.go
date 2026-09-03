@@ -44,7 +44,9 @@ var stepDefs = []stepDef{
 	{name: "downloads", stage: v1alpha1.PhaseProvisioning, run: stepDownloads},
 	{name: "aptUpgrade", stage: v1alpha1.PhaseProvisioning, run: stepAptUpgrade},
 	{name: "aptPackages", stage: v1alpha1.PhaseProvisioning, run: stepAptPackages},
+	{name: "lldpdConfig", stage: v1alpha1.PhaseProvisioning, run: stepLldpdConfig},
 	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
+	{name: "rshimService", stage: v1alpha1.PhaseProvisioning, run: stepRshimService},
 	{name: "ibCoreNetns", stage: v1alpha1.PhaseProvisioning, run: stepIbCoreNetns},
 	// --- Flashing (bash fn_init_hw_stage) ---
 	{name: "bfbFlash", stage: v1alpha1.PhaseFlashing, run: stepBFBFlash},
@@ -301,6 +303,35 @@ func normNetnsMode(v string) string {
 // deb bundle, when configured, is installed first (it bootstraps the NVIDIA
 // apt repository), then the named packages via apt. Detection is dpkg state,
 // so the step is idempotent and only the missing pieces are installed.
+// kernelRelease returns the host's uname -r, cached for the process
+// lifetime: a nodeprep never crosses a kernel change without a reboot, and
+// a reboot re-verifies the boot before any step advances.
+func (a *Agent) kernelRelease(env []string) (string, error) {
+	if a.krelKnown {
+		return a.krel, nil
+	}
+	out, err := a.hostExec(env, 30*time.Second, "uname", "-r")
+	if err != nil {
+		return "", err
+	}
+	a.krel, a.krelKnown = strings.TrimSpace(out), true
+	return a.krel, nil
+}
+
+// expandPkg expands the one supported shell-style placeholder in profile
+// package names — $(uname -r), e.g. linux-headers-$(uname -r) — from the
+// host kernel release. The agent execs argv arrays, never a shell, so any
+// other shell expression cannot work and is refused here rather than
+// handed to apt as literal text (found live: apt exit 100 on
+// "linux-headers-$(uname -r)" before expansion existed).
+func expandPkg(pkg, krel string) (string, error) {
+	out := strings.ReplaceAll(pkg, "$(uname -r)", krel)
+	if strings.ContainsAny(out, "$`") {
+		return "", fmt.Errorf("unsupported shell expression (only $(uname -r) is expanded)")
+	}
+	return out, nil
+}
+
 func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	fw := profile.Spec.Firmware
 	if fw.DOCA.Deb == "" && len(fw.DOCA.Packages) == 0 {
@@ -321,6 +352,22 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 	}
 
+	// Package names may reference the running kernel (the DOCA/DKMS build
+	// needs the matching headers): expand $(uname -r) before detect or
+	// install touches them.
+	krel, err := a.kernelRelease(env)
+	if err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("reading kernel release for package expansion: %v", err)
+	}
+	pkgs := make([]string, 0, len(fw.DOCA.Packages))
+	for _, p := range fw.DOCA.Packages {
+		x, err := expandPkg(p, krel)
+		if err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("package %q: %v", p, err)
+		}
+		pkgs = append(pkgs, x)
+	}
+
 	debNeeded := false
 	debPkg := ""
 	if fw.DOCA.Deb != "" {
@@ -332,7 +379,7 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		debNeeded = !a.pkgInstalled(env, debPkg)
 	}
 	missing := []string{}
-	for _, p := range fw.DOCA.Packages {
+	for _, p := range pkgs {
 		if !a.pkgInstalled(env, p) {
 			missing = append(missing, p)
 		}
@@ -359,6 +406,20 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 	}
 
+	// Bash-faithful guard (v105 L325): hold the running kernel's versioned
+	// headers after install so later kernel churn or autoremove cannot
+	// remove them out from under the running kernel.
+	held := []string{}
+	for _, p := range missing {
+		if !strings.HasPrefix(p, "linux-headers-") {
+			continue
+		}
+		if _, err := a.hostExec(env, 2*time.Minute, "apt-mark", "hold", p); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("apt-mark hold %s: %v", p, err)
+		}
+		held = append(held, p)
+	}
+
 	parts := []string{}
 	if debNeeded {
 		parts = append(parts, "deb "+fw.DOCA.Deb+" ("+debPkg+")")
@@ -366,7 +427,109 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	if len(missing) > 0 {
 		parts = append(parts, "packages "+strings.Join(missing, ","))
 	}
+	if len(held) > 0 {
+		parts = append(parts, "held "+strings.Join(held, ","))
+	}
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
+}
+
+// stepLldpdConfig implements bash v105 L363-368: write the rcp LLDPD config
+// (/etc/lldpd.d/rcp-lldpd.conf, 0644) and enable lldpd. The bash relies on
+// lldpd's package postinst having started it; here a (re)written config is
+// followed by a restart so it takes effect without waiting for a boot.
+// lldpd itself must come from the profile's package list — a missing unit
+// fails the step with that pointer rather than being silently skipped.
+func stepLldpdConfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	conf := "configure system hostname .\nconfigure lldp portidsubtype ifname\n"
+	dir := filepath.Join(a.hostEtcDir(), "lldpd.d")
+	path := filepath.Join(dir, "rcp-lldpd.conf")
+	env := os.Environ()
+
+	needWrite := true
+	if b, err := os.ReadFile(path); err == nil && string(b) == conf {
+		if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm() == 0o644 {
+			needWrite = false
+		}
+	}
+	_, enableErr := a.hostExec(env, 30*time.Second, "systemctl", "is-enabled", "--quiet", "lldpd")
+	needEnable := enableErr != nil
+
+	if !needWrite && !needEnable {
+		return v1alpha1.StepDone, "lldpd configured (unchanged)"
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "lldpd config requires -host-mutations and policy.hostMutations"
+	}
+	if needWrite {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("writing %s: %v", path, err)
+		}
+	}
+	if needEnable {
+		if _, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", "lldpd"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("enabling lldpd (is lldpd in firmware.doca.packages?): %v", err)
+		}
+	}
+	if needWrite {
+		// lldpcli consumes /etc/lldpd.d at service start; restart so the new
+		// config applies now, not only at the next boot.
+		if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "restart", "lldpd"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("restarting lldpd to apply the config: %v", err)
+		}
+	}
+	if !needWrite {
+		return v1alpha1.StepDone, "lldpd enabled"
+	}
+	return v1alpha1.StepDone, "rcp-lldpd.conf written, lldpd enabled"
+}
+
+// stepRshimService implements bash v105 L452-460: rshim enabled and running
+// (daemon-reload → enable → restart → verify active), so the BlueField
+// flash path in the next stage finds a live rshim. An already-enabled,
+// already-active service is left untouched (the bash restarts unconditionally
+// every run; the controller's steps are detect-first and idempotent). A node
+// without the unit — mft not in the package list, or no rshim in the image —
+// skips honestly: there is nothing to enable.
+func stepRshimService(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	env := os.Environ()
+	out, err := a.hostExec(env, 30*time.Second, "systemctl", "is-enabled", "rshim")
+	if err != nil && strings.Contains(out, "No such file") {
+		// systemctl prints the missing-unit complaint to stderr, which
+		// CombinedOutput merges into out.
+		return v1alpha1.StepDone, "skipped: rshim unit not present (install mft via firmware.doca.packages)"
+	}
+	enabled := err == nil && strings.TrimSpace(out) == "enabled"
+	activeOut, activeErr := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "rshim")
+	active := activeErr == nil && strings.TrimSpace(activeOut) == "active"
+	if enabled && active {
+		return v1alpha1.StepDone, "rshim enabled and active (unchanged)"
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, fmt.Sprintf("rshim needs enable=%v restart=%v; requires -host-mutations and policy.hostMutations", !enabled, !active)
+	}
+	if _, err := a.hostExec(env, 30*time.Second, "systemctl", "daemon-reload"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("daemon-reload: %v", err)
+	}
+	if !enabled {
+		if _, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", "rshim"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("enabling rshim: %v", err)
+		}
+	}
+	if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "restart", "rshim"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("restarting rshim: %v", err)
+	}
+	// The bash sleeps 10s then greps status; poll instead, bounded.
+	for i := 0; i < 10; i++ {
+		out, err := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "rshim")
+		if err == nil && strings.TrimSpace(out) == "active" {
+			return v1alpha1.StepDone, "rshim enabled and active"
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return v1alpha1.StepFailed, fmt.Sprintf("rshim not active 20s after restart: %s", strings.TrimSpace(activeOut))
 }
 
 // stepAptUpgrade implements the bash APT_UPDATE gate (nodeprep-v105.sh

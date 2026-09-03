@@ -63,6 +63,11 @@ type Agent struct {
 	cpRoleKnown bool
 	cpRoleUntil time.Time
 
+	// krel caches the host's uname -r for package-name expansion
+	// ($(uname -r) in firmware.doca.packages); fetched once per process.
+	krel      string
+	krelKnown bool
+
 	// noPrepLogged keeps the "no NodePrep yet" line to one occurrence
 	// instead of one per poll cycle.
 	noPrepLogged bool
