@@ -178,9 +178,9 @@ a stopgap. For live profile edits prefer JSON patches
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.36-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.36-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.36-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.37-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.37-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.37-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

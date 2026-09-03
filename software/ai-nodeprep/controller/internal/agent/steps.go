@@ -251,7 +251,13 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if _, err := a.hostExec(nil, 5*time.Minute, "update-grub"); err != nil {
 		return v1alpha1.StepFailed, fmt.Sprintf("update-grub: %v", err)
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("wrote 90-nodeprep.cfg (%s) and ran update-grub; reboot applies it", strings.Join(missing, " "))
+	// The new cmdline only applies at the next boot; nothing else in the
+	// walk is guaranteed to reboot (mlxconfig does when IT drifted, but a
+	// grub-only change must not wait on that), so request it here. The
+	// §5.2 hold pauses the walk until the boot_id changes.
+	a.requestRebootBg(v1alpha1.RebootGrubChanged,
+		fmt.Sprintf("grub cmdline updated (%s); reboot required to apply", strings.Join(missing, " ")))
+	return v1alpha1.StepDone, fmt.Sprintf("wrote 90-nodeprep.cfg (%s) and ran update-grub; reboot requested to apply", strings.Join(missing, " "))
 }
 
 // grubCPUVendor classifies the CPU from /proc/cpuinfo (bash lscpu greps

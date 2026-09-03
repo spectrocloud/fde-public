@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.36</span>
+    <span>nodeprep-v105.sh → controller v0.1.37</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.36</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.37</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -400,8 +400,19 @@
       <code>SRIOV_EN=True</code>, <code>NUM_OF_VFS=8</code>, flag False — a VF-honoring default that needs no
       flag. 0.1.36 removes the flag from the flash set (bash-faithful), reverts the live rail-card NV to
       flag=False, and factory-resets the bond0 card the gen-11 walk had polluted before the rail scoping. The
-      second cold cycle pending at publication decides: TotalVFs=4 confirms the pipeline end-to-end;
-      TotalVFs=1 means the LOM image itself caps VFs and is a different fight.</li>
+      second cold cycle pending at publication was overtaken by events: the operator removed the node for a
+      fresh reinstall (cold boots included) and dropped the profile to <code>eastWest.numVFs=1</code> for a
+      base-scenario test first.</li>
+  <li><b>0.1.37 — reconcile-path audit: the re-walk logic is correct; one reboot gap closed.</b> Asked to
+      verify whether a VF-count change reverts to the earlier steps: it does. A profile generation bump
+      re-opens <b>every</b> step and rewinds to Provisioning (agent §5.1 reset), so <code>grubParams</code>
+      re-derives its IOMMU want-list from the new <code>numVFs</code> and <code>mlxconfig</code> re-queries
+      every device and re-flashes on any NV drift (up <i>or</i> down) before requesting its apply reboot —
+      exactly the chain that ran live in the gen-11 walk. The audit found one real gap instead: the grub step
+      wrote its drop-in but never requested the reboot that applies it (the <code>GrubChanged</code> reboot
+      reason existed but had no call site) — a grub-only change would have sat unapplied until an unrelated
+      reboot. 0.1.37 raises it: a written drop-in now requests the reboot, and the §5.2 hold serializes it
+      with the mlxconfig apply reboot.</li>
   </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
@@ -847,7 +858,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.36 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.37 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
