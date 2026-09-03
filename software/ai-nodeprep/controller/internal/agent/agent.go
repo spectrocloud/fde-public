@@ -353,6 +353,18 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		}
 	}
 
+	// A requested reboot is in flight (design §5.2 config→reboot→precomplete):
+	// hold the walk. The host is about to go down — running further steps
+	// (kubelet restarts, driver markers) on a dying host is wasted work and
+	// the ledger reads wrong afterwards. The boot_id change clears the
+	// condition above and re-verification resumes the walk. Without
+	// -allow-reboot there is nothing to wait for: keep walking so the
+	// blocked steps stay visible.
+	if a.allowReboot && k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionRebootRequired) == "True" {
+		a.logf("reboot requested and pending; holding the walk until the boot_id changes")
+		return
+	}
+
 	// Run the current stage.
 	switch np.Status.Phase {
 	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
@@ -760,7 +772,11 @@ func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 		}
 		cmd := exec.Command(parts[0], parts[1:]...) // #nosec G204 -- operator-configured command
 		if out, err := cmd.CombinedOutput(); err != nil {
+			// The walk holds on RebootRequired=True; a failed reboot command
+			// would deadlock the prep invisibly, so surface it as an event.
 			a.logf("reboot command failed: %v: %s", err, out)
+			a.emit(context.Background(), corev1.EventTypeWarning, "RebootFailed",
+				fmt.Sprintf("reboot command %q failed: %v: %s", a.rebootCommand, err, strings.TrimSpace(string(out))))
 		}
 	}()
 }

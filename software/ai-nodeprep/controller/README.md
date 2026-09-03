@@ -67,10 +67,10 @@ Real, exercised end-to-end:
   `nodeprep.spectrocloud.com/resume` annotation).
 
 Detect-first steps (report Blocked honestly rather than half-configure):
-`downloads` is fully real (HTTP + sha256 + atomic rename); `grubParams`,
-`ibCoreNetns`, `sriovNumVFs`, `udevRules`, `ovsBridges`
+`downloads` is fully real (HTTP + sha256 + atomic rename); `ibCoreNetns`,
+`udevRules`, `ovsBridges`
 detect current host state and compare it to the profile; flashing/
-mlxconfig/lossless-RoCE/VF-GUID steps gate on Mellanox presence and MFT
+mlxconfig/lossless-RoCE steps gate on Mellanox presence and MFT
 tooling. With `-host-mutations` **off** (the default, mirrored by
 `policy.hostMutations`), everything stays detect-only: the agent writes
 status and events but does not touch the host. Mutating steps that run for
@@ -89,7 +89,22 @@ instead of passing it to apt. `lldpdConfig` writes
 `/etc/lldpd.d/rcp-lldpd.conf` and enables (and, when the config changed,
 restarts) `lldpd`; `rshimService` daemon-reloads, enables, restarts and
 verifies `rshim` (skipping nodes without the unit) so the BlueField flash
-path finds a live rshim. Also the
+path finds a live rshim; `grubParams` renders the bash-exact
+`/etc/default/grub.d/90-nodeprep.cfg` (managed keys sed-stripped then
+re-appended) and runs `update-grub` — with VFs requested it adds the
+vendor IOMMU (`intel_iommu=on`/`amd_iommu=on`, detected from
+`/proc/cpuinfo`) and `iommu=pt`, without which SR-IOV cannot work. The
+full VF pipeline is real too (bash `fn_set_vfs`): `sriovNumVFs` converges
+`sriov_numvfs` per function (teardown-to-0 before a count change; the
+firmware ceiling `sriov_totalvfs` gates the write — too low reports
+Blocked until the `mlxconfig` step's `NUM_OF_VFS` + apply-reboot lands),
+`vfGuids` synthesizes node/port GUIDs and MACs from the PF's `node_guid`
+(byte-for-byte the bash formulas, written colon-formatted to
+`/sys/class/infiniband/<ib>/device/sriov/<vf>/{node,port,mac,policy}`
+with `Follow` policy for IB links), unbinds/rebinds only the changed VFs
+through `mlx5_core`, and renders the `71-persistent-net-vf.rules` /
+`61-persistent-rdma-vf.rules` rename rules (`rdma_rename` +
+`cma_roce_tos -t 96`) for rail-mapped VFs. Also the
 `driverReadyMarker` write to `/run/mellanox/drivers`, and `kubeletState` —
 the guarded stop → rm manager-state → restart from `fn_ensure_state`, plus
 the boot hook: the agent renders `nodeprep-boot.service` + its script onto
@@ -163,9 +178,9 @@ a stopgap. For live profile edits prefer JSON patches
 ## Try it (kind)
 
 ```sh
-make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.30-{controller,agent}
-kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.30-controller \
-                        docker.io/kreeuwijk/ai-nodeprep:0.1.30-agent
+make image-controller image-agent          # docker.io/kreeuwijk/ai-nodeprep:0.1.34-{controller,agent}
+kind load docker-image docker.io/kreeuwijk/ai-nodeprep:0.1.34-controller \
+                        docker.io/kreeuwijk/ai-nodeprep:0.1.34-agent
 make manifests-install                     # manifests reference the image tags
 make sample                                # apply the example profile
 kubectl label node <node> node.spectrocloud.com/ai-worker=true

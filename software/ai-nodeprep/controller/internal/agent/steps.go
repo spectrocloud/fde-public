@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -202,6 +203,17 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	case "amd":
 		want = append(want, "amd_iommu=on")
 	}
+	// VFs requested: SRIOV needs the vendor IOMMU on and passthrough on the
+	// next boot (bash fn_init_sw_stage L379-402), regardless of hostBoot.
+	if profile.Spec.EastWest.NumVFs > 0 || profile.Spec.NorthSouth.NumVFs > 0 {
+		switch grubCPUVendor() {
+		case "intel":
+			want = appendUnique(want, "intel_iommu=on")
+		case "amd":
+			want = appendUnique(want, "amd_iommu=on")
+		}
+		want = appendUnique(want, "iommu=pt")
+	}
 	if hb.Hugepages.Pages1G > 0 {
 		want = append(want, "default_hugepagesz=1G", fmt.Sprintf("hugepagesz=1G"), fmt.Sprintf("hugepages=%d", hb.Hugepages.Pages1G))
 	} else if hb.Hugepages.Pages2M > 0 {
@@ -210,24 +222,123 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if len(want) == 0 {
 		return v1alpha1.StepDone, "skipped: no hostBoot parameters configured"
 	}
-	cmdline, err := os.ReadFile("/proc/cmdline")
-	if err != nil {
-		return v1alpha1.StepBlocked, fmt.Sprintf("cannot read /proc/cmdline: %v", err)
-	}
-	have := string(cmdline)
+	// A parameter counts as present when the running kernel booted with it
+	// or the host grub config already arranges it for the next boot — the
+	// bash script checks the config file, not /proc/cmdline, for iommu=pt.
 	var missing []string
 	for _, w := range want {
-		if !strings.Contains(have, w) {
+		if !grubParamPresent(a, w) {
 			missing = append(missing, w)
 		}
 	}
 	if len(missing) == 0 {
-		return v1alpha1.StepDone, "kernel cmdline has required parameters"
+		return v1alpha1.StepDone, fmt.Sprintf("kernel cmdline has required parameters (%s)", strings.Join(want, " "))
 	}
 	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, fmt.Sprintf("cmdline missing %v; grub writes need -host-mutations (v0.2)", missing)
+		return v1alpha1.StepBlocked, fmt.Sprintf("cmdline missing %v; grub writes need -host-mutations and policy.hostMutations", missing)
 	}
-	return v1alpha1.StepBlocked, "grub assembly lands in v0.2 (design fn_init_sw_stage)"
+	// The drop-in is idempotent by construction: every wanted key is sed-
+	// stripped from the inherited cmdline before being re-appended, so a
+	// re-run rewrites the same four lines (bash L418-432, verbatim shape).
+	dropin := renderGrubDropin(want)
+	path := filepath.Join(a.hostEtcDir(), "default/grub.d/90-nodeprep.cfg")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("create grub.d: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(dropin), 0o644); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("write 90-nodeprep.cfg: %v", err)
+	}
+	if _, err := a.hostExec(nil, 5*time.Minute, "update-grub"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("update-grub: %v", err)
+	}
+	return v1alpha1.StepDone, fmt.Sprintf("wrote 90-nodeprep.cfg (%s) and ran update-grub; reboot applies it", strings.Join(missing, " "))
+}
+
+// grubCPUVendor classifies the CPU from /proc/cpuinfo (bash lscpu greps
+// "Model name" for intel/amd; vendor_id is the stable equivalent).
+func grubCPUVendor() string {
+	b, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		v := strings.ToLower(line)
+		if strings.HasPrefix(v, "vendor_id") {
+			if strings.Contains(v, "genuineintel") || strings.Contains(v, "intel") {
+				return "intel"
+			}
+			if strings.Contains(v, "authenticamd") || strings.Contains(v, "amd") {
+				return "amd"
+			}
+		}
+	}
+	return ""
+}
+
+// appendUnique appends p unless it is already in the list (hostBoot and the
+// VF block can both ask for the same iommu parameter).
+func appendUnique(list []string, p string) []string {
+	for _, x := range list {
+		if x == p {
+			return list
+		}
+	}
+	return append(list, p)
+}
+
+// grubParamPresent reports whether the host already boots, or is already
+// arranged to boot, with param: /proc/cmdline for the running kernel,
+// /etc/default/grub (GRUB_CMDLINE_LINUX*) and any grub.d drop-in for the
+// next one. Word-boundary match so "noiommu=pt" doesn't satisfy "iommu=pt".
+func grubParamPresent(a *Agent, param string) bool {
+	if b, err := os.ReadFile("/proc/cmdline"); err == nil {
+		if grubLineHasParam(string(b), param) {
+			return true
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(a.hostEtcDir(), "default/grub"),
+		filepath.Join(a.hostEtcDir(), "default/grub.d/90-nodeprep.cfg"),
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "GRUB_CMDLINE_LINUX") && grubLineHasParam(line, param) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// grubLineHasParam matches the full "key=value" token between boundaries
+// (line start/end, whitespace or quote) — bash greps for the literal
+// "iommu=pt", so iommu=off or iommu=ptrue must not count as present.
+func grubLineHasParam(line, param string) bool {
+	return regexp.MustCompile(`(^|[\s"'])` + regexp.QuoteMeta(param) + `($|[\s"'])`).MatchString(line)
+}
+
+// renderGrubDropin assembles /etc/default/grub.d/90-nodeprep.cfg exactly as
+// bash L418-432: inherit the stock cmdline, sed-strip every managed key,
+// re-append the managed key=value pairs, xargs-trim.
+func renderGrubDropin(want []string) string {
+	clean := ""
+	for i, w := range want {
+		key := strings.SplitN(w, "=", 2)[0]
+		sep := ";"
+		if i == len(want)-1 {
+			sep = ""
+		}
+		clean += fmt.Sprintf("s/(^|[[:space:]])%s=[^[:space:]]*//g%s", key, sep)
+	}
+	pairs := strings.Join(want, " ")
+	return fmt.Sprintf(`GRUB_CMDLINE_LINUX=" $GRUB_CMDLINE_LINUX "
+GRUB_CMDLINE_LINUX="$(printf '%%s' "$GRUB_CMDLINE_LINUX" | sed -E '%s')"
+GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX %s"
+GRUB_CMDLINE_LINUX="$(echo "$GRUB_CMDLINE_LINUX" | xargs)"
+`, clean, pairs)
 }
 
 // stepIbCoreNetns mirrors 'options ib_core netns_mode=0' detection.
@@ -599,28 +710,102 @@ func stepNeedsMFT(tool, what string) func(*Agent, *v1alpha1.NodePrep, *v1alpha1.
 	}
 }
 
-// stepSriovNumVFs detects the requested VF count in sysfs; the target is the
-// profile value verbatim (0 = no VFs at the OS level — the ≥1 clamp is a
-// firmware-config concern, see fwVFCount). Enabling VFs (writes) lands in
-// v0.2 with the rest of the VF pipeline.
+// stepSriovNumVFs converges every Mellanox function's sriov_numvfs onto the
+// profile value (bash fn_set_vfs L611: all ConnectX-class functions take
+// NUMVF_EW, DPUs NUMVF_NS — no rail restriction; 0 = none at the OS level).
+// A count change tears down first (the kernel rejects N→M while VFs exist),
+// then writes the target, then waits for the count to settle. The firmware
+// ceiling (sriov_totalvfs, raised by the mlxconfig step's NUM_OF_VFS and its
+// apply reboot) gates the write: too low reports Blocked until that reboot
+// lands.
+// totalvfsAdvice explains a too-low sriov_totalvfs by consulting the
+// firmware NV config (the same mlxconfig query the mlxconfig step runs):
+// either the NUM_OF_VFS/PF_NUM_OF_VF_VALID change is not in NV yet — the
+// mlxconfig step's apply reboot will land it — or it IS in NV but the
+// running firmware never loaded it, which on this firmware class takes a
+// cold power cycle (found live on a Supermicro LOM, FW 14.32.1010: two warm
+// reboots with NUM_OF_VFS=4 in NV left TotalVFs=1 in the PCIe SR-IOV
+// capability). When mlxconfig is unavailable the advice falls back to the
+// generic pointer at the mlxconfig step.
+func (a *Agent) totalvfsAdvice(nic pciDevice, want int) string {
+	if _, err := findHostTool("mlxconfig"); err != nil {
+		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
+	}
+	vals, err := a.mlxconfigGetAll(nic.pci)
+	if err != nil {
+		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
+	}
+	nv, hasNV := vals["NUM_OF_VFS"]
+	pfValid := vals["PF_NUM_OF_VF_VALID"]
+	nvN, nvErr := strconv.Atoi(nv)
+	if hasNV && nvErr == nil && nvN >= want && (pfValid == "" || pfValid == "1" || pfValid == "True") {
+		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d with PF_NUM_OF_VF_VALID enabled, but the running firmware has not loaded it — warm reboots do not reload SR-IOV NV settings on this firmware class, so it needs a cold power cycle (AC) via the fleet/IPMI tooling", nvN)
+	}
+	if pfValid == "0" || pfValid == "False" {
+		return fmt.Sprintf("firmware NV has PF_NUM_OF_VF_VALID=%s, which makes the firmware IGNORE NUM_OF_VFS — the mlxconfig step sets the flag alongside NUM_OF_VFS and its apply reboot lands both", pfValid)
+	}
+	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", nv, want)
+}
+
 func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
 	}
+	changed := []string{}
 	for _, nic := range a.mellanoxFns {
 		want := vfCountFor(profile, nic)
-		got, err := readSysfsInt("/sys/bus/pci/devices/" + nic.pci + "/sriov_numvfs")
+		base := "/sys/bus/pci/devices/" + nic.pci
+		got, err := readSysfsInt(base + "/sriov_numvfs")
 		if err != nil {
 			return v1alpha1.StepBlocked, fmt.Sprintf("cannot read sriov_numvfs for %s: %v", nic.pci, err)
 		}
-		if got != want {
-			if !a.mutationsAllowed(profile) {
-				return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
-			}
-			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d; sriov_numvfs writes land in v0.2", nic.pci, got, want)
+		if got == want {
+			continue
 		}
+		if !a.mutationsAllowed(profile) {
+			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
+		}
+		if total, err := readSysfsInt(base + "/sriov_totalvfs"); err == nil && want > total {
+			return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the running firmware exposes %d (sriov_totalvfs): %s", nic.pci, want, total, a.totalvfsAdvice(nic, want))
+		}
+		if nic.netdev == "" {
+			return v1alpha1.StepFailed, fmt.Sprintf("%s has no netdev; cannot set sriov_numvfs", nic.pci)
+		}
+		// The bash creates VFs on an administratively up interface.
+		if out, err := a.hostExec(nil, 30*time.Second, "ip", "-br", "link", "show", "dev", nic.netdev); err == nil {
+			f := strings.Fields(out)
+			if len(f) > 1 && f[1] != "UP" && f[1] != "UNKNOWN" {
+				if _, err := a.hostExec(nil, 30*time.Second, "ip", "link", "set", nic.netdev, "up"); err != nil {
+					return v1alpha1.StepFailed, fmt.Sprintf("setting %s up: %v", nic.netdev, err)
+				}
+			}
+		}
+		if got > 0 {
+			// VF teardown before a resize; the fresh PF then takes the new count.
+			if err := a.writeSysfs(base+"/sriov_numvfs", "0\n"); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("tearing down VFs on %s: %v", nic.pci, err)
+			}
+		}
+		if err := a.writeSysfs(base+"/sriov_numvfs", strconv.Itoa(want)+"\n"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("writing sriov_numvfs=%d on %s: %v", want, nic.pci, err)
+		}
+		settled := false
+		for i := 0; i < 30; i++ {
+			if v, err := readSysfsInt(base + "/sriov_numvfs"); err == nil && v == want {
+				settled = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !settled {
+			return v1alpha1.StepFailed, fmt.Sprintf("sriov_numvfs on %s still not %d 15s after write", nic.pci, want)
+		}
+		changed = append(changed, fmt.Sprintf("%s %d→%d", nic.pci, got, want))
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
+	if len(changed) == 0 {
+		return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
+	}
+	return v1alpha1.StepDone, "set sriov_numvfs: " + strings.Join(changed, ", ")
 }
 
 // stepOvsBridges checks br-rail-rN bridges exist in the OVS database when

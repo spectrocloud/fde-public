@@ -120,8 +120,8 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.30</span>
-    <span>2026-09-02</span>
+    <span>nodeprep-v105.sh → controller v0.1.34</span>
+    <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
   <p class="dek">Every step the controller performed — on freshly reprovisioned workers, Mellanox-equipped
@@ -162,7 +162,9 @@
    <code>ai-worker</code> label and one node carried a disqualifying label, exercising the new selection modes;
    the profile then moved to <code>allNodes</code> to adopt the control planes, and flipped
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
-   runs, followed by an operator audit that closed three more every-node gaps (0.1.30). NodePrep versions <code>0.1.24 → 0.1.30</code>.</p>
+   runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
+   profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.34</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -366,6 +368,19 @@
       unit). Host-verified on <code>bl-r1-c2-05</code>: all three packages installed (headers held), conf
       exact, lldpd and rshim enabled + active. The gen-10 re-walk that surfaced the expansion gap also
       re-proved the profile-edit re-open path.</span></li>
+  <li><span class="t">VF pipeline</span><span class="e">numVFs 0 → 4, live (0.1.31–0.1.34)</span>
+      <span class="d">Profile generation 11 raised <code>eastWest.numVFs</code> to 4 and the gen-bump re-open
+      walked every step again. <code>grubParams</code> did its first real write: the bash-exact four-line
+      <code>/etc/default/grub.d/90-nodeprep.cfg</code> (managed keys sed-stripped then re-appended) with
+      <code>intel_iommu=on</code> (vendor detected from <code>/proc/cpuinfo</code>) and <code>iommu=pt</code>,
+      then <code>update-grub</code> — VFs need the IOMMU. <code>mlxconfig</code> detected the
+      <code>NUM_OF_VFS</code> 1→4 drift, reset+set all four CX-4 Lx functions and requested the apply reboot;
+      the walk held (§6, 0.1.31) until the boot came back. The firmware then revealed two quirks the bash never
+      meets (§6, 0.1.32/0.1.34): NV settings only load on a <b>cold</b> power cycle, and
+      <code>PF_NUM_OF_VF_VALID</code> gates whether <code>NUM_OF_VFS</code> counts at all.
+      <code>sriovNumVFs</code> parks Blocked with an NV-aware diagnosis naming the remedy, and the CPs finished
+      their own re-walks Ready with boot verified. The sysfs write/GUID-apply bodies themselves await that cold
+      cycle on <code>bl-r1-c2-05</code>.</span></li>
   <li><span class="t">Converged</span><span class="e">End state</span>
       <span class="d">All three CPs Ready with boot verified: nodeprep taint released (only the control-plane
       taint remains), legacy mirror <code>complete</code>, CAPI Machines unpaused at Ready, and the worker-role
@@ -442,8 +457,10 @@
         ran update + upgrade in a host transient unit (120 packages, kernel included) with honest idempotent
         re-runs — and the audit round closed <b>headers + gcc-12</b> (<code>$(uname -r)</code> expansion,
         <code>apt-mark hold</code>, host-verified), <b>LLDPD config</b> (<code>lldpdConfig</code>) and
-        <b>rshim</b> (<code>rshimService</code>). Remaining pieces listed in §5 (grub assembly, autoremove,
-        the post-stage reboot trigger).</td>
+        <b>rshim</b> (<code>rshimService</code>), and Run 4 closed <b>grub assembly</b>: with VFs requested,
+        <code>grubParams</code> rendered the bash-exact <code>90-nodeprep.cfg</code> (vendor IOMMU +
+        <code>iommu=pt</code>) and ran <code>update-grub</code> live (§2c). Remaining pieces listed in §5
+        (autoremove, the post-stage reboot trigger).</td>
   </tr>
   <tr>
     <td><code>fn_init_hw_stage</code> <small>L468</small></td>
@@ -459,8 +476,10 @@
     <td><code>mlxconfig</code> reset+set per adapter type; netplan <code>gpu_fabric_eth</code> file generation</td>
     <td><code>mlxconfig</code>, <code>netplanMTU</code></td>
     <td><span class="pill live">Covered</span> Run 2: per-device flash set (SRIOV_EN, LINK_TYPE_P1, query-gated
-        DSCP/RoCE-CC keys) built, compared, and verified on all 4 CX-4 Lx functions — no drift, no write needed;
-        drift would reset+set+verify and request the apply reboot. <b>netplan</b> files written byte-exact per
+        DSCP/RoCE-CC keys) built, compared, and verified on all 4 CX-4 Lx functions. Run 4 exercised the drift
+        path for real: <code>NUM_OF_VFS</code> 1→4 detected, reset+set on all four functions, apply reboot
+        requested — and the set gained <code>PF_NUM_OF_VF_VALID=1</code>, a deliberate bash-superset the live
+        firmware required (§6, 0.1.32). <b>netplan</b> files written byte-exact per
         rail (mtu 9000, <code>ignore-carrier</code> tied to eswitch mode) with detect-verify on re-run.</td>
   </tr>
   <tr>
@@ -480,9 +499,19 @@
     <td>Cordon, devlink eswitch → switchdev, write <code>sriov_numvfs</code>, synthesize VF GUIDs from the
         PF <code>node_guid</code></td>
     <td><code>sriovNumVFs</code>, <code>vfGuids</code> <small>(critical)</small></td>
-    <td><span class="pill live">Covered (0-VF path)</span> Run 2: profile <code>numVFs 0</code> — current
-        <code>sriov_numvfs</code> read per device, counts match, firmware <code>NUM_OF_VFS</code> clamp not
-        triggered; <code>vfGuids</code> "skipped: no VFs requested". Non-zero VF writes remain v0.2.</td>
+    <td><span class="pill live">Covered in part</span> Run 2 proved the 0-VF path (counts match, nothing
+        written). Run 4 implemented and walked the non-zero path at the live boundary: <code>sriovNumVFs</code>
+        converged <code>sriov_numvfs</code> per function with teardown-to-0 before a count change, settle-poll,
+        and the <code>sriov_totalvfs</code> ceiling gate; <code>vfGuids</code> plans per-VF identity from the PF
+        <code>node_guid</code> (byte-for-byte the bash formulas: node <code>f1</code>, port <code>f2</code>, MAC
+        <code>f2+vf+tail</code>), writes colon-formatted values to
+        <code>/sys/class/infiniband/&lt;ib&gt;/device/sriov/&lt;vf&gt;/{node,port,mac,policy}</code> (policy
+        <code>Follow</code> for IB, MAC for legacy Ethernet), unbinds/rebinds only changed VFs, and renders the
+        <code>71/61-persistent-*-vf.rules</code> rename rules (<code>rdma_rename</code>, ToS 96) — stale rules
+        removed first. Transient states (PF re-probing, sriov dirs not yet created) Block instead of burning
+        attempts (§6, 0.1.33). Live it parks at the ceiling gate: the firmware exposes <code>TotalVFs=1</code>
+        until a cold power cycle loads the NV config (§6, 0.1.34). The switchdev branch (devlink eswitch flip +
+        OVS) remains v0.2 (§5).</td>
   </tr>
   <tr>
     <td><code>fn_rename_devices</code> <small>L795</small></td>
@@ -599,9 +628,11 @@
   <li><b>BFB flash apply</b> — the BlueField-3 gate, rshim discovery and BFB config plumbing are in and
       gate-proven, but <code>bfb-install</code> itself needs a BlueField-3, which the lab cluster doesn't
       carry (v0.2).</li>
-  <li><b>Non-zero VF pipeline</b> — <code>sriov_numvfs</code> writes and VF GUID synthesis from the PF
-      <code>node_guid</code> are v0.2; the lab mandate was explicitly numVFs=0 (verified) with switchdev and
-      VF modes deferred.</li>
+  <li><b>VF pipeline end-to-end</b> — implemented and walked to the live boundary (0.1.34, §2c/§3). What
+      remains: the final <code>sriov_numvfs</code>/GUID writes need the fleet tooling to cold power cycle
+      <code>bl-r1-c2-05</code> (warm reboots do not reload SR-IOV NV settings on this firmware — §6, 0.1.34);
+      the switchdev branch (devlink eswitch flip, OVS bridges, representor rename rules) and the InfiniBand
+      link-type path (port GUID + policy) need the corresponding hardware/mode.</li>
   <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
       runs <code>eswitch legacy</code> (the step's gate verified).</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
@@ -614,8 +645,6 @@
 
 <h3>On every node</h3>
 <ul class="tight">
-  <li><b>grub assembly (90-nodeprep.cfg)</b> — <code>grubParams</code> detects missing cmdline parameters and
-      Blocks by design; writing them is the v0.2 boot path. The profile configures none today, so the step skips.</li>
   <li><b>apt autoremove</b> — not implemented (<b>apt upgrade</b> landed in 0.1.24; the <b>headers hold</b>
       and <b>gcc-12</b> installs in 0.1.30; both covered in §2c/§3). <b>LLDPD configuration</b> landed in
       0.1.30 as <code>lldpdConfig</code> (§2c).</li>
@@ -747,6 +776,42 @@
      passing it to apt, and <code>apt-mark hold</code>s freshly installed <code>linux-headers-*</code> (bash
      L325). Host-verified: <code>hold ok installed</code> for the running kernel's headers.</p>
 </div>
+<div class="callout warn">
+  <p><b>The walk didn't wait for its own reboot</b> (0.1.31). <code>mlxconfig</code> applied the
+     <code>NUM_OF_VFS</code> drift and requested the apply reboot; the 60-second reboot grace then ran out while
+     <code>runStage</code> kept stepping — the phase advanced to Finalizing and <code>kubeletState</code>
+     restarted kubelet on a host that was seconds from going down. Fix: the cycle holds the walk while
+     <code>RebootRequired=True</code> (whenever <code>-allow-reboot</code> is set) — the boot_id change clears
+     the condition and re-verification resumes the walk, which is the bash config→reboot→precomplete sequence
+     made explicit. A failed reboot command now also emits <code>RebootFailed</code>, so a parked NodePrep is
+     never silent.</p>
+</div>
+<div class="callout warn">
+  <p><b>The firmware ignored <code>NUM_OF_VFS</code> until <code>PF_NUM_OF_VF_VALID</code></b> (0.1.32). After
+     the apply reboot the firmware NV carried <code>NUM_OF_VFS=4</code> — and the PCIe SR-IOV capability still
+     reported <code>TotalVFs: 1</code>. The device (Supermicro LOM, FW 14.32.1010, PSID
+     <code>SM_1211000001000</code>) ships <code>PF_NUM_OF_VF_VALID=False</code>, which makes the firmware
+     disregard <code>NUM_OF_VFS</code> entirely. The bash script never sets the flag — on its production
+     firmware the default evidently differs. Fix: the flash set now carries
+     <code>PF_NUM_OF_VF_VALID=1</code> next to <code>SRIOV_EN</code> (query-gated, so firmware that doesn't
+     expose the key skips it), and <code>sriovNumVFs</code>' ceiling message names the flag when it reads
+     <code>False</code>.</p>
+</div>
+<div class="callout warn">
+  <p><b>Warm reboots do not reload SR-IOV NV settings</b> (0.1.34). With <code>NUM_OF_VFS=4</code> <i>and</i>
+     <code>PF_NUM_OF_VF_VALID=True</code> in NV, two full warm reboots left <code>TotalVFs: 1</code> on all four
+     functions — mlxconfig's "please power cycle machine" is literal for this firmware class: the PCIe SR-IOV
+     capability is programmed at device power-on, so only a cold (AC) cycle loads it. The bash script never hits
+     this because it runs inside provisioning, where the fleet tooling cold-cycles the machine right after
+     firmware configuration. Two smaller findings from the same window: <code>vfGuids</code> burned its five
+     attempts on "no IB device" while the PF was re-probing across those reboots — transient states now Block
+     instead of Failed (0.1.33) — and the resume annotation only re-opens Failed steps, so the mid-upgrade
+     residue (mlxconfig already Done before the flag fix) needed a one-time manual NV set on the remaining three
+     functions, the exact command sequence the agent runs. <code>sriovNumVFs</code> now consults the firmware NV
+     in its Blocked message: it distinguishes "NV not yet written (the mlxconfig apply reboot will land it)"
+     from "NV written but not loaded (cold power cycle needed)" — and the live ledger currently says exactly
+     that, with the node parked honestly until the cold cycle.</p>
+</div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
      tests (all runs) so its 10-minute Ready-timeout could not deprovision the Machine mid-test, and was
@@ -762,7 +827,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.30 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.34 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

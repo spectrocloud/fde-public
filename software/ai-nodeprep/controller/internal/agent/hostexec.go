@@ -166,6 +166,23 @@ func tailString(b []byte, max int) string {
 	return s
 }
 
+// writeSysfs writes a sysfs attribute through the host's tee (nsenter
+// argv exec, payload on stdin — no shell, no quoting). /sys itself is
+// mounted read-only into the pod (the detect-only posture), but a
+// mutation-enabled run still needs to write VF counts, VF GUIDs/MACs and
+// the PCI bind/unbind files, and none of those live under /host.
+func (a *Agent) writeSysfs(path, content string) error {
+	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--", "tee", path)
+	cmd.Stdin = strings.NewReader(content)
+	out, err := a.runLogged(cctx, 30*time.Second, "tee "+path, cmd, false)
+	if err != nil {
+		return fmt.Errorf("%s: %v (%s)", path, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
 // pkgInstalled asks the host dpkg database whether pkg is installed. Any
 // query error (including "no packages found") reads as not installed — the
 // install attempt then surfaces the real problem loudly.

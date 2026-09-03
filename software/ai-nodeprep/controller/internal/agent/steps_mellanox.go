@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -236,6 +238,14 @@ func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, k
 func buildFlashSet(a *Agent, d pciDevice, vals map[string]string, p mlxconfigParams) []mlxconfigKV {
 	var flash []mlxconfigKV
 	flash = addKV(a, d, flash, vals, "SRIOV_EN", "1")
+	// The bash script never sets this key: on firmware where it defaults to
+	// False (found live on a Supermicro LOM, FW 14.32.1010), the firmware
+	// IGNORES NUM_OF_VFS and programs the PCIe SR-IOV capability with
+	// TotalVFs=1 no matter what NUM_OF_VFS says — so sriov_numvfs can never
+	// exceed 1. Setting the flag next to SRIOV_EN makes NUM_OF_VFS take
+	// effect at the apply reboot. Devices whose firmware does not expose
+	// the key (older/default-on firmware) skip it and behave as before.
+	flash = addKV(a, d, flash, vals, "PF_NUM_OF_VF_VALID", "1")
 	isSuper := d.devType == "SuperNIC"
 	isCx79 := matchesConnectX79(d.devType)
 	if p.lt == 2 {
@@ -827,11 +837,353 @@ func stepBFBFlash(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	return v1alpha1.StepBlocked, fmt.Sprintf("BFB flash apply to %s lands in v0.2", strings.Join(bf3, ", "))
 }
 
-// stepVfGuids synthesises VF GUIDs when the profile requests VFs; with zero
-// VFs the whole VF pipeline is a no-op.
+// vfIdentity synthesizes a VF's node GUID, port GUID and MAC from the PF's
+// colon-stripped node GUID — byte-for-byte the bash fn_set_vfs L675-686
+// formula (node: guid[0:7] + "f1" + vf, port: "f2", MAC: "f2" + vf +
+// guid[8:]), each re-colonised by the caller's writer or the sysfs reader.
+func vfIdentity(guid string, vf int) (node, port, mac string, err error) {
+	if len(guid) != 16 {
+		return "", "", "", fmt.Errorf("node GUID %q is not 16 hex digits", guid)
+	}
+	if _, err := hex.DecodeString(guid); err != nil {
+		return "", "", "", fmt.Errorf("node GUID %q is not hex: %v", guid, err)
+	}
+	vh := fmt.Sprintf("%02x", vf)
+	node = guid[:7] + "f1" + vh + guid[11:]
+	port = guid[:7] + "f2" + vh + guid[11:]
+	mac = "f2" + vh + guid[8:]
+	return node, port, mac, nil
+}
+
+// vfClassGUID reports whether a device class gets VF GUID configuration
+// (bash gates the GUID block on SuperNIC/ConnectX; DPUs take numvfs only).
+func vfClassGUID(d pciDevice) bool {
+	return d.devType == "SuperNIC" || d.isConnectX()
+}
+
+// stepVfGuids converges the per-VF identity onto the synthesized values
+// (bash fn_set_vfs L655-774): node GUID on every requested VF, port GUID +
+// policy Follow for IB links, MAC for Ethernet on legacy eswitch, PCI
+// unbind/rebind to activate a change, and — for rail-mapped Ethernet VFs —
+// the 71/61 udev rename rules. Detect-first: an all-match host reports Done
+// without touching anything.
 func stepVfGuids(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if profile.Spec.EastWest.NumVFs+profile.Spec.NorthSouth.NumVFs == 0 {
 		return v1alpha1.StepDone, "skipped: no VFs requested"
 	}
-	return stepNeedsMFT("mlxconfig/sysfs", "VF GUID synthesis (design §8.3)")(a, np, profile)
+	if !a.hasMellanox() {
+		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
+	}
+	plan, mismatches, blocked, failed := vfGuidPlan(a, profile)
+	if len(failed) > 0 {
+		return v1alpha1.StepFailed, fmt.Sprintf("cannot configure VF GUIDs: %s", strings.Join(failed, "; "))
+	}
+	if len(blocked) > 0 {
+		// Transient: VFs not created yet (sriovNumVFs runs first in the
+		// stage, but a Blocked sibling must not burn this step's attempts).
+		return v1alpha1.StepBlocked, strings.Join(blocked, "; ")
+	}
+	if len(mismatches) == 0 {
+		return v1alpha1.StepDone, fmt.Sprintf("VF GUIDs verified on %d VF(s) (%s)", plan.vfTotal, plan.summary)
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, fmt.Sprintf("VF identity needs writes on %d VF(s) (%s); requires -host-mutations and policy.hostMutations",
+			len(mismatches), strings.Join(mismatches, "; "))
+	}
+	msg, err := a.applyVfGuids(profile, plan)
+	if err != nil {
+		return v1alpha1.StepFailed, err.Error()
+	}
+	return v1alpha1.StepDone, msg
+}
+
+// vfGuidPlan computes the desired per-VF identity for every GUID-class
+// function and diffs it against the host. mismatches name the deviating
+// attributes ("49:00.0 vf0 node"); blocked names transient states — a PF
+// still re-probing (no IB device yet, unreadable node GUID) and VFs whose
+// sriov sysfs dir does not exist yet (sriovNumVFs has not landed them) —
+// that must not burn the step's attempts. Drift is repaired per attribute —
+// an all-match VF is left untouched, never bounced.
+func vfGuidPlan(a *Agent, profile *v1alpha1.NodePrepProfile) (plan vfGuidWork, mismatches, blocked, failed []string) {
+	plan.profile = profile
+	for _, nic := range a.mellanoxFns {
+		n := vfCountFor(profile, nic)
+		if n == 0 || !vfClassGUID(nic) {
+			continue
+		}
+		ibdev := nic.ibdev
+		if ibdev == "" {
+			ibdev = ibdevFor(nic.pci)
+		}
+		if ibdev == "" {
+			// Transient in practice: the PF's infiniband device vanishes
+			// while the driver re-probes (function reset, VF churn — found
+			// live when the apply reboot raced this step). Blocked, not
+			// Failed, so a re-probing PF does not burn the 5 attempts.
+			blocked = append(blocked, fmt.Sprintf("%s (%s): no IB device yet", nic.pci, nic.netdev))
+			continue
+		}
+		lt := linkTypeNum(profile.Spec.EastWest.LinkType)
+		// North-South (DPU) side has no eswitch knob in the API — bash
+		// treats the DPU host side as legacy.
+		esw := profile.Spec.EastWest.EswitchMode
+		if nic.rail == "dpu" {
+			lt = linkTypeNum(profile.Spec.NorthSouth.LinkType)
+			esw = "legacy"
+		}
+		raw := ""
+		if b, err := os.ReadFile("/sys/class/infiniband/" + ibdev + "/node_guid"); err == nil {
+			raw = strings.ToLower(strings.NewReplacer(":", "", "\n", "", " ", "").Replace(string(b)))
+		}
+		if len(raw) != 16 {
+			blocked = append(blocked, fmt.Sprintf("%s: unreadable node GUID on %s", nic.pci, ibdev))
+			continue
+		}
+		dev := vfDevWork{nic: nic, ibdev: ibdev, ib: lt == 1, switchdev: esw == "switchdev", nodeGuid: raw}
+		for vf := 0; vf < n; vf++ {
+			node, port, mac, err := vfIdentity(raw, vf)
+			if err != nil {
+				failed = append(failed, fmt.Sprintf("%s vf%d: %v", nic.pci, vf, err))
+				continue
+			}
+			sriovDir := fmt.Sprintf("/sys/class/infiniband/%s/device/sriov/%d", ibdev, vf)
+			if _, err := os.Stat(sriovDir); err != nil {
+				blocked = append(blocked, fmt.Sprintf("%s vf%d: %s absent (sriovNumVFs creates it)", nic.pci, vf, sriovDir))
+				continue
+			}
+			w := vfWork{vf: vf, node: node, port: port, mac: mac, sriovDir: sriovDir}
+			for _, attr := range []struct {
+				name, want, path string
+			}{
+				{"node", node, sriovDir + "/node"},
+			} {
+				if got := normGUIDFile(attr.path); got != attr.want {
+					w.need = append(w.need, vfAttr{attr.name, attr.want, attr.path})
+					mismatches = append(mismatches, fmt.Sprintf("%s vf%d %s", nic.fn, vf, attr.name))
+				}
+			}
+			if dev.ib {
+				if got := normGUIDFile(sriovDir + "/port"); got != port {
+					w.need = append(w.need, vfAttr{"port", port, sriovDir + "/port"})
+					mismatches = append(mismatches, fmt.Sprintf("%s vf%d port", nic.fn, vf))
+				}
+				if b, err := os.ReadFile(sriovDir + "/policy"); err != nil || strings.TrimSpace(string(b)) != "Follow" {
+					w.need = append(w.need, vfAttr{"policy", "Follow", sriovDir + "/policy"})
+					mismatches = append(mismatches, fmt.Sprintf("%s vf%d policy", nic.fn, vf))
+				}
+			} else if !dev.switchdev {
+				if got := normGUIDFile(sriovDir + "/mac"); got != mac {
+					w.need = append(w.need, vfAttr{"mac", mac, sriovDir + "/mac"})
+					mismatches = append(mismatches, fmt.Sprintf("%s vf%d mac", nic.fn, vf))
+				}
+			}
+			dev.vfs = append(dev.vfs, w)
+		}
+		plan.devs = append(plan.devs, dev)
+		plan.vfTotal += n
+	}
+	return plan, mismatches, blocked, failed
+}
+
+// normGUIDFile reads a sysfs GUID/MAC attribute and colon-strips it for
+// comparison; unreadable counts as a mismatch so the apply path repairs it.
+func normGUIDFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.NewReplacer(":", "", "\n", "", " ", "").Replace(string(b)))
+}
+
+// vfAttr is one sysfs attribute of one VF to write.
+type vfAttr struct {
+	attr, val, path string
+}
+
+// vfWork is the plan for one VF.
+type vfWork struct {
+	vf              int
+	node, port, mac string
+	sriovDir        string
+	need            []vfAttr
+}
+
+// vfDevWork is the plan for one PF.
+type vfDevWork struct {
+	nic       pciDevice
+	ibdev     string
+	ib        bool
+	switchdev bool
+	nodeGuid  string
+	vfs       []vfWork
+}
+
+// vfGuidWork is the plan for the node.
+type vfGuidWork struct {
+	profile *v1alpha1.NodePrepProfile
+	devs    []vfDevWork
+	vfTotal int
+	summary string
+}
+
+// applyVfGuids executes a vfGuidPlan: write the deviating attributes,
+// unbind/rebind only the VFs that changed (bash bounces every VF; a
+// detect-first rerun must not bounce converged ones), verify the readback,
+// and render the VF udev rules for rail-mapped Ethernet ports.
+func (a *Agent) applyVfGuids(profile *v1alpha1.NodePrepProfile, plan vfGuidWork) (string, error) {
+	var summaries []string
+	netRules, rdmaRules := "", ""
+	for _, dev := range plan.devs {
+		touched := 0
+		for _, w := range dev.vfs {
+			if len(w.need) == 0 {
+				continue
+			}
+			for _, attr := range w.need {
+				// node/port/mac go to the kernel colon-formatted (bash's
+				// sed 's/../&:/g' — the mlx5 sysfs stores parse GUID/MAC
+				// with %x:%x:...); policy is a plain word.
+				val := attr.val
+				if attr.attr != "policy" {
+					val = colonFormat(val)
+				}
+				if err := a.writeSysfs(attr.path, val+"\n"); err != nil {
+					return "", fmt.Errorf("%s vf%d %s: %v", dev.nic.pci, w.vf, attr.attr, err)
+				}
+			}
+			// GUID/MAC changes take effect only after a driver rebind.
+			vfPci, err := readSysfsString(fmt.Sprintf("/sys/class/infiniband/%s/device/virtfn%d/uevent", dev.ibdev, w.vf))
+			if err != nil {
+				return "", fmt.Errorf("%s vf%d: reading virtfn uevent: %v", dev.nic.pci, w.vf, err)
+			}
+			slot := ""
+			for _, kv := range strings.Fields(vfPci) {
+				if strings.HasPrefix(kv, "PCI_SLOT_NAME=") {
+					slot = strings.TrimPrefix(kv, "PCI_SLOT_NAME=")
+				}
+			}
+			if slot == "" {
+				return "", fmt.Errorf("%s vf%d: no PCI_SLOT_NAME in virtfn uevent", dev.nic.pci, w.vf)
+			}
+			if err := a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/unbind", slot+"\n"); err != nil {
+				return "", fmt.Errorf("%s vf%d: unbind %s: %v", dev.nic.pci, w.vf, slot, err)
+			}
+			if err := a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/bind", slot+"\n"); err != nil {
+				return "", fmt.Errorf("%s vf%d: bind %s: %v", dev.nic.pci, w.vf, slot, err)
+			}
+			// Verify after the rebind settled.
+			deadline := time.Now().Add(15 * time.Second)
+			for {
+				ok := normGUIDFile(w.sriovDir+"/node") == w.node
+				if ok && dev.ib {
+					ok = normGUIDFile(w.sriovDir+"/port") == w.port
+				}
+				if ok || time.Now().After(deadline) {
+					if !ok {
+						return "", fmt.Errorf("%s vf%d: GUID readback mismatch after rebind", dev.nic.pci, w.vf)
+					}
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			touched++
+		}
+		// Rail-mapped Ethernet VFs get rename rules (bash writes these for
+		// ETH + ^r[0-9]+ rails regardless of eswitch mode). In switchdev the
+		// bash adds a representor rename rule from the devlink port table;
+		// attempted best-effort, failure just skips the rule.
+		if !dev.ib && regexp.MustCompile(`^r[0-9]+`).MatchString(dev.nic.rail) {
+			for _, w := range dev.vfs {
+				vfPci, err := readSysfsString(fmt.Sprintf("/sys/class/infiniband/%s/device/virtfn%d/uevent", dev.ibdev, w.vf))
+				if err != nil {
+					return "", fmt.Errorf("%s vf%d: virtfn uevent: %v", dev.nic.pci, w.vf, err)
+				}
+				slot := ""
+				for _, kv := range strings.Fields(vfPci) {
+					if strings.HasPrefix(kv, "PCI_SLOT_NAME=") {
+						slot = strings.TrimPrefix(kv, "PCI_SLOT_NAME=")
+					}
+				}
+				name := fmt.Sprintf("nic_vf%d_%s", w.vf, dev.nic.rail)
+				rdmaName := fmt.Sprintf("roce_vf%d_%s", w.vf, dev.nic.rail)
+				netRules += fmt.Sprintf("ACTION==\"add\", KERNELS==\"%s\", SUBSYSTEM==\"net\", NAME=\"%s\"\n", slot, name)
+				rdmaRules += fmt.Sprintf("ACTION==\"add\", KERNELS==\"%s\", SUBSYSTEM==\"infiniband\", PROGRAM=\"rdma_rename %%k NAME_FIXED %s\"\n", slot, rdmaName)
+				rdmaRules += fmt.Sprintf("ACTION==\"add\", KERNELS==\"%s\", SUBSYSTEM==\"infiniband\", RUN+=\"/bin/sh -c 'cma_roce_tos -d %s -t 96 > /dev/null && echo 96 > /sys/class/infiniband/%s/tc/1/traffic_class'\"\n", slot, rdmaName, rdmaName)
+				if dev.switchdev {
+					repName, repSwitchID, err := a.vfRepresentor(dev.nic.pci)
+					if err != nil {
+						a.logf("vfGuids: %s vf%d: no representor for rename rule: %v", dev.nic.pci, w.vf, err)
+					} else {
+						netRules += fmt.Sprintf("ACTION==\"add\", ATTR{phys_switch_id}==\"%s\", ATTR{phys_port_name}==\"%s\" SUBSYSTEM==\"net\", NAME=\"nic_vf%d_rep_%s\"\n",
+							repSwitchID, repName, w.vf, dev.nic.rail)
+					}
+				}
+			}
+		}
+		if touched > 0 {
+			summaries = append(summaries, fmt.Sprintf("%s %d VF(s)", dev.nic.pci, touched))
+		}
+	}
+	// Stale VF rules from a previous profile go first (bash L618-619), so a
+	// config that no longer maps a rail does not leave rename rules behind.
+	for _, f := range []string{"71-persistent-net-vf.rules", "61-persistent-rdma-vf.rules"} {
+		if err := os.Remove(filepath.Join(a.hostEtcUdev, f)); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("remove %s: %v", f, err)
+		}
+	}
+	if netRules != "" || rdmaRules != "" {
+		if err := os.WriteFile(filepath.Join(a.hostEtcUdev, "71-persistent-net-vf.rules"), []byte(netRules), 0o644); err != nil {
+			return "", fmt.Errorf("write 71-persistent-net-vf.rules: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(a.hostEtcUdev, "61-persistent-rdma-vf.rules"), []byte(rdmaRules), 0o644); err != nil {
+			return "", fmt.Errorf("write 61-persistent-rdma-vf.rules: %v", err)
+		}
+	}
+	plan.summary = strings.Join(summaries, ", ")
+	return fmt.Sprintf("VF GUIDs/MACs applied: %s", strings.Join(summaries, ", ")), nil
+}
+
+// colonFormat inserts a colon after every two hex chars (aa:bb:...) — the
+// format bash writes and the kernel's %x:%x:... sysfs parsers expect.
+func colonFormat(hexStr string) string {
+	var b strings.Builder
+	for i := 0; i < len(hexStr); i += 2 {
+		if i > 0 {
+			b.WriteByte(':')
+		}
+		b.WriteString(hexStr[i : i+2])
+	}
+	return b.String()
+}
+
+// vfRepresentor looks up the switchdev representor netdev of a VF from the
+// host's devlink port table (bash: devlink port show | grep pci/<pf> |
+// grep pcivf) and reads its phys_port_name / phys_switch_id.
+func (a *Agent) vfRepresentor(pfPCI string) (physPortName, switchID string, err error) {
+	out, err := a.hostExec(nil, 30*time.Second, "devlink", "port", "show")
+	if err != nil {
+		return "", "", err
+	}
+	rep := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "pci/"+pfPCI) && strings.Contains(line, "pcivf") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 {
+				rep = strings.TrimSuffix(fields[4], ":")
+				break
+			}
+		}
+	}
+	if rep == "" {
+		return "", "", fmt.Errorf("no pcivf representor for %s in devlink port show", pfPCI)
+	}
+	name, err := readSysfsString("/sys/class/net/" + rep + "/phys_port_name")
+	if err != nil {
+		return "", "", err
+	}
+	id, err := readSysfsString("/sys/class/net/" + rep + "/phys_switch_id")
+	if err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(id), nil
 }
