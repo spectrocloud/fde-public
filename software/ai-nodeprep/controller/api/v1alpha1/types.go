@@ -186,7 +186,7 @@ type DOCASource struct {
 
 type EastWestSpec struct {
 	LinkType    string `json:"linkType,omitempty"`    // InfiniBand | Ethernet (bash: LINKTYPE_EW 1|2)
-	NumVFs      int    `json:"numVFs,omitempty"`      // bash: NUMVF_EW
+	NumVFs      int    `json:"numVFs,omitempty"`      // per rail-mapped function (spec.rails); bash: NUMVF_EW
 	MTU         int    `json:"mtu,omitempty"`         // bash: MTU_EW, default 9216
 	EswitchMode string `json:"eswitchMode,omitempty"` // switchdev | legacy (bash: ESWITCH_MODE)
 	RoceCC      bool   `json:"roceCC,omitempty"`      // bash: ROCECC
@@ -194,7 +194,7 @@ type EastWestSpec struct {
 
 type NorthSouthSpec struct {
 	LinkType      string `json:"linkType,omitempty"`      // bash: LINKTYPE_NS
-	NumVFs        int    `json:"numVFs,omitempty"`        // bash: NUMVF_NS
+	NumVFs        int    `json:"numVFs,omitempty"`        // per DPU function; bash: NUMVF_NS
 	OffloadEngine string `json:"offloadEngine,omitempty"` // bash: DPUOFFLOAD
 }
 

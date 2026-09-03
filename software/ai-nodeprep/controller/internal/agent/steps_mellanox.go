@@ -178,6 +178,15 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			a.logf("mlxconfig: control of DPUs is not allowed by policy, skipping %s", d.pci)
 			continue
 		}
+		// East-west firmware config (link type, VF count) only belongs on the
+		// rail-mapped functions (spec.rails). The bash applied NUMVF_EW to
+		// every ConnectX-class function, which would also reconfigure e.g.
+		// the host's bond0 uplink card — not nodeprep's to touch (Kevin's
+		// correction, 2026-09-03).
+		if !d.isDPU() && d.rail == "" {
+			a.logf("mlxconfig: %s is not rail-mapped in spec.rails; east-west firmware config skipped", d.pci)
+			continue
+		}
 		// one full query per device gates the set build AND the drift check
 		vals, err := a.mlxconfigGetAll(d.pci)
 		if err != nil {

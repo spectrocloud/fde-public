@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
 func TestVfIdentity(t *testing.T) {
@@ -99,6 +101,26 @@ func TestColonFormat(t *testing.T) {
 	for in, want := range cases {
 		if got := colonFormat(in); got != want {
 			t.Errorf("colonFormat(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestVfCountFor(t *testing.T) {
+	prof := &v1alpha1.NodePrepProfile{}
+	prof.Spec.EastWest.NumVFs = 4
+	prof.Spec.NorthSouth.NumVFs = 2
+	cases := []struct {
+		rail string
+		want int
+	}{
+		{"r0_p0", 4}, // rail-mapped: east-west
+		{"r1_p0", 4}, // any rail-mapped function
+		{"dpu", 2},   // DPU: north-south
+		{"", 0},      // not rail-mapped: NO east-west VFs (bond0 uplink etc.)
+	}
+	for _, c := range cases {
+		if got := vfCountFor(prof, pciDevice{rail: c.rail}); got != c.want {
+			t.Errorf("rail %q: got %d, want %d", c.rail, got, c.want)
 		}
 	}
 }

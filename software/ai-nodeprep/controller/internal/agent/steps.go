@@ -1028,9 +1028,17 @@ func readSysfsInt(path string) (int, error) {
 
 // vfCountFor is the OS-level sriov_numvfs target: east-west count for rail
 // NICs, north-south for DPUs, the profile value verbatim (0 = none).
+// vfCountFor maps a function to its VF target. East-west VFs land ONLY on
+// the rail-mapped functions (spec.rails; the bash applied NUMVF_EW to every
+// ConnectX-class function, which would touch e.g. the bond0 uplink card —
+// Kevin's correction, 2026-09-03); unmapped functions and DPUs without
+// north-south VFs get none. DPUs take the north-south count.
 func vfCountFor(profile *v1alpha1.NodePrepProfile, nic pciDevice) int {
 	if nic.rail == "dpu" {
 		return profile.Spec.NorthSouth.NumVFs
+	}
+	if nic.rail == "" {
+		return 0
 	}
 	return profile.Spec.EastWest.NumVFs
 }
