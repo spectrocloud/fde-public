@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.35</span>
+    <span>nodeprep-v105.sh → controller v0.1.36</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.35</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.36</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -376,17 +376,33 @@
       then <code>update-grub</code> — VFs need the IOMMU. <code>mlxconfig</code> detected the
       <code>NUM_OF_VFS</code> 1→4 drift, reset+set all four CX-4 Lx functions and requested the apply reboot;
       the walk held (§6, 0.1.31) until the boot came back. The firmware then revealed two quirks the bash never
-      meets (§6, 0.1.32/0.1.34): NV settings only load on a <b>cold</b> power cycle, and
-      <code>PF_NUM_OF_VF_VALID</code> gates whether <code>NUM_OF_VFS</code> counts at all.
-      <code>sriovNumVFs</code> parks Blocked with an NV-aware diagnosis naming the remedy, and the CPs finished
-      their own re-walks Ready with boot verified. The sysfs write/GUID-apply bodies themselves await that cold
-      cycle on <code>bl-r1-c2-05</code>.</span></li>
+      meets (§6, 0.1.32/0.1.34): NV settings only load on a <b>cold</b> power cycle, and 0.1.32's
+      <code>PF_NUM_OF_VF_VALID=1</code> addition was a misdiagnosis — set True, the firmware (Supermicro LOM,
+      FW 14.32.1010) drops the SR-IOV PCIe capability <b>entirely</b> at power-on, while a sibling card's
+      factory NV (flag False, <code>NUM_OF_VFS=8</code>, SR-IOV on) proves VFs are honored without it. 0.1.36
+      removed the flag from the flash set (bash-faithful again) and restored the live NV (flag reverted on the
+      rail card, factory reset on the bond0 card the gen-11 walk had polluted). <code>sriovNumVFs</code> now
+      treats a missing capability as converged when the profile wants 0 VFs and parks Blocked with an NV-aware
+      diagnosis naming the remedy otherwise, and the CPs finished their own re-walks Ready with boot verified.
+      The sysfs write/GUID-apply bodies themselves await the second cold cycle on <code>bl-r1-c2-05</code>.</span></li>
   <li><span class="t">Converged</span><span class="e">End state</span>
       <span class="d">All three CPs Ready with boot verified: nodeprep taint released (only the control-plane
       taint remains), legacy mirror <code>complete</code>, CAPI Machines unpaused at Ready, and the worker-role
       label never landed on a CP. <code>bl-r1-c2-05</code> Ready; <code>bl-r1-c2-06</code> untouched, as the
       exclusion demands.</span></li>
-</ul>
+<li><b>0.1.36 — cold cycle verdict, and a misdiagnosis corrected.</b> The
+      awaited cold power cycle changed the failure instead of fixing it: with
+      <code>PF_NUM_OF_VF_VALID=True</code> in NV the firmware programs <b>no SR-IOV PCIe capability at
+      all</b> (lspci capability list without SR-IOV, no <code>sriov_totalvfs</code> in sysfs), on both CX-4 Lx
+      cards. The 0.1.32 flag theory ("factory False makes firmware ignore NUM_OF_VFS") had been inferred from
+      warm reboots — which never load SR-IOV NV on this firmware class — so it had never been cleanly tested.
+      The disproof came from <code>mlxconfig reset</code> on the sibling bond0 card: its <b>factory</b> NV is
+      <code>SRIOV_EN=True</code>, <code>NUM_OF_VFS=8</code>, flag False — a VF-honoring default that needs no
+      flag. 0.1.36 removes the flag from the flash set (bash-faithful), reverts the live rail-card NV to
+      flag=False, and factory-resets the bond0 card the gen-11 walk had polluted before the rail scoping. The
+      second cold cycle pending at publication decides: TotalVFs=4 confirms the pipeline end-to-end;
+      TotalVFs=1 means the LOM image itself caps VFs and is a different fight.</li>
+  </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
 <p class="sub">One row per bash function (line numbers into <code>nodeprep-v105.sh</code>). "Covered" means the
@@ -831,7 +847,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.35 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.36 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

@@ -711,22 +711,41 @@ func stepNeedsMFT(tool, what string) func(*Agent, *v1alpha1.NodePrep, *v1alpha1.
 }
 
 // stepSriovNumVFs converges every Mellanox function's sriov_numvfs onto the
-// profile value (bash fn_set_vfs L611: all ConnectX-class functions take
-// NUMVF_EW, DPUs NUMVF_NS — no rail restriction; 0 = none at the OS level).
-// A count change tears down first (the kernel rejects N→M while VFs exist),
-// then writes the target, then waits for the count to settle. The firmware
-// ceiling (sriov_totalvfs, raised by the mlxconfig step's NUM_OF_VFS and its
-// apply reboot) gates the write: too low reports Blocked until that reboot
-// lands.
-// totalvfsAdvice explains a too-low sriov_totalvfs by consulting the
-// firmware NV config (the same mlxconfig query the mlxconfig step runs):
-// either the NUM_OF_VFS/PF_NUM_OF_VF_VALID change is not in NV yet — the
-// mlxconfig step's apply reboot will land it — or it IS in NV but the
-// running firmware never loaded it, which on this firmware class takes a
-// cold power cycle (found live on a Supermicro LOM, FW 14.32.1010: two warm
+// profile value (east-west count on the rail-mapped functions, north-south
+// on DPUs, 0 elsewhere — 0 = none at the OS level). A count change tears
+// down first (the kernel rejects N→M while VFs exist), then writes the
+// target, then waits for the count to settle. The firmware ceiling
+// (sriov_totalvfs, raised by the mlxconfig step's NUM_OF_VFS and its apply
+// reboot) gates the write: too low reports Blocked until that reboot lands.
+// A function with no SR-IOV PCIe capability at all (no sriov_numvfs in
+// sysfs — firmware did not expose VFs at power-on, found live on a
+// Supermicro LOM, FW 14.32.1010) converges when the profile wants 0 and is
+// Blocked with nvSriovAdvice otherwise.
+// nvSriovAdvice explains a missing or too-low SR-IOV exposure by consulting
+// the firmware NV config (the same mlxconfig query the mlxconfig step runs):
+// either the NUM_OF_VFS change is not in NV yet — the mlxconfig step's
+// apply reboot will land it — or it IS in NV but the running firmware never
+// loaded it, which on this firmware class takes a cold power cycle (AC:
+// warm reboots do not reload SR-IOV NV settings; found live, two warm
 // reboots with NUM_OF_VFS=4 in NV left TotalVFs=1 in the PCIe SR-IOV
 // capability). When mlxconfig is unavailable the advice falls back to the
 // generic pointer at the mlxconfig step.
+func (a *Agent) nvSriovAdvice(nic pciDevice, want int) string {
+	if _, err := findHostTool("mlxconfig"); err != nil {
+		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
+	}
+	vals, err := a.mlxconfigGetAll(nic.pci)
+	if err != nil {
+		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
+	}
+	nv, hasNV := vals["NUM_OF_VFS"]
+	nvN, nvErr := strconv.Atoi(nv)
+	if hasNV && nvErr == nil && nvN >= want {
+		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d (PF_NUM_OF_VF_VALID stays False — the bash never sets it), but the running firmware has not loaded it — warm reboots do not reload SR-IOV NV settings on this firmware class, so it needs a cold power cycle (AC) via the fleet/IPMI tooling", nvN)
+	}
+	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", nv, want)
+}
+
 func (a *Agent) totalvfsAdvice(nic pciDevice, want int) string {
 	if _, err := findHostTool("mlxconfig"); err != nil {
 		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
@@ -736,13 +755,9 @@ func (a *Agent) totalvfsAdvice(nic pciDevice, want int) string {
 		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
 	}
 	nv, hasNV := vals["NUM_OF_VFS"]
-	pfValid := vals["PF_NUM_OF_VF_VALID"]
 	nvN, nvErr := strconv.Atoi(nv)
-	if hasNV && nvErr == nil && nvN >= want && (pfValid == "" || pfValid == "1" || pfValid == "True") {
-		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d with PF_NUM_OF_VF_VALID enabled, but the running firmware has not loaded it — warm reboots do not reload SR-IOV NV settings on this firmware class, so it needs a cold power cycle (AC) via the fleet/IPMI tooling", nvN)
-	}
-	if pfValid == "0" || pfValid == "False" {
-		return fmt.Sprintf("firmware NV has PF_NUM_OF_VF_VALID=%s, which makes the firmware IGNORE NUM_OF_VFS — the mlxconfig step sets the flag alongside NUM_OF_VFS and its apply reboot lands both", pfValid)
+	if hasNV && nvErr == nil && nvN >= want {
+		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d, but the running firmware has not loaded it — warm reboots do not reload SR-IOV NV settings on this firmware class, so it needs a cold power cycle (AC) via the fleet/IPMI tooling", nvN)
 	}
 	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", nv, want)
 }
@@ -757,7 +772,13 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		base := "/sys/bus/pci/devices/" + nic.pci
 		got, err := readSysfsInt(base + "/sriov_numvfs")
 		if err != nil {
-			return v1alpha1.StepBlocked, fmt.Sprintf("cannot read sriov_numvfs for %s: %v", nic.pci, err)
+			// No SR-IOV PCIe capability (firmware exposed no VFs at
+			// power-on). Wanting 0 is already converged; wanting more is
+			// Blocked until a cold cycle loads the NV config.
+			if want == 0 {
+				continue
+			}
+			return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the firmware exposes no SR-IOV PCIe capability (no sriov_numvfs in sysfs): %s", nic.pci, want, a.nvSriovAdvice(nic, want))
 		}
 		if got == want {
 			continue

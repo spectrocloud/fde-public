@@ -247,14 +247,14 @@ func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, k
 func buildFlashSet(a *Agent, d pciDevice, vals map[string]string, p mlxconfigParams) []mlxconfigKV {
 	var flash []mlxconfigKV
 	flash = addKV(a, d, flash, vals, "SRIOV_EN", "1")
-	// The bash script never sets this key: on firmware where it defaults to
-	// False (found live on a Supermicro LOM, FW 14.32.1010), the firmware
-	// IGNORES NUM_OF_VFS and programs the PCIe SR-IOV capability with
-	// TotalVFs=1 no matter what NUM_OF_VFS says — so sriov_numvfs can never
-	// exceed 1. Setting the flag next to SRIOV_EN makes NUM_OF_VFS take
-	// effect at the apply reboot. Devices whose firmware does not expose
-	// the key (older/default-on firmware) skip it and behave as before.
-	flash = addKV(a, d, flash, vals, "PF_NUM_OF_VF_VALID", "1")
+	// PF_NUM_OF_VF_VALID is deliberately NOT set (bash-faithful). Setting it
+	// True was tried live on a Supermicro LOM (FW 14.32.1010) under the
+	// theory that factory False made the firmware ignore NUM_OF_VFS — that
+	// theory came from warm reboots, which never load SR-IOV NV on this
+	// class at all. The truth: with the flag True the firmware drops the
+	// SR-IOV PCIe capability entirely at power-on (no sriov_totalvfs in
+	// sysfs), while a sibling card's factory NV (flag False, NUM_OF_VFS=8,
+	// SRIOV_EN True) shows VFs are honored without the flag. Leave it False.
 	isSuper := d.devType == "SuperNIC"
 	isCx79 := matchesConnectX79(d.devType)
 	if p.lt == 2 {
