@@ -32,6 +32,11 @@ type pciDevice struct {
 	ibdev   string // mlx5_0 from sysfs infiniband/
 	fwVer   string
 	psid    string
+	// isVF marks an SR-IOV virtual function (physfn in sysfs). VFs inherit
+	// their config from the PF: they take no sriov_numvfs, no mlxconfig
+	// (query exits 3), and no VF recursion — found live when boot-verify's
+	// mlxconfig pass failed on freshly created VFs.
+	isVF bool
 }
 
 // railPort returns the bash port suffix ${pci/*\./}: the function number of
@@ -117,6 +122,9 @@ func scanInventory(profile *v1alpha1.NodePrepProfile) (nics []v1alpha1.NicStatus
 				class:     class,
 				linkWidth: widthOf(base),
 				linkSpeed: speedOf(base),
+			}
+			if _, err := os.Stat(base + "/physfn"); err == nil {
+				d.isVF = true // SR-IOV VF of the PF the physfn link points at
 			}
 			d.netdev = firstNetdev(base)
 			mellanox = append(mellanox, d)

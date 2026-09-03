@@ -174,6 +174,12 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	var configured, matched []string
 	var failures []string
 	for _, d := range a.mellanoxFns {
+		if d.isVF {
+			// VFs have no device NV of their own (mlxconfig query exits 3)
+			// — their SR-IOV/GUID config is driven through the PF.
+			a.logf("mlxconfig: %s is a virtual function; config is inherited from the PF, skipping", d.pci)
+			continue
+		}
 		if d.isDPU() && !profile.Spec.Policy.ControlDPU {
 			a.logf("mlxconfig: control of DPUs is not allowed by policy, skipping %s", d.pci)
 			continue
@@ -837,6 +843,43 @@ func stepBFBFlash(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	if fw.BFB.Name == "" {
 		return v1alpha1.StepBlocked, fmt.Sprintf("BlueField-3 present (%s) but no firmware.bfb configured", strings.Join(bf3, ", "))
 	}
+	// Firmware-version gate (profile firmware.version, e.g. "32.49.1014" —
+	// the version inside the configured BFB): a BlueField-3 already running
+	// the target version needs no flash and no reboot; a mismatch is the
+	// upgrade trigger. The comparison needs the flint-reported running
+	// version, which the MFT enrichment fills — an empty fwVer means
+	// classification has not landed yet (MFT still installing), not a match.
+	if fw.Version != "" {
+		var unknown, mismatch, match []string
+		for _, d := range a.mellanoxFns {
+			if !d.isBluefield3() {
+				continue
+			}
+			switch {
+			case d.fwVer == "":
+				unknown = append(unknown, d.pci)
+			case d.fwVer != fw.Version:
+				mismatch = append(mismatch, fmt.Sprintf("%s running %s, target %s", d.pci, d.fwVer, fw.Version))
+			default:
+				match = append(match, d.pci)
+			}
+		}
+		if len(unknown) > 0 {
+			return v1alpha1.StepBlocked, fmt.Sprintf("firmware version not yet readable on %s (MFT classification pending); re-checks on a later refresh", strings.Join(unknown, ", "))
+		}
+		if len(mismatch) > 0 {
+			// The upgrade path: BFB flash apply, then a reboot (or device
+			// reset — the reboot is the route taken here) to load the new
+			// image. The flash body itself lands in v0.2; until then the
+			// step stays Blocked naming the delta. A config apply (the
+			// Configuring mlxconfig step) always runs after the upgrade
+			// because the new image resets NV to its defaults.
+			return v1alpha1.StepBlocked, fmt.Sprintf("firmware upgrade required: %s (BFB flash apply lands in v0.2; a reboot loads the new image)", strings.Join(mismatch, "; "))
+		}
+		if len(match) > 0 {
+			return v1alpha1.StepDone, fmt.Sprintf("firmware version %s matches profile target on %s; no flash, no reboot", fw.Version, strings.Join(match, ", "))
+		}
+	}
 	if _, err := findHostTool("bfb-install"); err != nil {
 		return v1alpha1.StepBlocked, fmt.Sprintf("bfb-install not found on host: %v", err)
 	}
@@ -875,7 +918,8 @@ func vfClassGUID(d pciDevice) bool {
 // policy Follow for IB links, MAC for Ethernet on legacy eswitch, PCI
 // unbind/rebind to activate a change, and — for rail-mapped Ethernet VFs —
 // the 71/61 udev rename rules. Detect-first: an all-match host reports Done
-// without touching anything.
+// without touching anything. Writes go through an unbind → write → bind
+// window (applyVfGuids for why).
 func stepVfGuids(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if profile.Spec.EastWest.NumVFs+profile.Spec.NorthSouth.NumVFs == 0 {
 		return v1alpha1.StepDone, "skipped: no VFs requested"
@@ -981,7 +1025,14 @@ func vfGuidPlan(a *Agent, profile *v1alpha1.NodePrepProfile) (plan vfGuidWork, m
 					mismatches = append(mismatches, fmt.Sprintf("%s vf%d policy", nic.fn, vf))
 				}
 			} else if !dev.switchdev {
-				if got := normGUIDFile(sriovDir + "/mac"); got != mac {
+				// The sriov mac attr is write-only (reads return a usage
+				// string), so drift is detected on the VF netdev's address.
+				slot, err := vfSlotName(ibdev, vf)
+				if err != nil {
+					blocked = append(blocked, fmt.Sprintf("%s vf%d: %v", nic.pci, vf, err))
+					continue
+				}
+				if got := vfNetdevMac(slot); got != mac {
 					w.need = append(w.need, vfAttr{"mac", mac, sriovDir + "/mac"})
 					mismatches = append(mismatches, fmt.Sprintf("%s vf%d mac", nic.fn, vf))
 				}
@@ -1002,6 +1053,31 @@ func normGUIDFile(path string) string {
 		return ""
 	}
 	return strings.ToLower(strings.NewReplacer(":", "", "\n", "", " ", "").Replace(string(b)))
+}
+
+// vfSlotName extracts a VF's PCI slot from the PF's virtfn uevent.
+func vfSlotName(ibdev string, vf int) (string, error) {
+	vfPci, err := readSysfsString(fmt.Sprintf("/sys/class/infiniband/%s/device/virtfn%d/uevent", ibdev, vf))
+	if err != nil {
+		return "", err
+	}
+	for _, kv := range strings.Fields(vfPci) {
+		if strings.HasPrefix(kv, "PCI_SLOT_NAME=") {
+			return strings.TrimPrefix(kv, "PCI_SLOT_NAME="), nil
+		}
+	}
+	return "", fmt.Errorf("no PCI_SLOT_NAME in virtfn uevent")
+}
+
+// vfNetdevMac reads a VF's MAC from its netdev (the sriov mac sysfs attr is
+// write-only, so reads go through /sys/.../net/*/address); "" when the VF
+// has no netdev yet (driver still probing).
+func vfNetdevMac(slot string) string {
+	matches, err := filepath.Glob("/sys/bus/pci/devices/" + slot + "/net/*/address")
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	return normGUIDFile(matches[0])
 }
 
 // vfAttr is one sysfs attribute of one VF to write.
@@ -1035,10 +1111,20 @@ type vfGuidWork struct {
 	summary string
 }
 
-// applyVfGuids executes a vfGuidPlan: write the deviating attributes,
-// unbind/rebind only the VFs that changed (bash bounces every VF; a
-// detect-first rerun must not bounce converged ones), verify the readback,
-// and render the VF udev rules for rail-mapped Ethernet ports.
+// applyVfGuids executes a vfGuidPlan: bounce only the VFs whose identity
+// drifted (bash bounces every VF; a detect-first rerun must not bounce
+// converged ones), verify the readback, and render the VF udev rules for
+// rail-mapped Ethernet ports.
+//
+// A bounced VF is written through an unbind → write → bind window, not
+// write-then-bounce: at bind the driver re-derives the node GUID (EUI-64
+// from the VF MAC) whenever the vf entry carries no staged value, so a
+// write while bound is wiped by the rebind, and a mac-only write in the
+// unbound window resets node to the default (both live-verified on CX-4 Lx
+// FW 14.32.1010). Writing mac also resets a previously staged node — so
+// within the window node is written LAST (mac/port/policy first); every
+// bounced VF gets its FULL identity set rewritten (node always, port/policy
+// for IB, mac for ETH legacy) so bind stages all of them.
 func (a *Agent) applyVfGuids(profile *v1alpha1.NodePrepProfile, plan vfGuidWork) (string, error) {
 	var summaries []string
 	netRules, rdmaRules := "", ""
@@ -1048,7 +1134,24 @@ func (a *Agent) applyVfGuids(profile *v1alpha1.NodePrepProfile, plan vfGuidWork)
 			if len(w.need) == 0 {
 				continue
 			}
-			for _, attr := range w.need {
+			// Node last: the mac write resets a staged node GUID.
+			var writes []vfAttr
+			if dev.ib {
+				writes = append(writes,
+					vfAttr{"port", w.port, w.sriovDir + "/port"},
+					vfAttr{"policy", "Follow", w.sriovDir + "/policy"})
+			} else if !dev.switchdev {
+				writes = append(writes, vfAttr{"mac", w.mac, w.sriovDir + "/mac"})
+			}
+			writes = append(writes, vfAttr{"node", w.node, w.sriovDir + "/node"})
+			slot, err := vfSlotName(dev.ibdev, w.vf)
+			if err != nil {
+				return "", fmt.Errorf("%s vf%d: %v", dev.nic.pci, w.vf, err)
+			}
+			if err := a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/unbind", slot+"\n"); err != nil {
+				return "", fmt.Errorf("%s vf%d: unbind %s: %v", dev.nic.pci, w.vf, slot, err)
+			}
+			for _, attr := range writes {
 				// node/port/mac go to the kernel colon-formatted (bash's
 				// sed 's/../&:/g' — the mlx5 sysfs stores parse GUID/MAC
 				// with %x:%x:...); policy is a plain word.
@@ -1057,39 +1160,37 @@ func (a *Agent) applyVfGuids(profile *v1alpha1.NodePrepProfile, plan vfGuidWork)
 					val = colonFormat(val)
 				}
 				if err := a.writeSysfs(attr.path, val+"\n"); err != nil {
+					// Leave the driver bound again before bailing out.
+					_ = a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/bind", slot+"\n")
 					return "", fmt.Errorf("%s vf%d %s: %v", dev.nic.pci, w.vf, attr.attr, err)
 				}
-			}
-			// GUID/MAC changes take effect only after a driver rebind.
-			vfPci, err := readSysfsString(fmt.Sprintf("/sys/class/infiniband/%s/device/virtfn%d/uevent", dev.ibdev, w.vf))
-			if err != nil {
-				return "", fmt.Errorf("%s vf%d: reading virtfn uevent: %v", dev.nic.pci, w.vf, err)
-			}
-			slot := ""
-			for _, kv := range strings.Fields(vfPci) {
-				if strings.HasPrefix(kv, "PCI_SLOT_NAME=") {
-					slot = strings.TrimPrefix(kv, "PCI_SLOT_NAME=")
+				if attr.attr == "mac" {
+					// The FW regenerates the node GUID from a newly written
+					// MAC asynchronously — a node write issued immediately
+					// after is clobbered (live-verified on CX-4 Lx FW
+					// 14.32.1010: mac → node without a gap leaves node at
+					// EUI-64(mac); a ≥2s gap lets it land).
+					time.Sleep(2 * time.Second)
 				}
-			}
-			if slot == "" {
-				return "", fmt.Errorf("%s vf%d: no PCI_SLOT_NAME in virtfn uevent", dev.nic.pci, w.vf)
-			}
-			if err := a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/unbind", slot+"\n"); err != nil {
-				return "", fmt.Errorf("%s vf%d: unbind %s: %v", dev.nic.pci, w.vf, slot, err)
 			}
 			if err := a.writeSysfs("/sys/bus/pci/drivers/mlx5_core/bind", slot+"\n"); err != nil {
 				return "", fmt.Errorf("%s vf%d: bind %s: %v", dev.nic.pci, w.vf, slot, err)
 			}
-			// Verify after the rebind settled.
+			// Verify after the rebind settled: node/port through the sysfs
+			// attrs, mac through the VF netdev (the sysfs mac is write-only).
 			deadline := time.Now().Add(15 * time.Second)
 			for {
 				ok := normGUIDFile(w.sriovDir+"/node") == w.node
 				if ok && dev.ib {
 					ok = normGUIDFile(w.sriovDir+"/port") == w.port
 				}
+				if ok && !dev.ib && !dev.switchdev {
+					ok = vfNetdevMac(slot) == w.mac
+				}
 				if ok || time.Now().After(deadline) {
 					if !ok {
-						return "", fmt.Errorf("%s vf%d: GUID readback mismatch after rebind", dev.nic.pci, w.vf)
+						return "", fmt.Errorf("%s vf%d: identity readback mismatch after rebind (node %s, want %s)",
+							dev.nic.pci, w.vf, normGUIDFile(w.sriovDir+"/node"), w.node)
 					}
 					break
 				}
@@ -1103,15 +1204,9 @@ func (a *Agent) applyVfGuids(profile *v1alpha1.NodePrepProfile, plan vfGuidWork)
 		// attempted best-effort, failure just skips the rule.
 		if !dev.ib && regexp.MustCompile(`^r[0-9]+`).MatchString(dev.nic.rail) {
 			for _, w := range dev.vfs {
-				vfPci, err := readSysfsString(fmt.Sprintf("/sys/class/infiniband/%s/device/virtfn%d/uevent", dev.ibdev, w.vf))
+				slot, err := vfSlotName(dev.ibdev, w.vf)
 				if err != nil {
-					return "", fmt.Errorf("%s vf%d: virtfn uevent: %v", dev.nic.pci, w.vf, err)
-				}
-				slot := ""
-				for _, kv := range strings.Fields(vfPci) {
-					if strings.HasPrefix(kv, "PCI_SLOT_NAME=") {
-						slot = strings.TrimPrefix(kv, "PCI_SLOT_NAME=")
-					}
+					return "", fmt.Errorf("%s vf%d: %v", dev.nic.pci, w.vf, err)
 				}
 				name := fmt.Sprintf("nic_vf%d_%s", w.vf, dev.nic.rail)
 				rdmaName := fmt.Sprintf("roce_vf%d_%s", w.vf, dev.nic.rail)

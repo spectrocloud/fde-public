@@ -311,6 +311,26 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 				"new boot detected; runtime-critical steps must re-verify before the taint is released", 0)
 			k8sutil.SetCondition(&conds, v1alpha1.ConditionRebootRequired, "False", v1alpha1.ReasonVerified,
 				"reboot completed (boot_id changed)", 0)
+			// Runtime-transient steps re-verify at every boot (bash
+			// complete-stage semantics: the OS-level state is (re)established
+			// after the last reboot, not before it). A nodeprep-requested
+			// reboot after these steps ran — e.g. a Configuring mlxconfig
+			// reboot riding into the Finalizing stage — wipes the OS-level
+			// state: sriov_numvfs resets to 0 on the driver re-probe, the
+			// per-VF sriov/ sysfs dirs vanish with it, and setpci's ACS
+			// clears are lost. Done steps never re-run, so without this the
+			// walk parks forever (found live on bl-r1-c2-02: vfGuids blocked
+			// on absent sriov/0 while sriovNumVFs read Done "0→1" against a
+			// host showing numvfs=0). All three are cheap, detect-first and
+			// idempotent: converged hosts re-verify in one pass.
+			for i := range steps {
+				switch steps[i].Name {
+				case "sriovNumVFs", "vfGuids", "disableACS":
+					if steps[i].State == v1alpha1.StepDone {
+						steps[i] = v1alpha1.StepStatus{Name: steps[i].Name, Stage: steps[i].Stage, State: v1alpha1.StepPending}
+					}
+				}
+			}
 		}
 		if err := a.patchStatus(ctx, map[string]interface{}{
 			"bootId": bootID,

@@ -86,6 +86,14 @@ spec:
                       type: string
                     aptUpgrade:
                       type: boolean
+                    version:
+                      description: >
+                        Target Mellanox firmware version (the version inside the
+                        configured BFB, e.g. "32.49.1014"). BlueField-3 only: the
+                        agent compares it against the running firmware and skips
+                        the flash/reboot when they match. ConnectX-class adapters
+                        take firmware from the DOCA install and are never compared.
+                      type: string
                     bfb:
                       type: object
                       properties:

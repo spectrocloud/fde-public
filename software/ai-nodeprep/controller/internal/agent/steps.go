@@ -1082,6 +1082,9 @@ func readSysfsInt(path string) (int, error) {
 // Kevin's correction, 2026-09-03); unmapped functions and DPUs without
 // north-south VFs get none. DPUs take the north-south count.
 func vfCountFor(profile *v1alpha1.NodePrepProfile, nic pciDevice) int {
+	if nic.isVF {
+		return 0 // VFs do not get VFs; the PF's sriov_numvfs covers them
+	}
 	if nic.rail == "dpu" {
 		return profile.Spec.NorthSouth.NumVFs
 	}
@@ -1092,9 +1095,15 @@ func vfCountFor(profile *v1alpha1.NodePrepProfile, nic pciDevice) int {
 }
 
 // railFns returns the Mellanox devices assigned to rails by the profile.
+// Virtual functions are excluded: they share the PF's rail family but are
+// never netplan/udev/lossless targets in their own right (their naming and
+// GUIDs are driven through the PF by vfGuids).
 func railFns(profile *v1alpha1.NodePrepProfile, a *Agent) []pciDevice {
 	var out []pciDevice
 	for _, nic := range a.mellanoxFns {
+		if nic.isVF {
+			continue
+		}
 		if strings.HasPrefix(nic.rail, "r") {
 			out = append(out, nic)
 		}

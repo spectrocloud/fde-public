@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.39</span>
+    <span>nodeprep-v105.sh → controller v0.1.42</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.39</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.42</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -441,6 +441,52 @@
       long-planned <code>DocaInstalled</code> reboot reason (v105 L353) — coalesced by the checkpoint — and
       runs <code>dpkg --configure -a</code> before installing, healing the interrupted state the old bug
       created (live-verified on the resumed walk).</li>
+  <li><b>0.1.40 — reboot gate taxonomy (operator-directed) and boot-transient re-verify.</b> The checkpoint
+      reboot worked end-to-end on <code>bl-r1-c2-02</code> (reboot #1 carried doca+grub+ib_core; reboot #2
+      carried the mlxconfig apply), but exposed the follow-on defect: the mlxconfig reboot rode into
+      Finalizing and wiped OS-level state <i>after</i> those steps had gone Done — <code>sriovNumVFs</code>
+      read Done "0→1" against a host showing <code>numvfs=0</code> (the driver re-probe resets the count),
+      the per-VF <code>sriov/</code> sysfs dirs had vanished with it, and <code>vfGuids</code> parked Blocked
+      forever because Done steps never re-run. 0.1.40 re-opens the runtime-transient steps
+      (<code>sriovNumVFs</code>, <code>vfGuids</code>, <code>disableACS</code> — setpci's ACS clears are
+      equally boot-transient) at every boot change, matching the bash's complete-stage semantics where the
+      OS-level state is established after the last reboot. The reboot-gate taxonomy also landed: profile
+      <code>firmware.version</code> (new field — the target version inside the configured BFB,
+      e.g. <code>32.49.1014</code>) gates BlueField-3 flashing — running version equal → Done, no flash, no
+      reboot; mismatch → Blocked naming the delta until the v0.2 flash apply (which then reboots), and the
+      gate needs MFT's flint classification to have landed before it judges. ConnectX-class adapters are
+      never version-compared (their firmware comes from the DOCA install). Ordering is structural: the BFB
+      flash step (Flashing) precedes the mlxconfig config step (Configuring), so a config apply always
+      happens after a pending firmware upgrade — the new image resets NV to its defaults. <b>CRD note:</b>
+      <code>firmware.version</code> must also land in the external manifest system (see the CRD-trap note in
+      §2) or the field is pruned on write.</li>
+  <li><b>0.1.41 — VF GUID/MAC write semantics (live-established, three experiments on CX-4 Lx FW
+      14.32.1010).</b> The first full VF-identity apply on the fresh node failed with "GUID readback
+      mismatch after rebind": the write-while-bound order (bash fn_set_vfs L655-800) is wiped by the
+      rebind — at bind the firmware re-derives the node GUID (EUI-64 from the VF MAC) whenever the vf
+      entry carries no staged value. The bash never noticed: it only <i>logs</i> the readback, never
+      verifies, so on this firmware class its own end state is defaulted GUIDs. The Go verify is
+      deliberately stricter, so 0.1.41 adopts the ordering the experiments proved: <b>unbind → write →
+      bind</b>, with every bounced VF getting its FULL identity set (node always; port/policy for IB; mac
+      for ETH legacy) staged inside the unbound window. Two subtleties the experiments surfaced:
+      writing <code>mac</code> resets a previously staged node GUID (the firmware regenerates it from the
+      new MAC <i>asynchronously</i> — node written immediately after is clobbered, so node is written
+      <b>last</b> with a ≥2s gap after the mac write), and the <code>mac</code> sysfs attr is
+      <b>write-only</b> (reads return a usage string), so drift detection and verification now go through
+      the VF netdev's address. Verified end-to-end through the agent on a deliberately seeded node-GUID
+      drift; one late firmware re-derive (~90s after a bounce) was observed once and self-healed at the
+      next boot-verify pass — boot-verify is the safety net for this firmware's flakiness.</li>
+  <li><b>0.1.42 — virtual functions are first-class in the device model.</b> With VFs existing on the
+      host, boot-verify's mlxconfig pass failed forever on them (<code>mlxconfig q</code> on a VF exits 3
+      — VFs have no device NV of their own), and worse: <code>vfCountFor</code> returned
+      <code>eastWest.numVFs</code> for a VF's rail label, so a re-walk would have written
+      <code>sriov_numvfs</code> <i>on a VF</i>. 0.1.42 adds an <code>isVF</code> flag to the inventory
+      device model (kernel-canonical <code>physfn</code> test) and gates every consumer: mlxconfig skips
+      VFs (config is inherited from the PF), <code>vfCountFor</code> returns 0 (VFs do not get VFs), and
+      <code>railFns</code> excludes them (netplan/udev/lossless targets are PF-only — VF naming and GUIDs
+      are driven through the PF by <code>vfGuids</code>). Ops note from the same investigation: a
+      same-tag redeploy with <code>imagePullPolicy: IfNotPresent</code> is a no-op — the node keeps the
+      first build it pulled under that tag; one version per build is now hard discipline.</li>
   </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
@@ -687,11 +733,13 @@
   <li><b>BFB flash apply</b> — the BlueField-3 gate, rshim discovery and BFB config plumbing are in and
       gate-proven, but <code>bfb-install</code> itself needs a BlueField-3, which the lab cluster doesn't
       carry (v0.2).</li>
-  <li><b>VF pipeline end-to-end</b> — implemented and walked to the live boundary (0.1.34, §2c/§3). What
-      remains: the final <code>sriov_numvfs</code>/GUID writes need the fleet tooling to cold power cycle
-      <code>bl-r1-c2-05</code> (warm reboots do not reload SR-IOV NV settings on this firmware — §6, 0.1.34);
-      the switchdev branch (devlink eswitch flip, OVS bridges, representor rename rules) and the InfiniBand
-      link-type path (port GUID + policy) need the corresponding hardware/mode.</li>
+  <li><b>VF pipeline end-to-end</b> — <b>closed for the base scenario</b> (2026-09-04, 0.1.41/0.1.42): after
+      the fresh reinstall and the 0.1.36 NV revert, <code>numVFs=1</code> walked end-to-end on
+      <code>bl-r1-c2-02</code> — NV config, <code>sriov_numvfs</code>, VF GUID/MAC synthesis and apply (the
+      unbound-window semantics, §2), udev rename rules — to Ready with BootVerified and the taint released.
+      Still open: higher VF counts on this hardware (only 1 VF exercised), the switchdev branch (devlink
+      eswitch flip, OVS bridges, representor rename rules), and the InfiniBand link-type path (port GUID +
+      policy) — each needs the corresponding hardware/mode.</li>
   <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
       runs <code>eswitch legacy</code> (the step's gate verified).</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
@@ -886,7 +934,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.39 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.42 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
