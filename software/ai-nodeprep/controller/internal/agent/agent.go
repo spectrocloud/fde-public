@@ -63,6 +63,15 @@ type Agent struct {
 	// rebootIssued guards the one-shot reboot execution per boot.
 	rebootIssued bool
 
+	// pendingReboot accumulates reboot requests raised by step bodies
+	// during a stage pass; checkpointReboot fires them once the walk goes
+	// quiet (bash needs_reboot semantics, design §5.2).
+	pendingReboot []rebootRequest
+
+	// stageProgressed reports whether the last runStage pass changed any
+	// step's state or attempts — the quiescence signal for the checkpoint.
+	stageProgressed bool
+
 	// cpRole caches the node's control-plane role label for ~1min; the §6.4
 	// admission gate fails closed on it (nodeIsControlPlane).
 	cpRole      bool
@@ -264,6 +273,7 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			}
 			steps[i] = v1alpha1.StepStatus{Name: steps[i].Name, Stage: steps[i].Stage, State: v1alpha1.StepPending}
 		}
+		a.pendingReboot = nil // the re-walk raises fresh requests as it converges
 		if err := a.patchStatus(ctx, map[string]interface{}{
 			"steps":                     steps,
 			"observedProfileGeneration": profile.Generation,
@@ -375,10 +385,12 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	switch np.Status.Phase {
 	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
 		a.runStage(ctx, np, profile)
+		a.checkpointReboot(ctx)
 	case v1alpha1.PhaseReady:
+		a.pendingReboot = nil // goals met; the walk no longer owes a reboot
 		a.verifyReady(ctx, np, profile, bootID)
 	case v1alpha1.PhaseFailed:
-		// Hold; recovery is the resume annotation (design §5.2).
+		a.pendingReboot = nil // hold; recovery is the resume annotation (design §5.2)
 	default:
 		a.emit(ctx, corev1.EventTypeWarning, "UnknownPhase", fmt.Sprintf("unknown phase %q", np.Status.Phase))
 	}
@@ -444,6 +456,10 @@ func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, pro
 // and enforces the flash window / CP admission gates (design §5.2, §9.1).
 func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) {
 	phase := np.Status.Phase
+	// Quiescence signal for the reboot checkpoint: only a pass that actually
+	// changed a step counts as progress; early returns (admission gates)
+	// leave it false so an already-applied mutation's reboot still fires.
+	a.stageProgressed = false
 	if phase == v1alpha1.PhasePending {
 		a.setPhase(ctx, v1alpha1.PhaseProvisioning, "start", "inventory done; starting provisioning")
 		return
@@ -517,6 +533,11 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		// operator what ran and why (design §2). Unchanged results stay
 		// silent to keep the 5s poll from spamming.
 		if s.State != prev.State || s.Message != prev.Message || s.Attempts != prev.Attempts {
+			// Message-only churn is not progress (a blocked step re-reports
+			// the same wall every cycle); state and attempt changes are.
+			if s.State != prev.State || s.Attempts != prev.Attempts {
+				a.stageProgressed = true
+			}
 			switch s.State {
 			case v1alpha1.StepDone:
 				a.logf("step %s done: %s", def.name, s.Message)
@@ -750,9 +771,10 @@ func (a *Agent) patchCondition(ctx context.Context, c metav1.Condition) {
 	}
 }
 
-// requestReboot records the requirement in status; execution honors the
-// -allow-reboot flag (design §5.2 protocol step 3). v0.1 steps do not yet
-// set RebootRequired; the path is exercised in the lab.
+// requestReboot records the requirement in status and — once, per boot,
+// when -allow-reboot is set — executes the reboot command after a grace
+// period (design §5.2 protocol step 3). Callers reach it through the
+// checkpoint (checkpointReboot), not directly from step bodies.
 func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 	a.patchCondition(ctx, metav1.Condition{
 		Type:    v1alpha1.ConditionRebootRequired,
@@ -787,11 +809,68 @@ func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 	}()
 }
 
-// requestRebootBg lets step bodies (which carry no context) raise the
-// RebootRequired condition; requestReboot only needs ctx for the status
-// writes, which a background context serves identically.
+// rebootRequest is one step body's reboot request, held until the
+// checkpoint fires it.
+type rebootRequest struct {
+	reason  string
+	message string
+}
+
+// requestRebootBg lets step bodies (which carry no context) request a
+// reboot. The request is RECORDED, not executed: checkpointReboot fires it
+// once the stage pass goes quiet — bash semantics (v105 accumulates
+// needs_reboot across a block and reboots after the block finishes).
+// Firing at request time raced multi-cycle steps live: grub's request
+// armed the 60s timer while aptPackages was still configuring doca-all,
+// the grace expired mid-dpkg, and the reboot left dpkg interrupted —
+// aptPackages then burned its retry budget and failed the NodePrep
+// (bl-r1-c2-02, 0.1.38). Requests dedup by reason because blocked steps
+// re-request on every cycle while the walk converges around them.
 func (a *Agent) requestRebootBg(reason, message string) {
-	a.requestReboot(context.Background(), reason, message)
+	for _, r := range a.pendingReboot {
+		if r.reason == reason {
+			return
+		}
+	}
+	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message})
+	a.emit(context.Background(), corev1.EventTypeNormal, "RebootRequested",
+		fmt.Sprintf("%s: %s (reboot fires when the walk goes quiet)", reason, message))
+}
+
+// checkpointReboot is the bash needs_reboot checkpoint: after a stage pass,
+// if reboot requests have accumulated and NOTHING changed state this pass,
+// the walk is stuck without a fresh boot — fire one reboot carrying every
+// pending request (doca install + grub cmdline + ib_core netns land in a
+// single boot, exactly the grouping the bash performs). A pass that made
+// progress — a step converged, a failed step is retrying — keeps the walk
+// going; the pending requests ride along and fire at the first quiet pass.
+// Reaching Ready with a pending request is legitimate: if every step
+// converged without needing the fresh boot (e.g. the firmware ceiling
+// already covered the wanted VF count), the NV change simply applies at
+// the node's next natural reboot and nothing fires.
+func (a *Agent) checkpointReboot(ctx context.Context) {
+	if a.stageProgressed || a.rebootIssued || len(a.pendingReboot) == 0 {
+		return
+	}
+	reason, message := aggregateReboots(a.pendingReboot)
+	a.pendingReboot = nil
+	a.requestReboot(ctx, reason, message)
+}
+
+// aggregateReboots folds pending requests into one condition: the first
+// reason is the machine-readable token (metav1 reasons are plain tokens),
+// the full set names itself in the message.
+func aggregateReboots(reqs []rebootRequest) (reason, message string) {
+	reasons := make([]string, 0, len(reqs))
+	msgs := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		reasons = append(reasons, r.reason)
+		msgs = append(msgs, r.message)
+	}
+	if len(reasons) == 1 {
+		return reasons[0], msgs[0]
+	}
+	return reasons[0], fmt.Sprintf("%s: %s", strings.Join(reasons, "+"), strings.Join(msgs, " | "))
 }
 
 var _ = unstructured.Unstructured{}

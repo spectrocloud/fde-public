@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.38</span>
+    <span>nodeprep-v105.sh → controller v0.1.39</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.38</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.39</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -425,6 +425,22 @@
       ("MFT not installed yet; N function(s) pending classification — the aptPackages step installs it");
       unclassified functions keep reporting <code>Type=Mellanox</code> in the status until classified. A
       mlxconfig that IS installed but fails per device still logs per device.</li>
+  <li><b>0.1.39 — checkpoint reboot protocol (bash needs_reboot semantics).</b> The fresh-node walk
+      of <code>bl-r1-c2-02</code> then <b>failed</b>: grubParams' 0.1.37 reboot request armed its 60s timer
+      at request time while <code>aptPackages</code> was still configuring doca-all; the grace expired
+      mid-dpkg, the node rebooted with packages half-configured, and every apt retry then died on
+      <code>E: dpkg was interrupted</code> until the retry budget failed the NodePrep. The bash never races
+      like this — it accumulates <code>needs_reboot</code> across a block and reboots after the block
+      finishes. 0.1.39 adopts that: <code>requestRebootBg</code> now RECORDS requests (deduped, event per
+      new reason) and <code>checkpointReboot</code> fires one aggregated reboot only when a stage pass makes
+      no progress — so doca-install + grub + ib_core requests share a single boot (the grouping the
+      operator described), the timer never races a running install, and a walk that converges without
+      needing the fresh boot (firmware ceiling already sufficient) reaches Ready with the NV change pending
+      for the next natural reboot instead of rebooting unconditionally (a deliberate improvement over the
+      bash's always-reboot-after-config, v105 L939). Also: <code>aptPackages</code> now raises the
+      long-planned <code>DocaInstalled</code> reboot reason (v105 L353) — coalesced by the checkpoint — and
+      runs <code>dpkg --configure -a</code> before installing, healing the interrupted state the old bug
+      created (live-verified on the resumed walk).</li>
   </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
@@ -870,7 +886,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.38 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.39 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

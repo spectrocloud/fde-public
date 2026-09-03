@@ -124,3 +124,27 @@ func TestVfCountFor(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregateReboots(t *testing.T) {
+	// Single request passes through unchanged.
+	r, m := aggregateReboots([]rebootRequest{{reason: "GrubChanged", message: "cmdline updated"}})
+	if r != "GrubChanged" || m != "cmdline updated" {
+		t.Errorf("single: got %q/%q", r, m)
+	}
+	// Multiple requests: first reason is the token, all reasons and
+	// messages name themselves in the message (the fresh-node shape:
+	// doca + grub + ib_core in one boot).
+	r, m = aggregateReboots([]rebootRequest{
+		{reason: "DocaInstalled", message: "DOCA installed"},
+		{reason: "GrubChanged", message: "cmdline updated"},
+		{reason: "IbCoreNetns", message: "netns_mode"},
+	})
+	if r != "DocaInstalled" {
+		t.Errorf("multi reason: got %q", r)
+	}
+	for _, want := range []string{"DocaInstalled+GrubChanged+IbCoreNetns", "DOCA installed", "cmdline updated", "netns_mode"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("multi message missing %q:\n%s", want, m)
+		}
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -505,6 +506,17 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean)"
 	}
 
+	// An interrupted earlier install leaves packages "unpacked" and apt
+	// refusing to proceed ("E: dpkg was interrupted, you must manually run
+	// 'dpkg --configure -a'"). Our own reboot protocol can create that
+	// state — a pre-checkpoint reboot firing while dpkg ran (found live on
+	// bl-r1-c2-02, 0.1.38: doca-all left mid-configure, every retry exit
+	// 100). Finish the outstanding configuration first; idempotent and a
+	// fast no-op on a clean state.
+	if _, err := a.heavyHostExec(env, 30*time.Minute, "dpkg", "--configure", "-a"); err != nil {
+		return v1alpha1.StepFailed, fmt.Sprintf("dpkg --configure -a: %v", err)
+	}
+
 	if debNeeded {
 		if _, err := a.heavyHostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("dpkg --install %s: %v", fw.DOCA.Deb, err)
@@ -546,6 +558,15 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	}
 	if len(held) > 0 {
 		parts = append(parts, "held "+strings.Join(held, ","))
+	}
+	// Bash-faithful (v105 L353 "Host reboot is needed after installing
+	// DOCA"): a fresh DOCA/driver install binds cleanly against a fresh
+	// boot — and covers a kernel aptUpgrade pulled in moments earlier.
+	// Under the checkpoint protocol this request rides until the stage
+	// goes quiet and shares its reboot with grub/ib_core requests.
+	if debNeeded || slices.Contains(missing, "doca-all") {
+		a.requestRebootBg(v1alpha1.RebootDocaInstalled,
+			"DOCA host software installed; reboot loads the OFED driver stack")
 	}
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
 }
