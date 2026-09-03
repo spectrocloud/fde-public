@@ -194,7 +194,18 @@ func railLabel(d pciDevice) string {
 // values only change on firmware operations — and failures are retried on
 // later refreshes so a classification that ran before MFT was installed
 // corrects itself.
+//
+// MFT missing is the expected state on a fresh node (the aptPackages step
+// installs it, later in the same Provisioning stage): the pass detects that
+// once via findHostTool, skips the per-device exec attempts, and logs a
+// single notice per process instead of a per-device "not classified" line
+// every cycle (found noisy live on bl-r1-c2-02). The pending state stays
+// visible in the NodePrep status — unclassified functions report
+// Type=Mellanox until classified. A mlxconfig that IS installed but fails
+// per device is still a per-device error line.
 func (a *Agent) enrichMellanox(mellanox []pciDevice) {
+	_, mftMissing := findHostTool("mlxconfig")
+	pending := 0
 	for i := range mellanox {
 		d := &mellanox[i]
 		if c, ok := a.mftCache[d.pci]; ok {
@@ -206,6 +217,10 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 		}
 		d.ibdev = ibdevFor(d.pci)
 		d.rshim = rshimFor(d.fn)
+		if mftMissing != nil {
+			pending++
+			continue // classification retries once MFT is installed
+		}
 		// Both tool dumps run quiet (the one-line classification log below
 		// is the record; -verbose shows the full output): mlxconfig prints
 		// the device's whole configuration table, flint the whole image
@@ -214,14 +229,18 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 			d.rawType = rawDeviceType(out)
 			d.devType, d.variant = classifyMlxconfig(out)
 		} else {
-			a.logf("inventory: %s not classified (mlxconfig unavailable: %v)", d.pci, err)
-			continue // classification retries once MFT is installed
+			a.logf("inventory: %s not classified (mlxconfig query failed: %v)", d.pci, err)
+			continue // classification retries on a later refresh
 		}
 		a.logf("inventory: %s (%s) classified %s/%s fw %s psid %s rshim %s", d.pci, d.netdev, d.devType, d.variant, d.fwVer, d.psid, d.rshim)
 		if out, err := a.hostExecQuiet(nil, 60*time.Second, "flint", "-d", d.pci, "q"); err == nil {
 			d.fwVer, d.psid = parseFlint(out)
 		}
 		a.mftCache[d.pci] = mftInfo{devType: d.devType, rawType: d.rawType, variant: d.variant, fwVer: d.fwVer, psid: d.psid}
+	}
+	if pending > 0 && !a.mftPendingLogged {
+		a.mftPendingLogged = true
+		a.logf("inventory: mlxconfig (MFT) not installed yet; %d function(s) pending classification — the aptPackages step installs it and the classification lands on a later refresh", pending)
 	}
 }
 

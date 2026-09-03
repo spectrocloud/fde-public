@@ -54,6 +54,12 @@ type Agent struct {
 	// corrects itself on a later refresh.
 	mftCache map[string]mftInfo
 
+	// mftPendingLogged fires the one-line "MFT not installed yet" inventory
+	// notice once per process instead of per device per cycle (found noisy
+	// live on a fresh node: 4 lines × every poll cycle through the whole
+	// Provisioning window before aptPackages installs MFT).
+	mftPendingLogged bool
+
 	// rebootIssued guards the one-shot reboot execution per boot.
 	rebootIssued bool
 
