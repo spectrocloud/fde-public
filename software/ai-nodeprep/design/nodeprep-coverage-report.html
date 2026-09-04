@@ -790,7 +790,14 @@
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
       decision): to be validated in the upcoming NVIDIA DSX Air environment, which should present
       SuperNIC-class devices.]</i></li>
-  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs. (The rshim
+  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs.
+      <i>[Demoted from test need to watch item 2026-09-04 (operator decision, Network Operator now
+      live on the test cluster): the nodeprep taint (NoSchedule) keeps the plugin pod off the node
+      during the walk, so it first schedules at taint release and discovers the existing VFs; and
+      every validated VF change rides a checkpoint reboot, restarting all pods. Residual gap: a
+      VF-count change landing without a reboot on a node whose plugin is already running
+      (NoSchedule does not evict; reachable only as a pure numvfs rewrite under an
+      already-satisfying totalvfs) — watch, don't build.]</i> (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
   <li><b><span class="no">[pending]</span> VF GUID/MAC ownership under the NVIDIA Network Operator</b> —
