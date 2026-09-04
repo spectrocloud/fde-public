@@ -359,6 +359,27 @@ func TestStepDisableACSPolicySkip(t *testing.T) {
 	}
 }
 
+// SR-IOV VFs and ACS-disable are mutually exclusive: a requested VF count on
+// either fabric side (east-west or north-south) makes the step ignore
+// disableACS, even when it is true.
+func TestStepDisableACSVFExclusivity(t *testing.T) {
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:49:00.0"}}}
+	for _, side := range []string{"eastWest", "northSouth"} {
+		profile := profileForTest(9000, "legacy", true)
+		profile.Spec.Policy.DisableACS = true
+		if side == "eastWest" {
+			profile.Spec.EastWest.NumVFs = 1
+		} else {
+			profile.Spec.NorthSouth.NumVFs = 1
+		}
+
+		state, msg := stepDisableACS(a, nil, profile)
+		if state != v1alpha1.StepDone || !strings.Contains(msg, "mutually exclusive") {
+			t.Fatalf("%s.numVFs>0 must skip ACS disable: %s %s", side, state, msg)
+		}
+	}
+}
+
 // The disableACS message names every device ACS was written to — the
 // operator-facing mutation record — and the steady state says "no ACS
 // changes" instead of "disabled on 0".

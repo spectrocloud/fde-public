@@ -762,6 +762,12 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if !profile.Spec.Policy.DisableACS {
 		return v1alpha1.StepDone, "skipped by policy (disableACS=false)"
 	}
+	// SR-IOV VFs and ACS-disable are mutually exclusive (operator-directed,
+	// 2026-09-04): when the profile requests VFs on either fabric side the
+	// VF request wins and disableACS is ignored, however it is set.
+	if profile.Spec.EastWest.NumVFs > 0 || profile.Spec.NorthSouth.NumVFs > 0 {
+		return v1alpha1.StepDone, "skipped: profile requests SR-IOV VFs (eastWest/northSouth.numVFs); ACS-disable is mutually exclusive with VFs"
+	}
 	if !a.mutationsAllowed(profile) {
 		return v1alpha1.StepBlocked, "ACS disable requires -host-mutations"
 	}

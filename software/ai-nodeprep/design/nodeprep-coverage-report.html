@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.42</span>
+    <span>nodeprep-v105.sh → controller v0.1.43</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.42</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.43</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -487,6 +487,13 @@
       are driven through the PF by <code>vfGuids</code>). Ops note from the same investigation: a
       same-tag redeploy with <code>imagePullPolicy: IfNotPresent</code> is a no-op — the node keeps the
       first build it pulled under that tag; one version per build is now hard discipline.</li>
+  <li><b>0.1.43 — ACS-disable yields to SR-IOV VFs (operator-directed).</b> VFs and disabling ACS are
+      mutually exclusive; a profile can express both, so the resolution is in the step: when
+      <code>eastWest.numVFs &gt; 0</code> or <code>northSouth.numVFs &gt; 0</code>,
+      <code>disableACS</code> is ignored (Done-skip with an explanatory message), however it is set.
+      Detection-only effect on the gen-13 walk: that walk ran the old logic and had already cleared ACS
+      on 5 devices with numVFs=1 — ACS is runtime-only, so the next reboot restores hardware default and
+      the skipping step then leaves it alone; the step never re-enables ACS itself.</li>
   </ul>
 
 <h2><span class="no">§3</span>Coverage matrix — nodeprep-v105.sh → controller</h2>
@@ -593,7 +600,10 @@
         on the rail BDF. Run 3 (0.1.22): live drift repair — a flipped register was re-cleared on the next
         verify pass and the log/status named the device (<code>disabled ACS on: c7:03.0 (12 already clear,
         453 without ACS capability)</code>); the enumeration and setpci traffic run quiet, the step message
-        is the mutation record.</td>
+        is the mutation record. 0.1.43 (operator-directed): SR-IOV VFs and ACS-disable are mutually
+        exclusive — when <code>eastWest/northSouth.numVFs &gt; 0</code> the step ignores
+        <code>disableACS</code> and skips with an explanatory message (live-verified: boot-verify on the
+        numVFs=1 profile flipped the message the same cycle the agent deployed).</td>
   </tr>
   <tr>
     <td><code>fn_set_vfs</code> <small>L611</small></td>
@@ -934,7 +944,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.42 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.43 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
