@@ -16,7 +16,6 @@ import (
 	clientfake "k8s.io/client-go/kubernetes/fake"
 
 	"spectrocloud.com/nodeprep/api/v1alpha1"
-	"spectrocloud.com/nodeprep/internal/k8sutil"
 )
 
 // Classification mirrors the bash fn_inventory_hw description parsing: the
@@ -631,15 +630,12 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"cold"}}`}
 	np.Status.Reboots.Total = 9
-	state, msg := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
-	if state != v1alpha1.StepBlocked {
-		t.Fatalf("cold hold must block, got %s", state)
+	msg, cold := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if !cold {
+		t.Fatalf("cold hold must report cold, got cold=%v", cold)
 	}
 	if !strings.Contains(msg, "cold power cycle") || !strings.Contains(msg, "no further reboots") {
 		t.Fatalf("cold-hold message must instruct the power cycle and promise the halt: %q", msg)
-	}
-	if got := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionColdRebootRequired); got != "True" {
-		t.Fatalf("ColdRebootRequired must be True on a cold hold, got %q", got)
 	}
 	if len(a.pendingReboot) != 0 {
 		t.Fatalf("the cold halt must not record a reboot request, got %+v", a.pendingReboot)
@@ -650,14 +646,34 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"load"}}`}
 	np2.Status.Reboots.Total = 10
-	state, msg = a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
-	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "power the node down and back up") {
-		t.Fatalf("warm spent must halt with the power-cycle instruction, got %s/%q", state, msg)
+	msg, cold = a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if !cold || !strings.Contains(msg, "power the node down and back up") {
+		t.Fatalf("warm spent must halt with the power-cycle instruction, got cold=%v/%q", cold, msg)
 	}
 	if len(a.pendingReboot) != 0 {
 		t.Fatalf("warmSpent must not record a reboot request, got %+v", a.pendingReboot)
 	}
 	if st := sriovStageParse(np2.Annotations[sriovNvStageAnnotation])["0000:49:00.0"]; st.State != sriovStateCold || st.Reboots != 10 {
 		t.Fatalf("warmSpent must persist the cold stage at the new boot count, got %+v", st)
+	}
+
+	// A stale warm-load request recorded before the halt (0.1.51 re-derived
+	// it from a stale reboot count on the first post-boot pass) must be
+	// dropped by the cold halt; unrelated reasons ride along.
+	np3 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np3.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":10,"state":"load"}}`}
+	np3.Status.Reboots.Total = 11
+	a.pendingReboot = []rebootRequest{
+		{reason: v1alpha1.RebootMlxConfigApplied, message: "stale warm load"},
+		{reason: v1alpha1.RebootGrubChanged, message: "unrelated"},
+	}
+	a.blockedSriovShort(np3, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	for _, r := range a.pendingReboot {
+		if r.reason == v1alpha1.RebootMlxConfigApplied {
+			t.Fatalf("the cold halt must drop the stale MlxConfigApplied request, got %+v", a.pendingReboot)
+		}
+	}
+	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
+		t.Fatalf("unrelated pending requests must survive the drop, got %+v", a.pendingReboot)
 	}
 }

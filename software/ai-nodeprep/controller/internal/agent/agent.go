@@ -351,6 +351,15 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			a.logf("boot sync failed: %v", err)
 			return
 		}
+		// Mirror what was patched back into the in-memory np: runStage below
+		// reads np.Status.Reboots.Total, and the cycle that detects the boot
+		// must already see the incremented count. Without the mirror the
+		// first post-boot pass re-derives the pre-boot stage outcome — a
+		// staged SR-IOV load re-requested its warm reboot from a stale
+		// reboots=0, and the stale request fired a second reboot from the
+		// next quiet checkpoint (live on bl-r1-c2-06, 0.1.51).
+		np.Status.Reboots.Total = total
+		np.Status.Reboots.PerStage = perStage
 		if changedBoot {
 			a.emit(ctx, corev1.EventTypeNormal, "BootDetected", fmt.Sprintf("boot changed %s -> %s; reboot #%d recorded", np.Status.BootID, bootID, total))
 			np.Status.BootID = bootID
@@ -893,6 +902,22 @@ func (a *Agent) requestRebootBg(reason, message string) {
 	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message})
 	a.emit(context.Background(), corev1.EventTypeNormal, "RebootRequested",
 		fmt.Sprintf("%s: %s (reboot fires when the walk goes quiet)", reason, message))
+}
+
+// dropPendingReboots discards recorded requests of one reason without
+// firing them. The cold halt of the SR-IOV stage machine uses it: a warm
+// load request recorded before the machine learned the load needs a cold
+// power cycle must never fire from a later quiet checkpoint — that is the
+// second reboot 0.1.51 issued live on bl-r1-c2-06 after ColdRebootRequired
+// was already set.
+func (a *Agent) dropPendingReboots(reason string) {
+	kept := a.pendingReboot[:0]
+	for _, r := range a.pendingReboot {
+		if r.reason != reason {
+			kept = append(kept, r)
+		}
+	}
+	a.pendingReboot = kept
 }
 
 // checkpointReboot is the bash needs_reboot checkpoint: after a stage pass,
