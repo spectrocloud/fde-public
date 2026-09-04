@@ -784,6 +784,12 @@
   <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs. (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
+  <li><b><span class="no">[pending]</span> VF GUID/MAC ownership under the NVIDIA Network Operator</b> —
+      verify the moment the operator is installed on the test cluster. It may implement its own VF GUID/MAC
+      assignment (already observed in the switchdev path); nodeprep's <code>vfGuids</code> drift-repairs
+      identity on every boot-verify pass, so two owners would fight — drift → re-taint → repair → rewrite
+      → endless loop. If the operator does rewrite identity, <code>vfGuids</code> must stand down (or scope
+      its repair), and <code>sriovNumVFs</code>/<code>udevRules</code> need the same ownership check.</li>
 </ul>
 
 <h3>On every node</h3>
