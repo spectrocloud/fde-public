@@ -238,7 +238,7 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	}
 	if len(configured) > 0 {
 		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
-			fmt.Sprintf("mlxconfig applied to %s; reboot required for SR-IOV/eswitch config", strings.Join(configured, ",")))
+			fmt.Sprintf("mlxconfig applied to %s; reboot required for SR-IOV/eswitch config", strings.Join(configured, ",")), "")
 		return v1alpha1.StepBlocked, fmt.Sprintf("firmware config written to %d device(s) (%s), %d already matched; reboot requested",
 			len(configured), strings.Join(configured, ", "), len(matched))
 	}

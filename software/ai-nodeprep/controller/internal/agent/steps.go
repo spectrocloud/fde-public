@@ -259,7 +259,7 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	// grub-only change must not wait on that), so request it here. The
 	// §5.2 hold pauses the walk until the boot_id changes.
 	a.requestRebootBg(v1alpha1.RebootGrubChanged,
-		fmt.Sprintf("grub cmdline updated (%s); reboot required to apply", strings.Join(missing, " ")))
+		fmt.Sprintf("grub cmdline updated (%s); reboot required to apply", strings.Join(missing, " ")), "")
 	return v1alpha1.StepDone, fmt.Sprintf("wrote 90-nodeprep.cfg (%s) and ran update-grub; reboot requested to apply", strings.Join(missing, " "))
 }
 
@@ -398,7 +398,7 @@ func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			err, strings.TrimSpace(out))
 	}
 	a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
-		fmt.Sprintf("ib_core netns_mode is %q, want %q; reboot required to reload ib_core", normNetnsMode(string(got)), normNetnsMode(mode)))
+		fmt.Sprintf("ib_core netns_mode is %q, want %q; reboot required to reload ib_core", normNetnsMode(string(got)), normNetnsMode(mode)), "")
 	return v1alpha1.StepBlocked, "modprobe.d updated and initramfs refreshed; reboot requested to reload ib_core"
 }
 
@@ -568,7 +568,7 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	// goes quiet and shares its reboot with grub/ib_core requests.
 	if debNeeded || slices.Contains(missing, "doca-all") {
 		a.requestRebootBg(v1alpha1.RebootDocaInstalled,
-			"DOCA host software installed; reboot loads the OFED driver stack")
+			"DOCA host software installed; reboot loads the OFED driver stack", "")
 	}
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
 }
@@ -925,7 +925,7 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		// must now wait for a manual power cycle (0.1.52; 0.1.51 issued
 		// that second reboot live on bl-r1-c2-06 from a request recorded
 		// against a stale reboot count).
-		a.dropPendingReboots(v1alpha1.RebootMlxConfigApplied)
+		a.dropPendingReboots(v1alpha1.RebootMlxConfigApplied, nic.pci)
 	}
 	switch out {
 	case sriovStagedWait:
@@ -936,7 +936,7 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		return msg, false
 	case sriovWarmLoad:
 		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
-			fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %s — requesting the one warm reboot that loads SR-IOV NV (if it does not land, the next step is a cold power cycle, not another reboot)", nic.pci, st.NV, shortOf))
+			fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %s — requesting the one warm reboot that loads SR-IOV NV (if it does not land, the next step is a cold power cycle, not another reboot)", nic.pci, st.NV, shortOf), nic.pci)
 		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — the one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf), false
 	case sriovWarmSpent:
 		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d and the warm reboot did not expose it (%s): this firmware loads SR-IOV NV changes only on a cold power cycle — power the node down and back up (MAAS/IPMI power-off, then on; a warm reboot is not enough). The reboot cycle is halted; the walk resumes automatically after the power cycle", nic.pci, st.NV, shortOf), true

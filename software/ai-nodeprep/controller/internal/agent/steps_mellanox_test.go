@@ -659,21 +659,29 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 
 	// A stale warm-load request recorded before the halt (0.1.51 re-derived
 	// it from a stale reboot count on the first post-boot pass) must be
-	// dropped by the cold halt; unrelated reasons ride along.
+	// dropped by the cold halt; unrelated reasons and other functions'
+	// requests ride along.
 	np3 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np3.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":10,"state":"load"}}`}
 	np3.Status.Reboots.Total = 11
 	a.pendingReboot = []rebootRequest{
-		{reason: v1alpha1.RebootMlxConfigApplied, message: "stale warm load"},
+		{reason: v1alpha1.RebootMlxConfigApplied, message: "stale warm load", pci: "0000:49:00.0"},
+		{reason: v1alpha1.RebootMlxConfigApplied, message: "sibling's fresh warm load", pci: "0000:49:00.1"},
 		{reason: v1alpha1.RebootGrubChanged, message: "unrelated"},
 	}
 	a.blockedSriovShort(np3, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	for _, r := range a.pendingReboot {
-		if r.reason == v1alpha1.RebootMlxConfigApplied {
-			t.Fatalf("the cold halt must drop the stale MlxConfigApplied request, got %+v", a.pendingReboot)
+		if r.reason == v1alpha1.RebootMlxConfigApplied && r.pci == "0000:49:00.0" {
+			t.Fatalf("the cold halt must drop the stale MlxConfigApplied request of the cold PF itself, got %+v", a.pendingReboot)
 		}
 	}
-	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
-		t.Fatalf("unrelated pending requests must survive the drop, got %+v", a.pendingReboot)
+	if len(a.pendingReboot) != 2 {
+		t.Fatalf("sibling and unrelated pending requests must survive the drop, got %+v", a.pendingReboot)
 	}
+	for _, r := range a.pendingReboot {
+		if r.reason == v1alpha1.RebootMlxConfigApplied && r.pci == "0000:49:00.1" {
+			return
+		}
+	}
+	t.Fatalf("the sibling PF's warm-load request must survive .0's cold halt regardless of loop order, got %+v", a.pendingReboot)
 }

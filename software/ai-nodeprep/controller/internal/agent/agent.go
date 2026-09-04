@@ -877,10 +877,14 @@ func (a *Agent) requestReboot(ctx context.Context, reason, message string) {
 }
 
 // rebootRequest is one step body's reboot request, held until the
-// checkpoint fires it.
+// checkpoint fires it. pci ("" for host-wide requests) attributes the
+// request to the device that raised it: dropPendingReboots can then void
+// one function's stale request without eating a sibling function's fresh
+// one, regardless of the order the step loop processed them in.
 type rebootRequest struct {
 	reason  string
 	message string
+	pci     string
 }
 
 // requestRebootBg lets step bodies (which carry no context) request a
@@ -893,13 +897,13 @@ type rebootRequest struct {
 // aptPackages then burned its retry budget and failed the NodePrep
 // (bl-r1-c2-02, 0.1.38). Requests dedup by reason because blocked steps
 // re-request on every cycle while the walk converges around them.
-func (a *Agent) requestRebootBg(reason, message string) {
+func (a *Agent) requestRebootBg(reason, message string, pci string) {
 	for _, r := range a.pendingReboot {
-		if r.reason == reason {
+		if r.reason == reason && r.pci == pci {
 			return
 		}
 	}
-	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message})
+	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message, pci: pci})
 	a.emit(context.Background(), corev1.EventTypeNormal, "RebootRequested",
 		fmt.Sprintf("%s: %s (reboot fires when the walk goes quiet)", reason, message))
 }
@@ -910,12 +914,13 @@ func (a *Agent) requestRebootBg(reason, message string) {
 // power cycle must never fire from a later quiet checkpoint — that is the
 // second reboot 0.1.51 issued live on bl-r1-c2-06 after ColdRebootRequired
 // was already set.
-func (a *Agent) dropPendingReboots(reason string) {
+func (a *Agent) dropPendingReboots(reason string, pci string) {
 	kept := a.pendingReboot[:0]
 	for _, r := range a.pendingReboot {
-		if r.reason != reason {
-			kept = append(kept, r)
+		if r.reason == reason && (pci == "" || r.pci == "" || r.pci == pci) {
+			continue
 		}
+		kept = append(kept, r)
 	}
 	a.pendingReboot = kept
 }
