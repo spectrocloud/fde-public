@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.57</span>
+    <span>nodeprep-v105.sh → controller v0.1.58</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.57</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.58</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1004,6 +1004,23 @@
       refresh, <code>status.nics</code> lists 4 fully classified PFs on c2-06. Not unit-tested (the
       sysfs/exec paths have no test seam in v0.1; the parsers above the seam are the tested
       surface).</li>
+  <li><b>0.1.58 — downsizing VFs never blocks: warn, clear the stage, keep walking (Kevin's
+      direction).</b> A downward profile change already converged — the kernel creates exactly the
+      requested count under a higher <code>sriov_totalvfs</code> — but two things were off: nothing
+      told the operator that the committed <code>NUM_OF_VFS</code> itself only moves down on a cold
+      power cycle ("on the warm reboot the VF count in NV likely will still be higher"), and the
+      Configuring apply left the PF's <code>sriov-nv-stage</code> armed forever under the satisfied
+      demand — a stale armed stage could later fire a spurious warm load, and then a wrong cold
+      halt, off a transient <code>totalvfs</code> read. Now: the converged and write paths warn when
+      the ceiling still exceeds the demand (ledger message + <b>one</b> gated
+      <code>SriovDownsizePending</code> Warning event — re-armed only if the warning clears and
+      returns), and <code>clearSriovStage</code> drops the PF's stage entry (mirrored; the
+      annotation disappears with the last entry; no-op when absent). The halt machinery is
+      untouched: a demand <b>above</b> the ceiling still runs the full staged→load→cold machine.
+      Live: the first 0.1.58 pass on c2-06 cleared the stale cold/load stages left by the 1→4 walk
+      — the annotation is gone. <code>TestClearSriovStage</code> covers the cleanup; the warning
+      composition is host-bound (no sysfs seam in v0.1) and live-verified on the next downsize
+      walk.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1194,7 +1211,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.57 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.58 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
