@@ -689,6 +689,65 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 	t.Fatalf("the sibling PF's warm-load request must survive .0's cold halt regardless of loop order, got %+v", a.pendingReboot)
 }
 
+// TestClearSriovStage pins the demand-satisfied stage cleanup (0.1.58):
+// one PF's entry goes, its sibling's survives, the annotation disappears
+// entirely with the last entry, and an absent entry is a no-op.
+func TestClearSriovStage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{}
+	npU.SetGroupVersionKind(schema.GroupVersionKind{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: v1alpha1.NodePrepKind})
+	npU.SetName("node-1")
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	a := &Agent{nodeName: "node-1", dyn: dyn, client: clientfake.NewSimpleClientset()}
+	np := &v1alpha1.NodePrep{}
+	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":1,"state":"cold"},"0000:49:00.1":{"nv":4,"reboots":2,"state":"load"}}`}
+
+	readAnn := func() string {
+		u, err := dyn.Resource(nodePrepsGVR).Get(context.Background(), "node-1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("reading back: %v", err)
+		}
+		ann, _, _ := unstructured.NestedString(u.Object, "metadata", "annotations", sriovNvStageAnnotation)
+		return ann
+	}
+
+	// Absent entry: no-op, nothing patched.
+	before := readAnn()
+	a.clearSriovStage(np, "0000:16:00.0")
+	if readAnn() != before || len(sriovStageParse(np.Annotations[sriovNvStageAnnotation])) != 2 {
+		t.Fatalf("clearing an absent entry must not touch anything, ann=%q np=%q", readAnn(), np.Annotations[sriovNvStageAnnotation])
+	}
+
+	// Clear one PF: its sibling survives, in-memory and on the API.
+	a.clearSriovStage(np, "0000:49:00.0")
+	m := sriovStageParse(np.Annotations[sriovNvStageAnnotation])
+	if len(m) != 1 || m["0000:49:00.1"].State != sriovStateLoad {
+		t.Fatalf("sibling stage must survive, got %v", m)
+	}
+	if got := readAnn(); got != np.Annotations[sriovNvStageAnnotation] {
+		t.Fatalf("API annotation %q must mirror the in-memory %q", got, np.Annotations[sriovNvStageAnnotation])
+	}
+
+	// Clear the last PF: the annotation is removed entirely.
+	a.clearSriovStage(np, "0000:49:00.1")
+	if _, ok := np.Annotations[sriovNvStageAnnotation]; ok {
+		t.Fatalf("empty stage map must drop the annotation, got %q", np.Annotations[sriovNvStageAnnotation])
+	}
+	if got := readAnn(); got != "" {
+		t.Fatalf("API annotation must be gone, got %q", got)
+	}
+
+	// Idempotent: clearing again is a no-op.
+	a.clearSriovStage(np, "0000:49:00.1")
+	if got := readAnn(); got != "" {
+		t.Fatalf("repeat clear must stay gone, got %q", got)
+	}
+}
+
 // TestSyncColdPhase pins the phase overlay (0.1.54): the cold halt reads in
 // .status.phase mid-walk, lifts when the condition clears, and never moves
 // a Ready or Failed node.

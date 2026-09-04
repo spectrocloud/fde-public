@@ -797,6 +797,36 @@ func (a *Agent) setSriovStage(np *v1alpha1.NodePrep, pci string, st sriovNvStage
 	}
 }
 
+// clearSriovStage drops one PF's entry from the sriov-nv-stage annotation
+// and mirrors the removal into np (the parse on the next pass must not
+// resurrect it). A no-op — no API write — when the PF has no entry. The
+// demand-satisfied paths of stepSriovNumVFs use it: an armed stage under a
+// satisfied demand is either a landed load or a downward change deferred
+// to the cold cycle, and a stale armed stage could fire a spurious warm
+// load from a transient totalvfs read (0.1.58).
+func (a *Agent) clearSriovStage(np *v1alpha1.NodePrep, pci string) {
+	m := sriovStageParse(np.Annotations[sriovNvStageAnnotation])
+	if _, ok := m[pci]; !ok {
+		return
+	}
+	delete(m, pci)
+	if len(m) == 0 {
+		if err := a.removeAnnotation(context.Background(), sriovNvStageAnnotation); err != nil {
+			a.logf("sriov-nv-stage annotation removal failed: %v", err)
+			return
+		}
+		delete(np.Annotations, sriovNvStageAnnotation)
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if err := a.setAnnotation(np, sriovNvStageAnnotation, string(b)); err != nil {
+		a.logf("sriov-nv-stage annotation update failed: %v", err)
+	}
+}
+
 // sriovStageOutcome is what a sriov_totalvfs shortfall wants next, given
 // the PF's stage and the node's reboot count.
 type sriovStageOutcome int
@@ -962,6 +992,15 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 // not expose VFs at power-on, found live on a Supermicro LOM, FW
 // 14.32.1010) converges when the profile wants 0 and runs the same machine
 // otherwise.
+//
+// A DOWNWARD profile change is never blocking (0.1.58): the kernel creates
+// exactly the requested count under a higher firmware ceiling, so the walk
+// converges and only warns that the committed NUM_OF_VFS itself moves down
+// solely on a cold power cycle. The demand-satisfied PF's stage entry is
+// cleared either way — an armed stage under a satisfied demand is moot (a
+// landed load, or a downward change deferred to the cold cycle), and a
+// stale one could fire a spurious warm load from a transient totalvfs
+// read.
 func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
@@ -969,6 +1008,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	changed := []string{}
 	var blockedMsgs []string
 	var converged []string
+	var down []string
 	coldAny := false
 	for _, nic := range a.mellanoxFns {
 		want := vfCountFor(profile, nic)
@@ -992,16 +1032,26 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			blockedMsgs = append(blockedMsgs, msg)
 			continue
 		}
+		// The loaded ceiling doubles as the downsize signal: above the
+		// demand it means the committed NV still carries the older, higher
+		// count (0.1.58).
+		total, terr := readSysfsInt(base + "/sriov_totalvfs")
 		if got == want {
 			if want > 0 {
 				converged = append(converged, fmt.Sprintf("%s=%d", nic.pci, got))
+				if terr == nil && total > want {
+					down = append(down, sriovDownsizeWarning(nic.pci, total, want))
+				}
 			}
+			// Demand satisfied at the runtime count and covered by the
+			// ceiling: any armed stage for this PF is moot — drop it.
+			a.clearSriovStage(np, nic.pci)
 			continue
 		}
 		if !a.mutationsAllowed(profile) {
 			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
 		}
-		if total, err := readSysfsInt(base + "/sriov_totalvfs"); err == nil && want > total {
+		if terr == nil && want > total {
 			msg, cold := a.blockedSriovShort(np, nic, want, total, false)
 			coldAny = coldAny || cold
 			blockedMsgs = append(blockedMsgs, msg)
@@ -1040,6 +1090,10 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			return v1alpha1.StepFailed, fmt.Sprintf("sriov_numvfs on %s still not %d 15s after write", nic.pci, want)
 		}
 		changed = append(changed, fmt.Sprintf("%s %d→%d", nic.pci, got, want))
+		if terr == nil && total > want {
+			down = append(down, sriovDownsizeWarning(nic.pci, total, want))
+		}
+		a.clearSriovStage(np, nic.pci)
 	}
 	if len(blockedMsgs) > 0 {
 		// One condition update per pass: any cold-halted PF sets
@@ -1052,19 +1106,34 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 		return v1alpha1.StepBlocked, strings.Join(blockedMsgs, "; ")
 	}
-	if len(changed) == 0 {
-		a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
+	a.setSriovColdReboot(np, false, "the profile's VF demand is covered by sriov_totalvfs on every Mellanox function")
+	msg := ""
+	switch {
+	case len(changed) > 0:
+		msg = "set sriov_numvfs: " + strings.Join(changed, ", ")
+	case len(converged) > 0:
 		// Report the actual per-PF readbacks, not one function's demand:
 		// mellanoxFns[0] sorts rail-unmapped LOMs first, whose demand is 0
 		// — the message read "(0 VFs)" on nodes holding 4 VFs per rail PF
 		// (0.1.56).
-		if len(converged) == 0 {
-			return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
-		}
-		return v1alpha1.StepDone, "VF counts match profile: " + strings.Join(converged, ", ")
+		msg = "VF counts match profile: " + strings.Join(converged, ", ")
+	default:
+		msg = fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
 	}
-	a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
-	return v1alpha1.StepDone, "set sriov_numvfs: " + strings.Join(changed, ", ")
+	if len(down) > 0 {
+		// Downsize under a higher ceiling: non-blocking by design — say so
+		// once, in the ledger and as a Warning event (0.1.58).
+		msg += "; warning: " + strings.Join(down, "; ")
+		if prev := stepByName(np.Status.Steps, "sriovNumVFs"); prev == nil || !strings.Contains(prev.Message, "downward NUM_OF_VFS change") {
+			a.emit(context.Background(), corev1.EventTypeWarning, "SriovDownsizePending", strings.Join(down, "; "))
+		}
+	}
+	return v1alpha1.StepDone, msg
+}
+
+// sriovDownsizeWarning renders the non-blocking downsize notice (0.1.58).
+func sriovDownsizeWarning(pci string, total, want int) string {
+	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change lands only after a cold power cycle; the node runs the requested %d VFs regardless", pci, total, want, want)
 }
 
 // stepOvsBridges checks br-rail-rN bridges exist in the OVS database when
