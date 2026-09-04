@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.45</span>
+    <span>nodeprep-v105.sh → controller v0.1.46</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.45</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.46</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -800,6 +800,15 @@
       <b>External-manifest note:</b> the CRD copy in Kevin's management system must drop
       <code>cordonDuringVFConfig</code> too (alongside <code>firmware.version</code> from 0.1.40) or its
       reverts will out-vote the working tree.</li>
+  <li><b>0.1.46 — <code>hostBoot.iommu: auto</code> live-verified</b> (closes an "implemented but untested"
+      item from the 0.1.45 status review). Profile gen 14 set <code>iommu: auto</code>; the derivation took
+      the CPU-vendor branch (<code>/proc/cpuinfo</code> → <code>vendor_id: GenuineIntel</code> →
+      <code>intel_iommu=on</code>) plus the VF-driven <code>iommu=pt</code>, matched the running kernel and
+      the existing 90-nodeprep.cfg (unchanged file), so the step reported Done with no grub write, no
+      reboot (reboots stayed 4), and the taint cycled once around the no-op re-walk. Remaining untested
+      variants: <code>amd</code>/<code>off</code> (need AMD hardware / an iommu-off profile), hugepages
+      params, and <code>grubCPUVendor</code>'s AMD/unknown branches (unit-untestable — reads
+      <code>/proc/cpuinfo</code> directly; the Intel path is what this run exercised).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -986,7 +995,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.45 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.46 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

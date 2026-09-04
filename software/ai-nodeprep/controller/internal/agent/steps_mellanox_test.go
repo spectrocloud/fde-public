@@ -386,6 +386,12 @@ func TestStepDisableACSVFExclusivity(t *testing.T) {
 // The bash subtracts 50 bytes from every Ethernet VF's MTU; that headroom is
 // a switchdev requirement only (operator-corrected, 2026-09-04). Legacy VFs
 // carry the full profile MTU.
+// The auto branch of grubParams' IOMMU derivation keys off the CPU vendor
+// parsed from /proc/cpuinfo (grubCPUVendor). The function reads /proc/cpuinfo
+// directly and cannot be chrooted in-process, so the parse itself is
+// exercised live on the test node instead — covered by the live verification
+// in the 0.1.45 walk (vendor_id: GenuineIntel → intel_iommu=on derived).
+
 func TestVfMTUWant(t *testing.T) {
 	profile := profileForTest(9000, "legacy", true)
 	if got := vfMTUWant(profile); got != 9000 {
