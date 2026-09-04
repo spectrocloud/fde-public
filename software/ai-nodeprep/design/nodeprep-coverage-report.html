@@ -797,7 +797,9 @@
       every validated VF change rides a checkpoint reboot, restarting all pods. Residual gap: a
       VF-count change landing without a reboot on a node whose plugin is already running
       (NoSchedule does not evict; reachable only as a pure numvfs rewrite under an
-      already-satisfying totalvfs) — watch, don't build.]</i> (The rshim
+      already-satisfying totalvfs) — watch, don't build. <b>[Proven on the fresh-node walk 2026-09-04:
+      on bl-r1-c2-07 the plugin pod scheduled only at taint release, 31 s after the plain daemonsets,
+      and found all 8 VFs already up with identities — see the changelog entry.]</b></i> (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
   <li><b><span class="no">[pending]</span> VF GUID/MAC ownership under the NVIDIA Network Operator</b> —
@@ -1109,6 +1111,24 @@
       both nodes Ready at 4 VFs/PF, identities written, downsize warning gone
       (<code>totalvfs</code>=want). <b>The EIO-wedge-then-reboot dance is the expected shape of a
       walk whose Configuring stage ran the firmware reset — not a defect.</b></li>
+  <li><b>Fresh-node SR-IOV baseline: a bare card reports <code>sriov_totalvfs=1</code> until the SR-IOV NV
+      commits — and the standard ladder covers it with no extra boot (walk of bl-r1-c2-07, profile gen 19,
+      0.1.61).</b> The third CAPI worker joined from bare metal, and its pre-NV inventory read
+      <code>sriov_totalvfs=1</code> on both PFs — unlike the re-imaged older workers, whose re-image carried
+      previously-committed NV through (hence their 4). The walk handled it with the already-validated
+      two-step, no new machinery: Configuring staged <code>NUM_OF_VFS=4</code> and armed the firmware
+      reset; the apply reboot then both committed the NV <i>and</i> loaded it — the first post-reset boot
+      exposed <code>totalvfs=4</code>, and the Finalizing pass wrote
+      <code>sriov_numvfs 0→4</code> on both PFs directly (log: <code>BootDetected → reboot #2 recorded →
+      sriovNumVFs done</code>, no blocked pass, no second warm load). <b>Diagnostic-read caveat:</b> a
+      mid-walk host read showed <code>totalvfs=1</code> with the NV already committed — reads taken during
+      the mlxfwreset/reboot window race the load (driver down or just re-probing); the agent log, not a
+      point-in-time sysfs read, is the source of truth for what the boot actually landed. Same walk:
+      <code>disableACS</code> skipped correctly (profile requests VFs), VF GUIDs/MACs applied to all 8 VFs,
+      udev rules renamed the rail interfaces and all VFs (mtu 9000), boot-verify passed, taint released —
+      and the <b>network-operator-sriov-device-plugin pod scheduled on the node only at taint release</b>
+      (its pod is 31 s younger than the plain daemonsets that ignored nothing), finding the VFs already in
+      place — the §7 watch item's scheduling-order argument, proven end-to-end on a fresh node.</li>
 </ul>
 
 <h3>On every node</h3>
