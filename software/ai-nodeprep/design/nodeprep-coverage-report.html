@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.54</span>
+    <span>nodeprep-v105.sh → controller v0.1.56</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.54</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.56</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -963,7 +963,30 @@
       <code>ColdRebootRequired</code>, but deployment of 0.1.54 waits for the CRD update to land
       through that system; until then the agent logs (and retries) the rejected phase patch while
       conditions and steps keep working. Unit-tested: <code>TestSyncColdPhase</code> (activate,
-      no-churn, resume, Ready/Failed guards), phases ordering + legacy mirror, worker-label default.</li>
+      no-churn, resume, Ready/Failed guards), phases ordering + legacy mirror, worker-label default.
+      (The CRD landed and 0.1.54 deployed; c2-06 showed <code>ColdRebootRequired</code> in the phase
+      column immediately.)</li>
+  <li><b>0.1.55 — the overlay deadlocked the walk it parked.</b> Found live, during bl-r1-c2-06's
+      power cycle: <code>cycle()</code>'s phase switch had no case for the new phase, so the overlay
+      idled in <code>UnknownPhase</code> warnings and <b>never called <code>runStage</code></b> — the
+      Finalizing step bodies that re-check <code>sriov_totalvfs</code> after the operator's power
+      cycle never ran, and the halt could never clear. Exactly the property the overlay was built
+      to preserve ("parking the phase must not stop the walk") was broken by the one switch that
+      decides whether the walk runs at all; the unit test covered <code>syncColdPhase</code> but not
+      the cycle routing. Fix: one added case, with <code>walkStageFor</code> (already inside
+      <code>runStage</code>) mapping the overlay back onto Finalizing. Live proof of the whole chain:
+      Kevin cold-cycled c2-06, boot #4 recorded, both PFs' <code>sriov_totalvfs</code> converged to 4
+      — the NV that four warm reboots could not load — the condition cleared, the walk completed
+      Finalizing, boot-verify passed, phase went straight to Ready, and the controller released the
+      taint. The cold-halt story is closed end to end: one warm attempt per PF, a truthful phase for
+      the operator, a manual power cycle, automatic resumption.</li>
+  <li><b>0.1.56 — the converged message lied about the count.</b> The boot-verify/walk Done message
+      <code>"VF counts match profile (N VFs)"</code> took <code>vfCountFor</code> of
+      <code>a.mellanoxFns[0]</code> — and inventory sort order puts the rail-unmapped LOM PFs
+      (<code>0000:16:00.x</code>, demand 0) first, so a node holding 4 VFs per rail PF reported
+      "(0 VFs)" (seen live on c2-06's post-cycle boot-verify). The message now reports the actual
+      per-PF readbacks (<code>"VF counts match profile: 0000:49:00.0=4, 0000:49:00.1=4"</code>),
+      falling back to the old format only when no rail-mapped PF exists.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1154,7 +1177,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.54 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.56 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

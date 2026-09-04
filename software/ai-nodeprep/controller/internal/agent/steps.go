@@ -968,6 +968,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	}
 	changed := []string{}
 	var blockedMsgs []string
+	var converged []string
 	coldAny := false
 	for _, nic := range a.mellanoxFns {
 		want := vfCountFor(profile, nic)
@@ -992,6 +993,9 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			continue
 		}
 		if got == want {
+			if want > 0 {
+				converged = append(converged, fmt.Sprintf("%s=%d", nic.pci, got))
+			}
 			continue
 		}
 		if !a.mutationsAllowed(profile) {
@@ -1050,7 +1054,14 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	}
 	if len(changed) == 0 {
 		a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
-		return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
+		// Report the actual per-PF readbacks, not one function's demand:
+		// mellanoxFns[0] sorts rail-unmapped LOMs first, whose demand is 0
+		// — the message read "(0 VFs)" on nodes holding 4 VFs per rail PF
+		// (0.1.56).
+		if len(converged) == 0 {
+			return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
+		}
+		return v1alpha1.StepDone, "VF counts match profile: " + strings.Join(converged, ", ")
 	}
 	a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
 	return v1alpha1.StepDone, "set sriov_numvfs: " + strings.Join(changed, ", ")
