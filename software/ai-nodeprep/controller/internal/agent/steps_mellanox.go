@@ -345,15 +345,16 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]
 	if !need {
 		return false, nil
 	}
-	if _, err := a.hostExec(nil, 120*time.Second, "mlxconfig", "-d", d.pci, "-y", "reset"); err != nil {
-		return true, append(errs, fmt.Sprintf("%s: reset: %v", d.pci, err))
+	if out, err := a.hostExec(nil, 120*time.Second, "mlxconfig", "-d", d.pci, "-y", "reset"); err != nil {
+		return true, append(errs, fmt.Sprintf("%s: reset: %v", d.pci, mlxconfigErr(out, err)))
 	}
 	args := []string{"-d", d.pci, "-y", "set"}
 	for _, kv := range flash {
 		args = append(args, kv.key+"="+kv.val)
 	}
-	if _, err := a.hostExec(nil, 120*time.Second, "mlxconfig", args...); err != nil {
-		return true, append(errs, fmt.Sprintf("%s: set: %v", d.pci, err))
+	out, err := a.hostExec(nil, 120*time.Second, "mlxconfig", args...)
+	if err != nil {
+		return true, append(errs, fmt.Sprintf("%s: set: %v", d.pci, mlxconfigErr(out, err)))
 	}
 	fresh, err := a.mlxconfigGetAll(d.pci)
 	if err != nil {
@@ -365,6 +366,29 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]
 		}
 	}
 	return true, errs
+}
+
+// mlxconfigErr enriches a failed mlxconfig exec with the tool's own
+// diagnosis. The exec error alone is Go's "exit status 3"; mlxconfig puts
+// its -E- lines in the combined output — e.g. a set above the firmware's
+// VF ceiling fails with "Parameter NUM_OF_VFS' value is larger than
+// maximum allowed 127" (live, ConnectX-4 Lx FW 14.32.1010). The over-range
+// set is rejected by input validation before any write (NV shadow verified
+// unchanged across the probe), so reading the ceiling off a deliberately
+// over-range set is safe — but the agent never needs to run one: when a
+// real set is rejected, this carries the reason into the step message
+// instead of dropping it on the exec floor.
+func mlxconfigErr(out string, err error) error {
+	var eLines []string
+	for _, line := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(line); strings.HasPrefix(s, "-E- ") {
+			eLines = append(eLines, s)
+		}
+	}
+	if len(eLines) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; %s", err, strings.Join(eLines, "; "))
 }
 
 // netplanPath is the bash gpu_fabric_eth_<rail>.yaml location.

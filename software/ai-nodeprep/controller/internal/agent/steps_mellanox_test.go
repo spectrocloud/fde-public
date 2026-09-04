@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -495,5 +496,32 @@ func TestUdevCurrent(t *testing.T) {
 	// rule files match, but /sys has no eth_r0 here — still not current
 	if udevCurrent(a, profile, rails) {
 		t.Fatalf("without the renamed runtime interface it must not be current")
+	}
+}
+
+// mlxconfigErr must carry the tool's -E- diagnosis into the step message:
+// the raw exec error is just "exit status 3", and the rejection detail is
+// in the combined output — live from the 65535 VF ceiling probe on the
+// CX-4 Lx mezz (FW 14.32.1010), where mlxconfig reports the firmware's
+// maximum in the error and rejects before any NV write.
+func TestMlxconfigErr(t *testing.T) {
+	out := "Device #1:\n----------\n" +
+		"Configurations:                                         Next Boot                         New\n" +
+		"        NUM_OF_VFS                                      4                                 65535\n" +
+		" Apply new Configuration? (y/n) [n] : y\n" +
+		"Applying... Failed!\n" +
+		"-E- Parameter NUM_OF_VFS' value is larger than maximum allowed 127\n"
+	err := mlxconfigErr(out, errors.New("exit status 3"))
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("exit status dropped: %v", err)
+	}
+	if !strings.Contains(err.Error(), "maximum allowed 127") {
+		t.Fatalf("rejection detail lost: %v", err)
+	}
+
+	// No -E- lines (e.g. a timeout or a killed exec): the error passes
+	// through untouched rather than growing an empty annotation.
+	if got := mlxconfigErr("some unrelated output", errors.New("exit status 1")); got.Error() != "exit status 1" {
+		t.Fatalf("without -E- lines the error must pass through, got %q", got.Error())
 	}
 }
