@@ -349,7 +349,8 @@ spec:
     controlDPU: <span class="s">true</span>                 <span class="c"># CONTROLDPU — policy gate on all DPU mutations</span>
     disableACS: <span class="s">true</span>                 <span class="c"># DISABLE_ACS</span>
     maxConcurrentFlashes: <span class="s">25%</span>        <span class="c"># fleet-wide flash window — fixes P7</span>
-    cordonDuringVFConfig: <span class="s">true</span>
+    <span class="c"># (no cordonDuringVFConfig: the nodeprep taint already holds the node</span>
+    <span class="c">#  unschedulable through VF config — removed 2026-09-04, operator decision)</span>
     capiPause: <span class="s">true</span>                  <span class="c"># pause CAPI Machines while nodeprep owns the node (§6.3)</span>
     workerRoleLabel: <span class="s">manage</span>          <span class="c"># remove at Finalizing, restore at Ready (§6.3)</span>
     labelCompat: <span class="s">v1</span>                  <span class="c"># regenerate spectrocloud.com/nic-N-* labels</span>

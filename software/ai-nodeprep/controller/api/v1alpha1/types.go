@@ -238,7 +238,6 @@ type PolicySpec struct {
 	ControlDPU           bool   `json:"controlDPU,omitempty"`
 	DisableACS           bool   `json:"disableACS,omitempty"`
 	MaxConcurrentFlashes int    `json:"maxConcurrentFlashes,omitempty"` // fleet flash window (design §9.1)
-	CordonDuringVFConfig bool   `json:"cordonDuringVFConfig,omitempty"`
 	CAPause              bool   `json:"capiPause,omitempty"`        // pause CAPI Machines while prepping
 	WorkerRoleLabel      string `json:"workerRoleLabel,omitempty"`  // manage | ignore
 	LabelCompat          string `json:"labelCompat,omitempty"`      // v1: mirror legacy state label

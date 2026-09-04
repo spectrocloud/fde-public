@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.44</span>
+    <span>nodeprep-v105.sh → controller v0.1.45</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.44</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.45</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -790,6 +790,16 @@
       identity on every boot-verify pass, so two owners would fight — drift → re-taint → repair → rewrite
       → endless loop. If the operator does rewrite identity, <code>vfGuids</code> must stand down (or scope
       its repair), and <code>sriovNumVFs</code>/<code>udevRules</code> need the same ownership check.</li>
+  <li><b>0.1.45 — <code>cordonDuringVFConfig</code> removed (operator decision).</b> The knob was never
+      implemented — and discussion of it established why it is redundant: the nodeprep taint (default-on,
+      <code>taintEnabled</code>) already holds the node unschedulable through the entire walk including VF
+      config, is derived state re-applied on every reconcile (self-healing, unlike the bash's imperative
+      cordon/uncordon pair which strands a cordoned node on mid-run failure), and covers the
+      <code>taintEnabled: false</code> case differently by design (that operator asked to be schedulable).
+      Field dropped from the Go struct, the CRD (live + manifests), and the design-doc example profile.
+      <b>External-manifest note:</b> the CRD copy in Kevin's management system must drop
+      <code>cordonDuringVFConfig</code> too (alongside <code>firmware.version</code> from 0.1.40) or its
+      reverts will out-vote the working tree.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -976,7 +986,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.44 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.45 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

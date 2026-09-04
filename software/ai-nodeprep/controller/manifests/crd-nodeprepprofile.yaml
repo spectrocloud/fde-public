@@ -200,8 +200,6 @@ spec:
                       description: Fleet flash window; 0 = unlimited.
                       type: integer
                       minimum: 0
-                    cordonDuringVFConfig:
-                      type: boolean
                     capiPause:
                       type: boolean
                     workerRoleLabel:
