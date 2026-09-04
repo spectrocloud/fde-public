@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.60</span>
+    <span>nodeprep-v105.sh → controller v0.1.61</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.60</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.61</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1080,6 +1080,20 @@
       <code>TestBlockedSriovShortNeedsApply</code> the outcome signal. <b>Live: the rewind fired
       on bl-r1-c2-06, the walk re-ran Configuring, raised <code>NUM_OF_VFS</code> 4→8 with the
       mlxfwreset arm, and requested its single apply reboot.</b></li>
+  <li><b>0.1.61 — the downsize warning reflects the staged-down reality (wording; the walk that
+      exercised it closed the 8→4 direction live).</b> <code>applyMlxconfig</code> stages any
+      differing <code>NUM_OF_VFS</code>, including a downward change, and since 0.1.59 the
+      firmware reset arms it for the next boot — so 0.1.58's warning claim ("the walk never
+      stages a downward change") and its "lands only after a cold power cycle" wording were both
+      wrong; corrected to: staged in firmware NV, lands on the boot that follows its
+      firmware-reset arm. <b>Live (profile gen 19, numVFs 8→4, both workers):</b> Configuring
+      staged the down + armed the reset → the first post-reset <code>sriov_numvfs</code> write
+      failed with the EIO wedge (stale vports — the reset's known hazard, VFs detached but the
+      E-Switch still wedged) → the backoff made the pass quiet → the checkpoint reboot fired →
+      the warm boot loaded <code>totalvfs=4</code> → the write succeeded on the fresh E-Switch →
+      both nodes Ready at 4 VFs/PF, identities written, downsize warning gone
+      (<code>totalvfs</code>=want). <b>The EIO-wedge-then-reboot dance is the expected shape of a
+      walk whose Configuring stage ran the firmware reset — not a defect.</b></li>
 </ul>
 
 <h3>On every node</h3>
@@ -1270,7 +1284,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.60 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.61 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
