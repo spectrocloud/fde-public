@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -106,6 +107,12 @@ type Agent struct {
 	// must ride runStage's own ledger patch, since a patch from inside the
 	// step body would be clobbered by runStage's full-ledger write.
 	sriovRewindRequested bool
+
+	// sriovPluginBouncePending marks a failed device-plugin bounce (0.1.62):
+	// the Ready-phase verify passes retry it via bounceSriovDevicePlugin
+	// until it succeeds. In-memory by design — an agent restart loses one
+	// retry, not the walk; the pod list is the only state.
+	sriovPluginBouncePending bool
 
 	// lastBootVerify paces Ready-phase boot-verify: verify runs immediately
 	// on a boot change, otherwise at most every bootVerifyInterval (the
@@ -724,6 +731,17 @@ func (a *Agent) finalizeAndVerify(ctx context.Context, np *v1alpha1.NodePrep, pr
 			"runtime-critical steps verified on boot "+np.Status.BootID, 0)
 		_ = a.patchStatus(ctx, map[string]interface{}{"conditions": conds})
 		a.setPhase(ctx, v1alpha1.PhaseReady, "boot-verify", "all stages complete and boot verified; taint release follows")
+		// The node's VF state is settled: bounce the NVIDIA Network
+		// Operator's SR-IOV device plugin if one is running here, so it
+		// restarts against the walk's final device inventory. The plugin
+		// discovers VFs once at startup and does not watch sysfs — after a
+		// VF-count change that lands without a reboot, its advertised
+		// inventory goes stale (Kevin, 2026-09-04, live on the 4→0
+		// downsize). Best-effort and AFTER the phase flip, so a bounce
+		// failure can never hold the walk back from Ready; the replacement
+		// pod may sit Pending for the few seconds until the controller
+		// releases the taint, which the DaemonSet retries on its own.
+		a.bounceSriovDevicePlugin(ctx)
 		return
 	}
 	conds := np.Status.Conditions
@@ -731,6 +749,71 @@ func (a *Agent) finalizeAndVerify(ctx context.Context, np *v1alpha1.NodePrep, pr
 		"boot verification has not passed", 0)
 	_ = a.patchStatus(ctx, map[string]interface{}{"conditions": conds})
 	a.emit(ctx, corev1.EventTypeWarning, "BootVerifyFailed", "runtime-critical steps are not clean; staying in Finalizing")
+}
+
+// The NVIDIA Network Operator's SR-IOV device plugin: the DaemonSet whose
+// pod advertises this node's VF devices to the scheduler. Identified by pod
+// name prefix in the operator's namespace — labels churn between operator
+// releases, the names do not.
+const (
+	sriovDevicePluginNamespace  = "nvidia-network-operator"
+	sriovDevicePluginNamePrefix = "network-operator-sriov-device-plugin-"
+)
+
+// bounceSriovDevicePlugin deletes this node's sriov-device-plugin pod so the
+// DaemonSet recreates it and re-discovers the device inventory. Fired at the
+// walk's flip to Ready (finalizeAndVerify) and retried from the Ready-phase
+// verify passes while an attempt is pending. Requires pods list/delete for
+// the agent's ClusterRole (externally enforced manifests — without them the
+// attempt fails and retries, surfacing the permission gap in the logs).
+func (a *Agent) bounceSriovDevicePlugin(ctx context.Context) {
+	pods, err := a.client.CoreV1().Pods(sriovDevicePluginNamespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + a.nodeName,
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Cluster without the Network Operator: nothing to bounce.
+			a.sriovPluginBouncePending = false
+			return
+		}
+		a.bounceFailed(ctx, fmt.Sprintf("listing pods in %s: %v", sriovDevicePluginNamespace, err))
+		return
+	}
+	bounced, failed := 0, false
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		// NodeName is checked client-side too: fake clients (tests) ignore
+		// field selectors, and it keeps the filter true regardless of what
+		// the server honors.
+		if p.Spec.NodeName != a.nodeName || !strings.HasPrefix(p.Name, sriovDevicePluginNamePrefix) {
+			continue
+		}
+		if err := a.client.CoreV1().Pods(sriovDevicePluginNamespace).Delete(ctx, p.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			// NotFound = another actor (the DaemonSet controller) beat us
+			// to it; the pod is gone either way.
+			failed = true
+			a.logf("device-plugin bounce: delete %s failed: %v", p.Name, err)
+			continue
+		}
+		bounced++
+	}
+	if bounced > 0 {
+		a.emit(ctx, corev1.EventTypeNormal, "DevicePluginBounced",
+			fmt.Sprintf("deleted %d %spod(s) so the SR-IOV device plugin restarts and re-discovers the node's VF state", bounced, sriovDevicePluginNamePrefix))
+	}
+	a.sriovPluginBouncePending = failed
+}
+
+// bounceFailed records a failed bounce and raises the condition exactly once
+// per pending stretch — the 5-minute retries must not spam events.
+func (a *Agent) bounceFailed(ctx context.Context, detail string) {
+	if !a.sriovPluginBouncePending {
+		a.emit(ctx, corev1.EventTypeWarning, "DevicePluginBounceFailed",
+			"could not bounce the SR-IOV device plugin ("+detail+"); will retry on Ready verify passes")
+	} else {
+		a.logf("device-plugin bounce retry failed: %s", detail)
+	}
+	a.sriovPluginBouncePending = true
 }
 
 // verifyReady re-checks a Ready node: boot-verify must pass on the current
@@ -744,6 +827,12 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 	newBoot := a.lastBootVerify.bootID != bootID
 	if !newBoot && time.Since(a.lastBootVerify.at) < bootVerifyInterval {
 		return
+	}
+	// A failed bounce retries here — at the verify cadence, not the poll
+	// cadence, so a permanent failure (missing RBAC, no operator) logs one
+	// line per 5 minutes rather than one per poll.
+	if a.sriovPluginBouncePending {
+		a.bounceSriovDevicePlugin(ctx)
 	}
 	verified := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionBootVerified) == "True"
 	defer func() { a.lastBootVerify.bootID, a.lastBootVerify.at = bootID, time.Now() }()
