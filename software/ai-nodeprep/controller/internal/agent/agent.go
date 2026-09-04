@@ -448,9 +448,14 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		return
 	}
 
-	// Run the current stage.
+	// Run the current stage. The cold overlay phase (0.1.54) belongs here
+	// too: parking the phase must not stop the walk, because the Finalizing
+	// step bodies are what re-check sriov_totalvfs and observe the
+	// convergence after the operator's power cycle. Without the case the
+	// switch idled in UnknownPhase and the halt could never clear
+	// (0.1.55; found live on bl-r1-c2-06 during its power cycle).
 	switch np.Status.Phase {
-	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
+	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing, v1alpha1.PhaseColdRebootRequired:
 		a.runStage(ctx, np, profile)
 		a.checkpointReboot(ctx)
 	case v1alpha1.PhaseReady:
