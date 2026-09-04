@@ -222,12 +222,38 @@ func (a *Agent) patchStatus(ctx context.Context, partial map[string]interface{})
 	return err
 }
 
-func (a *Agent) setPhase(ctx context.Context, phase v1alpha1.Phase, reason, message string) {
+func (a *Agent) setPhase(ctx context.Context, phase v1alpha1.Phase, reason, message string) error {
 	if err := a.patchStatus(ctx, map[string]interface{}{"phase": string(phase)}); err != nil {
 		a.logf("phase patch to %s failed: %v", phase, err)
-		return
+		return err
 	}
 	a.emit(ctx, corev1.EventTypeNormal, "PhaseTransition", fmt.Sprintf("phase -> %s (%s): %s", phase, reason, message))
+	return nil
+}
+
+// syncColdPhase mirrors the SR-IOV cold halt into .status.phase (0.1.54):
+// while the ColdRebootRequired condition is True mid-walk in Finalizing,
+// the phase reads ColdRebootRequired so an operator sees at a glance that
+// the node waits for a manual power cycle; when the condition clears the
+// phase resumes the Finalizing walk it parked. Both directions only fire
+// on an actual mismatch, so the 5s poll never churns the phase. A Ready
+// node (boot-verify re-runs the sriov step body) and a Failed node keep
+// their phase — the condition alone names the situation there, and
+// resuming from the ledger stage would wrongly demote Ready.
+func (a *Agent) syncColdPhase(ctx context.Context, np *v1alpha1.NodePrep) {
+	cold := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionColdRebootRequired) == "True"
+	switch {
+	case cold && np.Status.Phase == v1alpha1.PhaseFinalizing:
+		if err := a.setPhase(ctx, v1alpha1.PhaseColdRebootRequired, "cold reboot required",
+			"firmware NV changes need a manual power cycle (power off, then on); the walk parks here until then"); err == nil {
+			np.Status.Phase = v1alpha1.PhaseColdRebootRequired
+		}
+	case !cold && np.Status.Phase == v1alpha1.PhaseColdRebootRequired:
+		if err := a.setPhase(ctx, v1alpha1.PhaseFinalizing, "cold halt resolved",
+			"the ColdRebootRequired condition cleared; the parked Finalizing walk resumes"); err == nil {
+			np.Status.Phase = v1alpha1.PhaseFinalizing
+		}
+	}
 }
 
 // cycle is one reconciliation pass.
@@ -366,6 +392,11 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			np.Status.Conditions = conds
 		}
 	}
+
+	// The cold halt shows in the phase at a glance (0.1.54); see
+	// syncColdPhase. Runs before every early return so the phase stays
+	// truthful even while a requested reboot holds the walk.
+	a.syncColdPhase(ctx, np)
 
 	// Resume annotation on a Failed NodePrep (design §5.2 recovery).
 	if np.Status.Phase == v1alpha1.PhaseFailed {
@@ -511,7 +542,7 @@ func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, pro
 // runStage executes the steps of the current phase, advances on completion,
 // and enforces the flash window / CP admission gates (design §5.2, §9.1).
 func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) {
-	phase := np.Status.Phase
+	phase := walkStageFor(np.Status.Phase)
 	// Quiescence signal for the reboot checkpoint: only a pass that actually
 	// changed a step counts as progress; early returns (admission gates)
 	// leave it false so an already-applied mutation's reboot still fires.
@@ -804,6 +835,19 @@ func firstStepNamed(steps []v1alpha1.StepStatus, state v1alpha1.StepState) strin
 		}
 	}
 	return "unknown"
+}
+
+// walkStageFor resolves the stage whose steps a walk pass executes. The
+// cold overlay phase (0.1.54) parks the Finalizing walk but must NOT stop
+// it: its step bodies are what re-check sriov_totalvfs and observe the
+// convergence after the operator's power cycle. Everything phase-keyed in
+// runStage — step selection, ledger backfill, stage advance — goes through
+// this mapping.
+func walkStageFor(p v1alpha1.Phase) v1alpha1.Phase {
+	if p == v1alpha1.PhaseColdRebootRequired {
+		return v1alpha1.PhaseFinalizing
+	}
+	return p
 }
 
 func nextStage(p v1alpha1.Phase) (v1alpha1.Phase, bool) {

@@ -46,6 +46,12 @@ func TestLegacyMirror(t *testing.T) {
 	if v, _ := LegacyFor(v1alpha1.PhaseReady); v != "complete" {
 		t.Error("Ready must mirror to complete")
 	}
+	// The cold overlay parks the precomplete stage: it mirrors the label a
+	// bash-era consumer expects, and deliberately does NOT round-trip
+	// (FromLegacy("precomplete") is Finalizing — the import re-verifies).
+	if v, err := LegacyFor(v1alpha1.PhaseColdRebootRequired); err != nil || v != "precomplete" {
+		t.Errorf("LegacyFor(ColdRebootRequired) = %q, %v; want precomplete", v, err)
+	}
 }
 
 func TestAtLeast(t *testing.T) {
@@ -57,5 +63,14 @@ func TestAtLeast(t *testing.T) {
 	}
 	if AtLeast(v1alpha1.PhaseFailed, v1alpha1.PhasePending) {
 		t.Error("Failed is never at least anything")
+	}
+	if !AtLeast(v1alpha1.PhaseColdRebootRequired, v1alpha1.PhaseFinalizing) {
+		t.Error("the cold overlay parks Finalizing, so it is at least Finalizing")
+	}
+	if !AtLeast(v1alpha1.PhaseReady, v1alpha1.PhaseColdRebootRequired) {
+		t.Error("Ready is past the cold overlay")
+	}
+	if AtLeast(v1alpha1.PhaseColdRebootRequired, v1alpha1.PhaseReady) {
+		t.Error("the cold overlay is not at Ready")
 	}
 }

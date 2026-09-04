@@ -139,7 +139,7 @@ func TestWorkerLabelDecision(t *testing.T) {
 	if WorkerLabelDecision(v1alpha1.PhaseReady, pol) != WorkerLabelSet {
 		t.Error("Ready must restore the worker label")
 	}
-	for _, p := range []v1alpha1.Phase{v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFailed} {
+	for _, p := range []v1alpha1.Phase{v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseColdRebootRequired, v1alpha1.PhaseFailed} {
 		if WorkerLabelDecision(p, pol) != WorkerLabelNone {
 			t.Errorf("phase %v must not touch the worker label", p)
 		}

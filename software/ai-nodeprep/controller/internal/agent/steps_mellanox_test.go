@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -684,4 +687,87 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 		}
 	}
 	t.Fatalf("the sibling PF's warm-load request must survive .0's cold halt regardless of loop order, got %+v", a.pendingReboot)
+}
+
+// TestSyncColdPhase pins the phase overlay (0.1.54): the cold halt reads in
+// .status.phase mid-walk, lifts when the condition clears, and never moves
+// a Ready or Failed node.
+func TestSyncColdPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": v1alpha1.GroupName + "/" + v1alpha1.Version,
+		"kind":       v1alpha1.NodePrepKind,
+		"metadata":   map[string]interface{}{"name": "node-1"},
+	}}
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	setAPIPhase := func(phase string) {
+		patch, _ := json.Marshal(map[string]interface{}{"status": map[string]interface{}{"phase": phase}})
+		if _, err := dyn.Resource(nodePrepsGVR).Patch(context.Background(), "node-1", types.MergePatchType, patch, metav1.PatchOptions{}, "status"); err != nil {
+			t.Fatalf("setting API phase to %s: %v", phase, err)
+		}
+	}
+	readPhase := func() string {
+		u, err := dyn.Resource(nodePrepsGVR).Get(context.Background(), "node-1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("reading back: %v", err)
+		}
+		ph, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+		return ph
+	}
+	coldTrue := []metav1.Condition{{Type: v1alpha1.ConditionColdRebootRequired, Status: "True"}}
+
+	// Finalizing + cold -> the phase names the manual action.
+	setAPIPhase("Finalizing")
+	a := &Agent{nodeName: "node-1", dyn: dyn, client: clientfake.NewSimpleClientset(), allowReboot: true}
+	np := &v1alpha1.NodePrep{}
+	np.Status.Phase = v1alpha1.PhaseFinalizing
+	np.Status.Conditions = coldTrue
+	a.syncColdPhase(context.Background(), np)
+	if np.Status.Phase != v1alpha1.PhaseColdRebootRequired {
+		t.Fatalf("cold halt mid-walk must set the phase, got %s", np.Status.Phase)
+	}
+	if got := readPhase(); got != string(v1alpha1.PhaseColdRebootRequired) {
+		t.Fatalf("API phase = %q, want ColdRebootRequired", got)
+	}
+
+	// Halted + still cold: no churn on repeated passes.
+	a.syncColdPhase(context.Background(), np)
+	if got := readPhase(); got != string(v1alpha1.PhaseColdRebootRequired) {
+		t.Fatalf("repeated passes must not churn the phase, got %q", got)
+	}
+
+	// Condition cleared -> resume the parked Finalizing walk.
+	np.Status.Conditions = nil
+	a.syncColdPhase(context.Background(), np)
+	if np.Status.Phase != v1alpha1.PhaseFinalizing {
+		t.Fatalf("cleared condition must resume Finalizing, got %s", np.Status.Phase)
+	}
+	if got := readPhase(); got != string(v1alpha1.PhaseFinalizing) {
+		t.Fatalf("API phase after resume = %q, want Finalizing", got)
+	}
+
+	// Ready keeps its phase even with the condition set (boot-verify
+	// re-runs the sriov body; the condition alone names the regression).
+	setAPIPhase("Ready")
+	np2 := &v1alpha1.NodePrep{}
+	np2.Status.Phase = v1alpha1.PhaseReady
+	np2.Status.Conditions = coldTrue
+	a.syncColdPhase(context.Background(), np2)
+	if np2.Status.Phase != v1alpha1.PhaseReady || readPhase() != "Ready" {
+		t.Fatalf("Ready must keep its phase under the cold condition (got in-memory %s, api %q)", np2.Status.Phase, readPhase())
+	}
+
+	// Failed likewise — recovery is the resume annotation, not the overlay.
+	setAPIPhase("Failed")
+	np3 := &v1alpha1.NodePrep{}
+	np3.Status.Phase = v1alpha1.PhaseFailed
+	np3.Status.Conditions = coldTrue
+	a.syncColdPhase(context.Background(), np3)
+	if np3.Status.Phase != v1alpha1.PhaseFailed || readPhase() != "Failed" {
+		t.Fatalf("Failed must keep its phase under the cold condition (got in-memory %s, api %q)", np3.Status.Phase, readPhase())
+	}
 }

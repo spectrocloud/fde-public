@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.53</span>
+    <span>nodeprep-v105.sh → controller v0.1.54</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.53</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.54</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -940,6 +940,30 @@
       aggregated mlxconfig applies), <code>requestRebootBg</code> dedups on reason+PCI, and the cold
       drop targets only the cold PF's own PCI. Stale same-PF requests die; sibling and unrelated
       requests survive, whatever order the loop ran in.</li>
+  <li><b>0.1.54 — the halt reads in <code>.status.phase</code>, not just conditions (Kevin's ask):
+      a new <code>ColdRebootRequired</code> phase overlays the walk.</b> c2-06 sat in
+      <code>Finalizing</code> with the halt engaged — truthful to the state machine, invisible to
+      anyone not opening conditions or step messages. A new phase constant now overlays the parked
+      walk: <code>syncColdPhase</code> runs every cycle before any early return and flips
+      <code>Finalizing → ColdRebootRequired</code> when the condition is True mid-walk, and back the
+      moment it clears; both directions only fire on an actual mismatch, so the 5s poll never
+      churns. The overlay deliberately does NOT stop the walk — the Finalizing step bodies are what
+      re-check <code>sriov_totalvfs</code> and observe convergence after the operator's power cycle —
+      so <code>walkStageFor</code> maps the overlay back onto Finalizing for step selection, ledger
+      backfill, and stage advance (a full convergence pass from the overlay advances straight to
+      Ready). Guards: a Ready node (boot-verify re-runs the sriov body) and a Failed node keep their
+      phase — the condition alone names the situation there, and resuming from the ledger stage would
+      wrongly demote Ready. The phase orders between Finalizing and Ready
+      (<code>AtLeast</code> at 4.5); <code>LegacyFor</code> mirrors it to
+      <code>precomplete</code> (the stage it parks), so bash-era label consumers see a value they
+      know; <code>TaintShouldExist</code> and <code>WorkerLabelDecision</code> key off
+      Ready/Finalizing explicitly, so the new value defaults safely (taint stays, worker label
+      untouched). <b>CRD note:</b> <code>status.phase</code> is enum-validated and the cluster CRD is
+      enforced by the external management system — the repo manifest gains
+      <code>ColdRebootRequired</code>, but deployment of 0.1.54 waits for the CRD update to land
+      through that system; until then the agent logs (and retries) the rejected phase patch while
+      conditions and steps keep working. Unit-tested: <code>TestSyncColdPhase</code> (activate,
+      no-churn, resume, Ready/Failed guards), phases ordering + legacy mirror, worker-label default.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1130,7 +1154,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.53 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.54 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

@@ -43,6 +43,16 @@ const (
 	PhaseFinalizing   Phase = "Finalizing"
 	PhaseReady        Phase = "Ready"
 	PhaseFailed       Phase = "Failed"
+
+	// PhaseColdRebootRequired overlays the walk while the SR-IOV NV cold
+	// halt waits for the operator's manual power cycle (0.1.54): the walk
+	// underneath is still Finalizing and keeps running (only its step
+	// bodies can observe the post-power-cycle convergence), but
+	// .status.phase must say at a glance that manual action is required.
+	// It applies only mid-walk in Finalizing — the only stage whose steps
+	// raise the halt — and lifts back to Finalizing when the
+	// ColdRebootRequired condition clears.
+	PhaseColdRebootRequired Phase = "ColdRebootRequired"
 )
 
 // Step states (design §5.1).

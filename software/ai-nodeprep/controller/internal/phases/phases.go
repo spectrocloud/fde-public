@@ -8,14 +8,17 @@ import (
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
-var order = map[v1alpha1.Phase]int{
+var order = map[v1alpha1.Phase]float64{
 	v1alpha1.PhasePending:      0,
 	v1alpha1.PhaseProvisioning: 1,
 	v1alpha1.PhaseFlashing:     2,
 	v1alpha1.PhaseConfiguring:  3,
 	v1alpha1.PhaseFinalizing:   4,
-	v1alpha1.PhaseReady:        5,
-	v1alpha1.PhaseFailed:       -1,
+	// The cold overlay parks the Finalizing walk: past Finalizing's own
+	// convergence point but never at Ready (0.1.54).
+	v1alpha1.PhaseColdRebootRequired: 4.5,
+	v1alpha1.PhaseReady:              5,
+	v1alpha1.PhaseFailed:             -1,
 }
 
 // AtLeast reports whether p is at or past other in the bring-up ordering.
@@ -37,6 +40,10 @@ func LegacyFor(p v1alpha1.Phase) (string, error) {
 	case v1alpha1.PhaseConfiguring:
 		return "config", nil
 	case v1alpha1.PhaseFinalizing:
+		return "precomplete", nil
+	case v1alpha1.PhaseColdRebootRequired:
+		// The overlay parks the precomplete stage; the legacy label keeps
+		// the value a bash-era consumer expects while the walk is halted.
 		return "precomplete", nil
 	case v1alpha1.PhaseReady:
 		return "complete", nil

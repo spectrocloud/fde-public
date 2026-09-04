@@ -72,6 +72,7 @@ spec:
                     - Flashing
                     - Configuring
                     - Finalizing
+                    - ColdRebootRequired
                     - Ready
                     - Failed
                 observedProfileGeneration:
