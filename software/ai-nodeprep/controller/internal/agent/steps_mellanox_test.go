@@ -1,13 +1,22 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientfake "k8s.io/client-go/kubernetes/fake"
+
 	"spectrocloud.com/nodeprep/api/v1alpha1"
+	"spectrocloud.com/nodeprep/internal/k8sutil"
 )
 
 // Classification mirrors the bash fn_inventory_hw description parsing: the
@@ -393,22 +402,96 @@ func TestStepDisableACSVFExclusivity(t *testing.T) {
 // exercised live on the test node instead — covered by the live verification
 // in the 0.1.45 walk (vendor_id: GenuineIntel → intel_iommu=on derived).
 
-// sriovNvPendingLoad is the commit/load two-boot predicate: the NV NUM_OF_VFS
-// already satisfies the demand while the running sriov_totalvfs lags. In that
-// state stepSriovNumVFs records its own load-reboot request (0.1.46, live on
-// CX-4 Lx FW 14.32.1010) instead of stalling Blocked forever.
-func TestSriovNvPendingLoad(t *testing.T) {
-	if !sriovNvPendingLoad("4", 1, 4) {
-		t.Fatalf("NV 4 / totalvfs 1 / want 4: committed-but-not-loaded must hold")
+// sriovTotalvfsOutcome is the sriov-nv-stage machine (0.1.51): the stage
+// annotation is the clock, exactly one warm load reboot is ever requested,
+// and a boot past a cold halt never re-arms the cycle. Replaces
+// sriovNvPendingLoad (0.1.46-0.1.50), which requested a load reboot every
+// Blocked pass — and whose 0.1.50 in-memory pass counter reset on every
+// boot, so the cycle never actually capped (bl-r1-c2-06 reboot-cycled
+// live through r3→r4→r5).
+func TestSriovTotalvfsOutcome(t *testing.T) {
+	staged := sriovNvStage{NV: 4, Reboots: 7, State: sriovStateStaged}
+	load := sriovNvStage{NV: 4, Reboots: 8, State: sriovStateLoad}
+	cold := sriovNvStage{NV: 4, Reboots: 9, State: sriovStateCold}
+
+	// staged, same boot: the apply reboot is still pending — hold, no write.
+	if out, next := sriovTotalvfsOutcome(staged, 4, 7); out != sriovStagedWait || next != nil {
+		t.Fatalf("staged at reboots=7 on boot 7: want stagedWait/no-write, got %d/%v", out, next)
 	}
-	if sriovNvPendingLoad("4", 4, 4) {
-		t.Fatalf("NV 4 / totalvfs 4 / want 4: converged, no load reboot")
+
+	// staged, boot advanced: the commit boot ran — request the warm load
+	// and move the stage to load at the new boot count.
+	out, next := sriovTotalvfsOutcome(staged, 4, 8)
+	if out != sriovWarmLoad || next == nil || next.State != sriovStateLoad || next.Reboots != 8 || next.NV != 4 {
+		t.Fatalf("staged at 7 on boot 8: want warmLoad/load@8, got %d/%v", out, next)
 	}
-	if sriovNvPendingLoad("2", 1, 4) {
-		t.Fatalf("NV 2 < want 4: the mlxconfig step still owes the apply, not a load boot")
+
+	// load, same boot: the warm load is already requested (requestRebootBg
+	// dedups), nothing to persist.
+	if out, next := sriovTotalvfsOutcome(load, 4, 8); out != sriovWarmLoad || next != nil {
+		t.Fatalf("load at 8 on boot 8: want warmLoad/no-write, got %d/%v", out, next)
 	}
-	if sriovNvPendingLoad("", 1, 4) {
-		t.Fatalf("unreadable NUM_OF_VFS must not request a load reboot")
+
+	// load, boot advanced: the warm load did not land — halt cold.
+	out, next = sriovTotalvfsOutcome(load, 4, 9)
+	if out != sriovWarmSpent || next == nil || next.State != sriovStateCold || next.Reboots != 9 {
+		t.Fatalf("load at 8 on boot 9: want warmSpent/cold@9, got %d/%v", out, next)
+	}
+
+	// cold, same boot: hold for the operator's power cycle, no write.
+	if out, next := sriovTotalvfsOutcome(cold, 4, 9); out != sriovColdHold || next != nil {
+		t.Fatalf("cold at 9 on boot 9: want coldHold/no-write, got %d/%v", out, next)
+	}
+
+	// cold, boot advanced: a boot ran since the halt and the count is still
+	// short — spent; the message flips to "if the cycle already happened,
+	// lower numVFs". No write, no reboot request.
+	if out, next := sriovTotalvfsOutcome(cold, 4, 10); out != sriovColdSpent || next != nil {
+		t.Fatalf("cold at 9 on boot 10: want coldSpent/no-write, got %d/%v", out, next)
+	}
+
+	// NV below the demand — or no stage at all: the mlxconfig step owes the
+	// apply, whatever the recorded state says.
+	for _, st := range []sriovNvStage{staged, load, cold, {NV: 0, Reboots: 12, State: sriovStateCold}, {}} {
+		if out, next := sriovTotalvfsOutcome(st, 8, 12); out != sriovNeedsApply || next != nil {
+			t.Fatalf("stage %+v with want 8: want needsApply/no-write, got %d/%v", st, out, next)
+		}
+	}
+}
+
+// setSriovStage merges one PF's entry over the others in the annotation and
+// mirrors it into np.Annotations (the fake client's tracker serves the
+// NodePrep, so the metadata patch succeeds and the mirror runs).
+func TestSriovStageAnnotationMerge(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{}
+	npU.SetGroupVersionKind(schema.GroupVersionKind{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: v1alpha1.NodePrepKind})
+	npU.SetName("node-1")
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	a := &Agent{nodeName: "node-1", dyn: dyn}
+
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	a.setSriovStage(np, "0000:49:00.0", sriovNvStage{NV: 4, Reboots: 7, State: sriovStateStaged})
+	a.setSriovStage(np, "0000:49:00.1", sriovNvStage{NV: 4, Reboots: 8, State: sriovStateLoad})
+
+	m := sriovStageParse(np.Annotations[sriovNvStageAnnotation])
+	if len(m) != 2 {
+		t.Fatalf("want both PFs merged into one annotation, got %+v", m)
+	}
+	if m["0000:49:00.0"].State != sriovStateStaged || m["0000:49:00.1"].State != sriovStateLoad {
+		t.Fatalf("per-PF entries clobbered each other: %+v", m)
+	}
+
+	// Absent or corrupt annotation parses as untracked, never a half-stage.
+	if m := sriovStageParse(""); len(m) != 0 {
+		t.Fatalf("empty annotation must parse as untracked, got %+v", m)
+	}
+	if m := sriovStageParse("not json at all"); len(m) != 0 {
+		t.Fatalf("corrupt annotation must parse as untracked, got %+v", m)
 	}
 }
 
@@ -523,5 +606,58 @@ func TestMlxconfigErr(t *testing.T) {
 	// through untouched rather than growing an empty annotation.
 	if got := mlxconfigErr("some unrelated output", errors.New("exit status 1")); got.Error() != "exit status 1" {
 		t.Fatalf("without -E- lines the error must pass through, got %q", got.Error())
+	}
+}
+
+// blockedSriovShort's cold states must never leave a pending reboot
+// request behind: the halt IS the fix for 0.1.51's reboot cycle. The
+// cold-hold path exercised here runs with an empty pendingReboot and
+// returns Blocked with the power-cycle instruction.
+func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{}
+	npU.SetGroupVersionKind(schema.GroupVersionKind{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: v1alpha1.NodePrepKind})
+	npU.SetName("node-1")
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	a := &Agent{nodeName: "node-1", dyn: dyn, client: clientfake.NewSimpleClientset(), allowReboot: true}
+
+	// A cold-halted PF, one boot after the halt: Blocked with the
+	// cold-cycle instruction, ColdRebootRequired=True, and — the point —
+	// no reboot request recorded, so checkpointReboot has nothing to fire.
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"cold"}}`}
+	np.Status.Reboots.Total = 9
+	state, msg := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if state != v1alpha1.StepBlocked {
+		t.Fatalf("cold hold must block, got %s", state)
+	}
+	if !strings.Contains(msg, "cold power cycle") || !strings.Contains(msg, "no further reboots") {
+		t.Fatalf("cold-hold message must instruct the power cycle and promise the halt: %q", msg)
+	}
+	if got := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionColdRebootRequired); got != "True" {
+		t.Fatalf("ColdRebootRequired must be True on a cold hold, got %q", got)
+	}
+	if len(a.pendingReboot) != 0 {
+		t.Fatalf("the cold halt must not record a reboot request, got %+v", a.pendingReboot)
+	}
+
+	// The warm-attempt-spent transition (load@9 on boot 10) moves to cold
+	// and likewise records nothing.
+	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"load"}}`}
+	np2.Status.Reboots.Total = 10
+	state, msg = a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "power the node down and back up") {
+		t.Fatalf("warm spent must halt with the power-cycle instruction, got %s/%q", state, msg)
+	}
+	if len(a.pendingReboot) != 0 {
+		t.Fatalf("warmSpent must not record a reboot request, got %+v", a.pendingReboot)
+	}
+	if st := sriovStageParse(np2.Annotations[sriovNvStageAnnotation])["0000:49:00.0"]; st.State != sriovStateCold || st.Reboots != 10 {
+		t.Fatalf("warmSpent must persist the cold stage at the new boot count, got %+v", st)
 	}
 }

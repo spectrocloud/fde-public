@@ -9,8 +9,10 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -737,76 +739,226 @@ func stepNeedsMFT(tool, what string) func(*Agent, *v1alpha1.NodePrep, *v1alpha1.
 	}
 }
 
+// sriovNvStageAnnotation tracks, per Mellanox PF, where a NUM_OF_VFS
+// change stands relative to the node's reboot count (0.1.51). The stage
+// state machine lives in NodePrep metadata — not agent memory — because
+// every reboot restarts the agent: 0.1.50's in-memory counter counted poll
+// passes (the step re-runs every 5s while Blocked), reset on every boot,
+// and as a result never capped anything — bl-r1-c2-06 reboot-cycled live.
+const sriovNvStageAnnotation = "nodeprep.spectrocloud.com/sriov-nv-stage"
+
+// sriovNvStage is one PF's position in the SR-IOV NV pipeline:
+//   - staged: the mlxconfig step wrote the shadow value; its apply reboot
+//     commits it (this firmware class commits a change on the boot after
+//     the set — 0.1.46).
+//   - load: committed; the ONE warm reboot that loads it has been
+//     requested.
+//   - cold: the warm load did not expose the VFs (sriov_totalvfs still
+//     short); the walk halted its reboot cycle and ColdRebootRequired
+//     asks the operator to power the node down and back up.
+//
+// Reboots is the node's Reboots.Total when the state was recorded — the
+// clock that tells a later boot from a later poll pass.
+type sriovNvStage struct {
+	NV      int    `json:"nv"`
+	Reboots int    `json:"reboots"`
+	State   string `json:"state"`
+}
+
+const (
+	sriovStateStaged = "staged"
+	sriovStateLoad   = "load"
+	sriovStateCold   = "cold"
+)
+
+// sriovStageParse decodes the annotation; absent or corrupt input yields
+// an empty map (every stage untracked).
+func sriovStageParse(v string) map[string]sriovNvStage {
+	m := map[string]sriovNvStage{}
+	if v == "" {
+		return m
+	}
+	_ = json.Unmarshal([]byte(v), &m)
+	return m
+}
+
+// setSriovStage records one PF's stage, merged over the other PFs'
+// entries, and mirrors it into np.Annotations so the same pass and later
+// passes read the value the API now holds.
+func (a *Agent) setSriovStage(np *v1alpha1.NodePrep, pci string, st sriovNvStage) {
+	m := sriovStageParse(np.Annotations[sriovNvStageAnnotation])
+	m[pci] = st
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if err := a.setAnnotation(np, sriovNvStageAnnotation, string(b)); err != nil {
+		a.logf("sriov-nv-stage annotation update failed: %v", err)
+	}
+}
+
+// sriovStageOutcome is what a sriov_totalvfs shortfall wants next, given
+// the PF's stage and the node's reboot count.
+type sriovStageOutcome int
+
+const (
+	sriovNeedsApply sriovStageOutcome = iota // NV does not satisfy the demand: the mlxconfig step's apply reboot lands it
+	sriovStagedWait                          // staged; the apply reboot has not run yet: hold
+	sriovWarmLoad                            // committed: request the one warm load reboot
+	sriovWarmSpent                           // the warm load boot ran, sriov_totalvfs still short: halt cold
+	sriovColdHold                            // halted; waiting for the operator's power cycle
+	sriovColdSpent                           // a boot ran after the halt, sriov_totalvfs still short
+)
+
+// sriovTotalvfsOutcome advances the stage machine. The stage annotation is
+// the clock: a state recorded at Reboots=R is stale once the node's boot
+// counter passes R — one boot after staged commits the NV, one boot after
+// the load request is the warm load attempt, and a boot after cold means
+// the operator (or something else) rebooted a halted walk. The machine
+// requests exactly one warm load reboot; from warmSpent on it never asks
+// for another — only the operator's power cycle can move sriov_totalvfs
+// (0.1.51, revisiting the 0.1.46 "warm reboots suffice" reading: warm
+// loads work on some hardware and not on others, live on identical CX-4 Lx
+// FW 14.32.1010). next is the stage to persist, nil when the outcome
+// changes nothing.
+func sriovTotalvfsOutcome(st sriovNvStage, want, reboots int) (sriovStageOutcome, *sriovNvStage) {
+	if st.State == "" || st.NV < want {
+		return sriovNeedsApply, nil
+	}
+	switch st.State {
+	case sriovStateStaged:
+		if reboots > st.Reboots {
+			return sriovWarmLoad, &sriovNvStage{NV: st.NV, Reboots: reboots, State: sriovStateLoad}
+		}
+		return sriovStagedWait, nil
+	case sriovStateLoad:
+		if reboots > st.Reboots {
+			return sriovWarmSpent, &sriovNvStage{NV: st.NV, Reboots: reboots, State: sriovStateCold}
+		}
+		return sriovWarmLoad, nil
+	case sriovStateCold:
+		if reboots > st.Reboots {
+			return sriovColdSpent, nil
+		}
+		return sriovColdHold, nil
+	}
+	return sriovNeedsApply, nil
+}
+
+// totalvfsAdvice explains a running firmware that exposes less SR-IOV than
+// the profile wants while the committed NV does not yet satisfy the
+// demand — i.e. the mlxconfig step still owes the apply. capMissing adapts
+// the wording for a PF with no SR-IOV PCIe capability at all.
+func (a *Agent) totalvfsAdvice(nic pciDevice, want int, capMissing bool) string {
+	if _, err := findHostTool("mlxconfig"); err != nil {
+		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
+	}
+	vals, err := a.mlxconfigGetAll(nic.pci)
+	if err != nil {
+		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
+	}
+	if capMissing {
+		return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d, and the apply reboot plus NV load expose the SR-IOV PCIe capability", vals["NUM_OF_VFS"], want)
+	}
+	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", vals["NUM_OF_VFS"], want)
+}
+
+// setSriovColdReboot maintains the ColdRebootRequired condition (0.1.51):
+// True from the moment the warm load attempt is spent, False again as soon
+// as no PF is cold-halted. Patches (and warns) only on a transition —
+// SetCondition no-ops when status, reason and message are unchanged, so
+// the 5s poll does not churn the NodePrep.
+func (a *Agent) setSriovColdReboot(np *v1alpha1.NodePrep, active bool, msg string) {
+	status, reason := "False", v1alpha1.ReasonVerified
+	if active {
+		status, reason = "True", v1alpha1.ReasonStepsBlocked
+	}
+	conds := np.Status.Conditions
+	if k8sutil.SetCondition(&conds, v1alpha1.ConditionColdRebootRequired, status, reason, msg, 0) {
+		np.Status.Conditions = conds
+		if err := a.patchStatus(context.Background(), map[string]interface{}{"conditions": conds}); err != nil {
+			a.logf("ColdRebootRequired condition patch failed: %v", err)
+		}
+		if active {
+			a.emit(context.Background(), corev1.EventTypeWarning, "ColdRebootRequired", msg)
+		}
+	}
+}
+
+// blockedSriovShort reports the Blocked state for a PF whose running
+// firmware exposes fewer VFs than the profile wants — sriov_totalvfs short,
+// or no SR-IOV PCIe capability at all (capMissing, total 0). It advances
+// the sriov-nv-stage machine: holds while the apply reboot is pending,
+// requests the single warm load reboot on the one boot where that is right,
+// and from warmSpent on halts the reboot cycle with ColdRebootRequired for
+// the operator (0.1.51).
+func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, total int, capMissing bool) (v1alpha1.StepState, string) {
+	shortOf := fmt.Sprintf("sriov_totalvfs=%d", total)
+	if capMissing {
+		shortOf = "no SR-IOV PCIe capability (no sriov_numvfs/sriov_totalvfs in sysfs)"
+	}
+	st := sriovStageParse(np.Annotations[sriovNvStageAnnotation])[nic.pci]
+	if st.State == "" || st.NV < want {
+		// No usable stage. One mlxconfig query distinguishes "the
+		// mlxconfig step has not applied a satisfying NUM_OF_VFS yet"
+		// (NV < want — its apply reboot lands it) from "the value is
+		// already committed but was never loaded" (factory or
+		// out-of-band — anchor a warm load attempt here).
+		if vals, err := a.mlxconfigGetAll(nic.pci); err == nil {
+			if nvN, err := strconv.Atoi(vals["NUM_OF_VFS"]); err == nil && nvN >= want {
+				st = sriovNvStage{NV: nvN, Reboots: np.Status.Reboots.Total, State: sriovStateLoad}
+				a.setSriovStage(np, nic.pci, st)
+			}
+		}
+	}
+	out, next := sriovTotalvfsOutcome(st, want, np.Status.Reboots.Total)
+	if next != nil {
+		a.setSriovStage(np, nic.pci, *next)
+	}
+	switch out {
+	case sriovStagedWait:
+		a.setSriovColdReboot(np, false, "staged SR-IOV NV change not committed yet")
+		msg := fmt.Sprintf("%s: NUM_OF_VFS=%d staged in firmware NV; the mlxconfig apply reboot commits it — holding until that reboot lands (%s)", nic.pci, st.NV, shortOf)
+		if !a.allowReboot {
+			msg += " (reboots are disabled: the agent runs without -allow-reboot, so this needs a manual reboot)"
+		}
+		return v1alpha1.StepBlocked, msg
+	case sriovWarmLoad:
+		a.setSriovColdReboot(np, false, "the warm load reboot for the committed SR-IOV NV is pending")
+		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
+			fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %s — requesting the one warm reboot that loads SR-IOV NV (if it does not land, the next step is a cold power cycle, not another reboot)", nic.pci, st.NV, shortOf))
+		return v1alpha1.StepBlocked, fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — the one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf)
+	case sriovWarmSpent:
+		msg := fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d and the warm reboot did not expose it (%s): this firmware loads SR-IOV NV changes only on a cold power cycle — power the node down and back up (MAAS/IPMI power-off, then on; a warm reboot is not enough). The reboot cycle is halted; the walk resumes automatically after the power cycle", nic.pci, st.NV, shortOf)
+		a.setSriovColdReboot(np, true, msg)
+		return v1alpha1.StepBlocked, msg
+	case sriovColdHold:
+		msg := fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — waiting for the cold power cycle asked for in the ColdRebootRequired condition; no further reboots will be issued", nic.pci, st.NV, shortOf)
+		a.setSriovColdReboot(np, true, msg)
+		return v1alpha1.StepBlocked, msg
+	case sriovColdSpent:
+		msg := fmt.Sprintf("%s: %s is still below the %d VFs the profile wants even though a boot has run since the cold-reboot halt: if the full power cycle has not happened yet (a warm reboot does not count), power the node down and back up; if it has, this firmware image clamps the VF count below the demand and the profile's numVFs must be lowered until sriov_totalvfs converges", nic.pci, shortOf, want)
+		a.setSriovColdReboot(np, true, msg)
+		return v1alpha1.StepBlocked, msg
+	}
+	// sriovNeedsApply
+	a.setSriovColdReboot(np, false, "the committed SR-IOV NV does not satisfy the profile demand")
+	return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the running firmware exposes %s: %s", nic.pci, want, shortOf, a.totalvfsAdvice(nic, want, capMissing))
+}
+
 // stepSriovNumVFs converges every Mellanox function's sriov_numvfs onto the
 // profile value (east-west count on the rail-mapped functions, north-south
 // on DPUs, 0 elsewhere — 0 = none at the OS level). A count change tears
 // down first (the kernel rejects N→M while VFs exist), then writes the
 // target, then waits for the count to settle. The firmware ceiling
 // (sriov_totalvfs, raised by the mlxconfig step's NUM_OF_VFS) gates the
-// write: too low reports Blocked. On this firmware class a mlxconfig
-// change is committed by the boot after the set and loaded by the boot
-// after that (0.1.46, live on CX-4 Lx FW 14.32.1010 — the bash's provision
-// flow provides both boots by accident; see sriovNvPendingLoad), so a
-// Blocked ceiling with the NV already satisfying the demand records its
-// own load-reboot request instead of stalling.
-// A function with no SR-IOV PCIe capability at all (no sriov_numvfs in
-// sysfs — firmware did not expose VFs at power-on, found live on a
-// Supermicro LOM, FW 14.32.1010) converges when the profile wants 0 and is
-// Blocked with nvSriovAdvice otherwise.
-// nvSriovAdvice explains a missing or too-low SR-IOV exposure by consulting
-// the firmware NV config (the same mlxconfig query the mlxconfig step runs):
-// either the NUM_OF_VFS change is not in NV yet — the mlxconfig step's
-// apply reboot will commit it — or it IS in NV but the running firmware has
-// not loaded it. The load lag is the firmware's two-boot apply semantics,
-// not a cold-cycle requirement (that reading came from the 0.1.32 era and
-// was corrected live on CX-4 Lx FW 14.32.1010 in 0.1.46: a mlxconfig change
-// is committed by the boot after the set and loaded by the boot after
-// that — warm reboots suffice). When mlxconfig is unavailable the advice
-// falls back to the generic pointer at the mlxconfig step.
-func (a *Agent) nvSriovAdvice(nic pciDevice, want int) string {
-	if _, err := findHostTool("mlxconfig"); err != nil {
-		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
-	}
-	vals, err := a.mlxconfigGetAll(nic.pci)
-	if err != nil {
-		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
-	}
-	nv, hasNV := vals["NUM_OF_VFS"]
-	nvN, nvErr := strconv.Atoi(nv)
-	if hasNV && nvErr == nil && nvN >= want {
-		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d (PF_NUM_OF_VF_VALID stays False — the bash never sets it), but the running firmware has not loaded it yet: a mlxconfig change is committed by the boot after the set and loaded by the boot after that on this firmware class, so the load reboot (requested) should expose the VFs", nvN)
-	}
-	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", nv, want)
-}
-
-func (a *Agent) totalvfsAdvice(nic pciDevice, want int) string {
-	if _, err := findHostTool("mlxconfig"); err != nil {
-		return "the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it"
-	}
-	vals, err := a.mlxconfigGetAll(nic.pci)
-	if err != nil {
-		return fmt.Sprintf("mlxconfig query failed (%v); the mlxconfig step raises NUM_OF_VFS and its apply reboot lands it", err)
-	}
-	nv, hasNV := vals["NUM_OF_VFS"]
-	nvN, nvErr := strconv.Atoi(nv)
-	if hasNV && nvErr == nil && nvN >= want {
-		return fmt.Sprintf("firmware NV already carries NUM_OF_VFS=%d, but the running firmware has not loaded it yet: a mlxconfig change is committed by the boot after the set and loaded by the boot after that on this firmware class, so the load reboot (requested) should expose the VFs", nvN)
-	}
-	return fmt.Sprintf("firmware NV carries NUM_OF_VFS=%s; the mlxconfig step raises it to %d and its apply reboot lands it", nv, want)
-}
-
-// sriovNvPendingLoad reports the commit/load two-boot gap on this firmware
-// class: the NV NUM_OF_VFS already satisfies the demand while the running
-// sriov_totalvfs lags behind. In that state the missing boot is this
-// step's to request (0.1.46, live on CX-4 Lx FW 14.32.1010): the bash's
-// provision flow provides both boots by accident, the controller's single
-// apply-reboot leaves the exposure one boot behind, and without a request
-// the walk stalls Blocked forever.
-func sriovNvPendingLoad(nvNumOfVfs string, total, want int) bool {
-	n, err := strconv.Atoi(nvNumOfVfs)
-	return err == nil && n >= want && total < want
-}
-
+// write: too low is a Blocked run through blockedSriovShort's sriov-nv-stage
+// machine — hold while the apply reboot is pending, one warm load reboot,
+// then a cold halt with ColdRebootRequired (0.1.51). A function with no
+// SR-IOV PCIe capability at all (no sriov_numvfs in sysfs — firmware did
+// not expose VFs at power-on, found live on a Supermicro LOM, FW
+// 14.32.1010) converges when the profile wants 0 and runs the same machine
+// otherwise.
 func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
@@ -818,12 +970,18 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		got, err := readSysfsInt(base + "/sriov_numvfs")
 		if err != nil {
 			// No SR-IOV PCIe capability (firmware exposed no VFs at
-			// power-on). Wanting 0 is already converged; wanting more is
-			// Blocked until a cold cycle loads the NV config.
+			// power-on, found live on a Supermicro LOM, FW 14.32.1010).
+			// Wanting 0 is already converged; wanting more runs the same
+			// stage machine as a short sriov_totalvfs — the capability
+			// itself only appears when the firmware loads the NV config,
+			// so committed-but-not-loaded halts on the same cold cycle.
 			if want == 0 {
 				continue
 			}
-			return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the firmware exposes no SR-IOV PCIe capability (no sriov_numvfs in sysfs): %s", nic.pci, want, a.nvSriovAdvice(nic, want))
+			if !a.mutationsAllowed(profile) {
+				return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the firmware exposes no SR-IOV PCIe capability (no sriov_numvfs in sysfs); %s", nic.pci, want, a.totalvfsAdvice(nic, want, true))
+			}
+			return a.blockedSriovShort(np, nic, want, 0, true)
 		}
 		if got == want {
 			continue
@@ -832,17 +990,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
 		}
 		if total, err := readSysfsInt(base + "/sriov_totalvfs"); err == nil && want > total {
-			// Committed-but-not-loaded (the two-boot gap): the mlxconfig
-			// step's apply reboot promoted the shadow but this boot still
-			// runs the old image. Request the load boot — deduped per boot,
-			// so it fires once the walk goes quiet and advances the
-			// pipeline one boot per reboot until sriov_totalvfs catches up.
-			if nv, nvErr := a.mlxconfigGetAll(nic.pci); nvErr == nil && sriovNvPendingLoad(nv["NUM_OF_VFS"], total, want) {
-				nvN, _ := strconv.Atoi(nv["NUM_OF_VFS"])
-				a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
-					fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %d (sriov_totalvfs) — requesting the load reboot (this firmware class loads SR-IOV NV one boot after it commits)", nic.pci, nvN, total))
-			}
-			return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the running firmware exposes %d (sriov_totalvfs): %s", nic.pci, want, total, a.totalvfsAdvice(nic, want))
+			return a.blockedSriovShort(np, nic, want, total, false)
 		}
 		if nic.netdev == "" {
 			return v1alpha1.StepFailed, fmt.Sprintf("%s has no netdev; cannot set sriov_numvfs", nic.pci)
@@ -879,8 +1027,10 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		changed = append(changed, fmt.Sprintf("%s %d→%d", nic.pci, got, want))
 	}
 	if len(changed) == 0 {
+		a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
 		return v1alpha1.StepDone, fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
 	}
+	a.setSriovColdReboot(np, false, "sriov_totalvfs satisfies the profile on every Mellanox function")
 	return v1alpha1.StepDone, "set sriov_numvfs: " + strings.Join(changed, ", ")
 }
 

@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.49</span>
+    <span>nodeprep-v105.sh → controller v0.1.51</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.49</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.51</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -863,6 +863,51 @@
       value, not a clamp; factory NUM_OF_VFS=8 never actually loaded. Input validation allows up to 127;
       runtime totalvfs has only been observed at 1 and 4 (both committed values), so behavior between 5
       and 127 remains untested on this card.</li>
+  <li><b>0.1.50 — the runtime clamp is real: <code>sriov_totalvfs</code> pins at 4 regardless of the NV;
+      load-reboot budget added.</b> The 0.1.49 caveat ("behavior between 5 and 127 untested") was tested
+      the same hour: profile gen 16 raised <code>numVFs</code> to 8. The mlxconfig step committed
+      <code>NUM_OF_VFS=8</code> (query verified, shadow promoted — single Next-Boot column), and <b>two
+      consecutive boots</b> after the commit still exposed <code>sriov_totalvfs=4</code>. So on
+      ConnectX-4 Lx FW 14.32.1010 the runtime image accepts any NV value up to its input ceiling of 127
+      but never exposes more than 4 VFs at runtime — and the 0.1.46 factory-8 data point is re-read
+      again: its load presumably landed at 4 too. The walk could never converge at 8: without a cap,
+      <code>sriovNvPendingLoad</code> would have reboot-cycled the node forever (the uncapped-loop risk
+      flagged in 0.1.49, demonstrated live; caught by the operator-side monitor alarm and the profile
+      reverted to 4 before the third cycle). <b>0.1.50 adds the cap</b>: per-PF load-reboot budget
+      (<code>maxLoadReboots=2</code>, in-memory — a node reboot resets it, the right scope since a FW
+      upgrade or power event may change what the runtime exposes); two load boots without
+      <code>sriov_totalvfs</code> movement park the step Blocked with advice naming the runtime clamp
+      and pointing at lowering the profile. Unit-tested (<code>TestLoadRebootBudget</code>). The
+      reference cluster's "functions normally with 4 VFs" is now explained: 4 is this hardware's
+      runtime maximum. <b>Superseded by 0.1.51 below: the cap was broken and the runtime-clamp reading
+      is revised.</b></li>
+  <li><b>0.1.51 — the 0.1.50 cap was broken; the walk now halts cold: one warm load attempt, then
+      <code>ColdRebootRequired</code> for the operator.</b> Kevin flagged bl-r1-c2-06's logs — and the
+      live record vindicated the suspicion: c2-06 (factory NV <code>NUM_OF_VFS=1</code> → 4)
+      reboot-cycled r3→r4→r5 while the step message claimed "2 load reboots ran". The 0.1.50 budget
+      counted <b>poll passes</b> (the step re-runs every 5s while Blocked), not reboots, and lived in
+      agent memory — reset by every node reboot. The cap never capped anything. Live incident handling
+      also surfaced a de-adoption gotcha: re-applying the <code>nodeprep-test/skip=true</code> label did
+      <b>not</b> stop the walk (the controller retains the NodePrep when a node stops matching, and the
+      agent does not re-check profile matching) — deleting the NodePrep did. <b>The revised hardware
+      reading</b> (revisiting 0.1.46's "warm reboots suffice"): c2-02's 1→4 converged warm, but c2-02's
+      4→8 and c2-06's 1→4 both refused to load warm on the same firmware — warm NV loads work on some
+      hardware/paths and not others; a cold power cycle is the one intervention that always can.
+      <b>0.1.51 replaces the cap with the sriov-nv-stage machine</b> (Kevin's direction): a per-PF
+      <code>nodeprep.spectrocloud.com/sriov-nv-stage</code> NodePrep annotation
+      (<code>{nv, reboots, state}</code>, written by the mlxconfig step at apply) is the clock — boot
+      counts distinguish the apply-commits boot from the loads-it boot, and being in NodePrep metadata
+      the state survives agent restarts and node reboots (the exact property 0.1.50's in-memory counter
+      lacked). The machine holds while the apply reboot is pending, requests <b>exactly one</b> warm
+      load reboot, and if <code>sriov_totalvfs</code> is still short at the next boot it
+      <b>halts the reboot cycle permanently</b>: <code>ColdRebootRequired=True</code> with the operator
+      instruction (power the node down and back up via MAAS/IPMI; a warm reboot does not count); a boot
+      after the halt updates the message (if that was warm, power fully down; if the cycle already
+      happened, the image clamps — lower the profile's numVFs). The condition clears the moment
+      <code>sriov_totalvfs</code> converges. The no-SR-IOV-capability branch (no
+      <code>sriov_numvfs</code> in sysfs) routes through the same machine. Unit-tested
+      (<code>TestSriovTotalvfsOutcome</code>, <code>TestSriovStageAnnotationMerge</code>,
+      <code>TestBlockedSriovShortColdHaltRecordsNoReboot</code>).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1053,7 +1098,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.49 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.51 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

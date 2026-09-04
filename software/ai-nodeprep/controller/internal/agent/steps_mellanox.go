@@ -48,6 +48,12 @@ type mlxconfigKV struct {
 	val string
 }
 
+// valN parses val as an int (NUM_OF_VFS values are always numeric).
+func (kv mlxconfigKV) valN() int {
+	n, _ := strconv.Atoi(kv.val)
+	return n
+}
+
 // mlxconfigGet queries one key; ok=false means the device does not expose it.
 // Values arrive as "2(Ethernet)" / "True(1)" / "ETH(2)" — the parenthesised
 // content wins when it is numeric, mirroring what the bash script compares.
@@ -210,6 +216,18 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			continue
 		}
 		if changed {
+			// A set that carried NUM_OF_VFS opens the sriov-nv-stage
+			// machine for this PF (0.1.51): sriovNumVFs reads the stage to
+			// tell the apply-commits boot from the loads-it boot and halts
+			// cold when the warm load does not land. Reboots.Total is the
+			// anchor — sriovNumVFs advances the machine when the counter
+			// passes it.
+			for _, kv := range flash {
+				if kv.key == "NUM_OF_VFS" {
+					a.setSriovStage(np, d.pci, sriovNvStage{NV: kv.valN(), Reboots: np.Status.Reboots.Total, State: sriovStateStaged})
+					break
+				}
+			}
 			configured = append(configured, d.pci)
 		} else {
 			matched = append(matched, d.pci)
@@ -262,7 +280,9 @@ func buildFlashSet(a *Agent, d pciDevice, vals map[string]string, p mlxconfigPar
 	// shows VFs are honored without the flag. Leave it False. (The further
 	// theory that warm reboots never load SR-IOV NV at all was corrected in
 	// 0.1.46: this class commits a mlxconfig change on the boot after the
-	// set and loads it on the boot after that — see sriovNvPendingLoad.)
+	// set and loads it on the boot after that — warm loads on some
+	// hardware, cold-only on others; the sriov-nv-stage machine of 0.1.51
+	// arbitrates.)
 	isSuper := d.devType == "SuperNIC"
 	isCx79 := matchesConnectX79(d.devType)
 	if p.lt == 2 {

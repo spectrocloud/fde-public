@@ -63,6 +63,11 @@ const (
 	ConditionBootVerified        = "BootVerified"
 	ConditionFlashAdmitted       = "FlashAdmitted"
 	ConditionMaintenanceAdmitted = "MaintenanceAdmitted"
+	// ConditionColdRebootRequired is set True when the firmware has
+	// committed the requested SR-IOV NV but a warm reboot did not expose
+	// it (sriov_totalvfs still short): the walk halts its reboot cycle and
+	// waits for the operator to power the node down and back up (0.1.51).
+	ConditionColdRebootRequired = "ColdRebootRequired"
 )
 
 // Condition reasons.
@@ -238,10 +243,10 @@ type PolicySpec struct {
 	ControlDPU           bool   `json:"controlDPU,omitempty"`
 	DisableACS           bool   `json:"disableACS,omitempty"`
 	MaxConcurrentFlashes int    `json:"maxConcurrentFlashes,omitempty"` // fleet flash window (design §9.1)
-	CAPause              bool   `json:"capiPause,omitempty"`        // pause CAPI Machines while prepping
-	WorkerRoleLabel      string `json:"workerRoleLabel,omitempty"`  // manage | ignore
-	LabelCompat          string `json:"labelCompat,omitempty"`      // v1: mirror legacy state label
-	ControlPlanePrep     bool   `json:"controlPlanePrep,omitempty"` // may prep control-plane nodes
+	CAPause              bool   `json:"capiPause,omitempty"`            // pause CAPI Machines while prepping
+	WorkerRoleLabel      string `json:"workerRoleLabel,omitempty"`      // manage | ignore
+	LabelCompat          string `json:"labelCompat,omitempty"`          // v1: mirror legacy state label
+	ControlPlanePrep     bool   `json:"controlPlanePrep,omitempty"`     // may prep control-plane nodes
 
 	// TaintEnabled defaults to true: the nodeprep taint is applied at adoption
 	// and released only after boot-verify (design §6.1). Pointer so the zero

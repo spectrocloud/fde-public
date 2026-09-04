@@ -115,6 +115,12 @@ type Agent struct {
 // runs on this maintenance cadence, not every poll cycle.
 const bootVerifyInterval = 5 * time.Minute
 
+// maxLoadReboots is gone (0.1.51): the sriovNumVFs load-reboot attempt is
+// now tracked in the sriov-nv-stage NodePrep annotation — durable across
+// agent restarts and node reboots, unlike the in-memory counter 0.1.50
+// used, which counted poll passes instead of reboots and reset on every
+// boot (bl-r1-c2-06 reboot-cycled live).
+
 func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string, interval time.Duration, allowReboot, hostMutations, verbose bool, rebootCommand string) *Agent {
 	return &Agent{
 		client: client, dyn: dyn, nodeName: nodeName, ns: ns,
@@ -444,6 +450,26 @@ func (a *Agent) removeAnnotation(ctx context.Context, key string) error {
 	})
 	_, err := a.dyn.Resource(nodePrepsGVR).Patch(ctx, a.nodeName, types.MergePatchType, patch, metav1.PatchOptions{})
 	return err
+}
+
+// setAnnotation patches one metadata annotation and mirrors it into np's
+// in-memory copy, so a later read of np.Annotations sees the value the API
+// now holds (stepSriovNumVFs advances the sriov-nv-stage machine through
+// this on state transitions only — SetCondition-style no-op semantics keep
+// the 5s poll from churning resourceVersions).
+func (a *Agent) setAnnotation(np *v1alpha1.NodePrep, key, value string) error {
+	patch, _ := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{"annotations": map[string]interface{}{key: value}},
+	})
+	_, err := a.dyn.Resource(nodePrepsGVR).Patch(context.Background(), a.nodeName, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		return err
+	}
+	if np.Annotations == nil {
+		np.Annotations = map[string]string{}
+	}
+	np.Annotations[key] = value
+	return nil
 }
 
 // refreshInventory scans sysfs and writes nics/gpus to status. The patch and
