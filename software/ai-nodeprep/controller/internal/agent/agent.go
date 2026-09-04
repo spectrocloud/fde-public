@@ -527,8 +527,15 @@ func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, pro
 	}
 	if len(mellanox) > 0 {
 		a.enrichMellanox(mellanox)
-		for i := range mellanox {
-			nics[i] = mellanox[i].nicStatus()
+		// Re-render from the enriched devices, PFs only (0.1.57): the
+		// previous index mapping nics[i] = mellanox[i] silently depended
+		// on nics and mellanox having the same length and order.
+		nics = nics[:0]
+		for _, d := range mellanox {
+			if d.isVF {
+				continue
+			}
+			nics = append(nics, d.nicStatus())
 		}
 	}
 	a.mellanoxFns = mellanox

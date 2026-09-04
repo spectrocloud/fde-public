@@ -150,7 +150,17 @@ func scanInventory(profile *v1alpha1.NodePrepProfile) (nics []v1alpha1.NicStatus
 		}
 	}
 
+	// status.nics is the hardware inventory: PFs only, matching the bash
+	// scan (mst status lists PFs, never VFs) and the design's status
+	// example. A VF is runtime state of its PF — it appears and disappears
+	// with the PF's sriov_numvfs, and its configuration is inherited from
+	// the PF — so it is not a separate hardware entry (0.1.57). The
+	// functions list keeps VFs: the VF-identity and VF-count steps walk
+	// them.
 	for _, d := range mellanox {
+		if d.isVF {
+			continue
+		}
 		nics = append(nics, d.nicStatus())
 	}
 	return nics, gpus, mellanox, nil
@@ -210,7 +220,8 @@ func railLabel(d pciDevice) string {
 // every cycle (found noisy live on bl-r1-c2-02). The pending state stays
 // visible in the NodePrep status — unclassified functions report
 // Type=Mellanox until classified. A mlxconfig that IS installed but fails
-// per device is still a per-device error line.
+// per device is still a per-device error line. Virtual functions are not
+// scanned at all (0.1.57): no device NV, every query fails.
 func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 	_, mftMissing := findHostTool("mlxconfig")
 	pending := 0
@@ -225,6 +236,15 @@ func (a *Agent) enrichMellanox(mellanox []pciDevice) {
 		}
 		d.ibdev = ibdevFor(d.pci)
 		d.rshim = rshimFor(d.fn)
+		if d.isVF {
+			// A VF has no device NV of its own: every mlxconfig query on
+			// it fails (exit 3), so classifying it logged a per-device
+			// error line on every refresh and never cached (found live on
+			// the lab workers, 0.1.56). Only PFs are scanned; a VF's
+			// identity is its PF's, and the VF-count/GUID steps address
+			// VFs through their PF.
+			continue
+		}
 		if mftMissing != nil {
 			pending++
 			continue // classification retries once MFT is installed
