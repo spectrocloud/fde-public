@@ -99,6 +99,14 @@ type Agent struct {
 	// top of the steps that issue resets.
 	fwResetChips map[string]bool
 
+	// sriovRewindRequested is pass-scoped (reset at the top of runStage):
+	// stepSriovNumVFs sets it when an imported Finalizing walk blocks on a
+	// VF demand its Configuring stage never ran (0.1.60), and
+	// maybeRewindImportedWalk consumes it after the step loop — the rewind
+	// must ride runStage's own ledger patch, since a patch from inside the
+	// step body would be clobbered by runStage's full-ledger write.
+	sriovRewindRequested bool
+
 	// lastBootVerify paces Ready-phase boot-verify: verify runs immediately
 	// on a boot change, otherwise at most every bootVerifyInterval (the
 	// critical-step bodies cost hundreds of host commands per pass).
@@ -566,6 +574,10 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 	// changed a step counts as progress; early returns (admission gates)
 	// leave it false so an already-applied mutation's reboot still fires.
 	a.stageProgressed = false
+	// Pass-scoped request from the step bodies (sriovNumVFs sets it when an
+	// imported Finalizing walk blocks on a VF raise its Configuring stage
+	// never ran); consumed by maybeRewindImportedWalk after the step loop.
+	a.sriovRewindRequested = false
 	if phase == v1alpha1.PhasePending {
 		a.setPhase(ctx, v1alpha1.PhaseProvisioning, "start", "inventory done; starting provisioning")
 		return
@@ -656,8 +668,26 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 			}
 		}
 	}
+	ledger, rewound := a.maybeRewindImportedWalk(np, ledger)
 	if err := a.patchStatus(ctx, map[string]interface{}{"steps": ledger}); err != nil {
 		a.logf("step ledger patch failed: %v", err)
+	} else {
+		np.Status.Steps = ledger
+		if rewound {
+			// The ledger now carries the re-opened Configuring stage; flip
+			// the phase so the walk actually re-enters it. The guard
+			// annotation goes down only after the phase patch succeeds — a
+			// failed flip must re-fire the rewind next pass, not park it.
+			if err := a.setPhase(ctx, v1alpha1.PhaseConfiguring, "vf raise rewind",
+				"the walk was imported at Finalizing, but the profile's VF demand exceeds the committed NV; re-running Configuring so the mlxconfig step can raise NUM_OF_VFS"); err != nil {
+				a.logf("sriov-rewind phase flip failed: %v", err)
+			} else {
+				np.Status.Phase = v1alpha1.PhaseConfiguring
+				if err := a.setAnnotation(np, sriovRewoundAnnotation, time.Now().UTC().Format(time.RFC3339)); err != nil {
+					a.logf("sriov-rewound annotation write failed: %v", err)
+				}
+			}
+		}
 	}
 
 	if failed {

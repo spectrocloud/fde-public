@@ -827,6 +827,42 @@ func (a *Agent) clearSriovStage(np *v1alpha1.NodePrep, pci string) {
 	}
 }
 
+// sriovRewoundAnnotation marks that this walk has already been rewound to
+// Configuring for an imported Finalizing state whose VF demand exceeded the
+// committed NV (0.1.60). Once per NodePrep — the guard keeps a firmware
+// that can never satisfy the demand (mlxconfig unable to write the count,
+// a flash set that skips the PF) from ping-ponging Finalizing→Configuring
+// every 5s poll: without it the walk would re-run mlxconfig, converge
+// nothing, and rewind again forever.
+const sriovRewoundAnnotation = "nodeprep.spectrocloud.com/sriov-rewound"
+
+// maybeRewindImportedWalk applies the imported-walk rewind the sriovNumVFs
+// step body requested this pass (a.sriovRewindRequested): it upserts the
+// Configuring stage into the ledger as Pending and clears pending reboot
+// requests, mirroring the profile-generation re-walk. It runs inside
+// runStage BEFORE the ledger patch so the reset rides the same write as the
+// pass's step results — a separate earlier patch would be clobbered by
+// runStage's full-ledger write at the end of the pass. An imported walk's
+// ledger holds only Finalizing entries (verified live on re-adopted
+// bl-r1-c2-06), so the Configuring defs are ADDED, not just re-opened;
+// ensureSteps adds a missing def as Pending at its own stage. The phase
+// flip and guard annotation land after the ledger patch (in runStage); if
+// any of those fail, the rewind simply re-fires next pass — the upsert is
+// idempotent.
+func (a *Agent) maybeRewindImportedWalk(np *v1alpha1.NodePrep, ledger []v1alpha1.StepStatus) ([]v1alpha1.StepStatus, bool) {
+	if !a.sriovRewindRequested {
+		return ledger, false
+	}
+	ledger = ensureSteps(ledger, stepsForStage(v1alpha1.PhaseConfiguring), v1alpha1.PhaseConfiguring)
+	for i := range ledger {
+		if ledger[i].Stage == v1alpha1.PhaseConfiguring && ledger[i].State != v1alpha1.StepPending {
+			ledger[i] = v1alpha1.StepStatus{Name: ledger[i].Name, Stage: ledger[i].Stage, State: v1alpha1.StepPending}
+		}
+	}
+	a.pendingReboot = nil // the re-walk raises fresh requests as it converges
+	return ledger, true
+}
+
 // sriovChipKey groups the PCI functions of one physical device: strip the
 // function suffix. 0000:49:00.0 and 0000:49:00.1 are two ports of one
 // firmware chip — a reset on either reinitializes both (observed live: the
@@ -989,12 +1025,15 @@ func (a *Agent) setSriovColdReboot(np *v1alpha1.NodePrep, active bool, msg strin
 // the sriov-nv-stage machine: holds while the apply reboot is pending,
 // requests the single warm load reboot on the one boot where that is right,
 // and from warmSpent on halts the reboot cycle for good (0.1.51). The
-// returned bool is the PF's cold-halt state — the CALLER maintains the
+// first bool is the PF's cold-halt state — the CALLER maintains the
 // ColdRebootRequired condition once per pass, so two PFs in one walk cannot
 // flip it against each other (found live: PF .0 halted cold while PF .1,
 // never processed in the same pass, anchored its own warm attempt and
-// re-armed the reboot).
-func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, total int, capMissing bool) (string, bool) {
+// re-armed the reboot). The second bool is the sriovNeedsApply outcome: no
+// stage is armed and the committed NV itself is below the demand — the
+// raise is the mlxconfig step's to do (0.1.60's imported-walk rewind keys
+// on exactly that).
+func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, total int, capMissing bool) (string, bool, bool) {
 	shortOf := fmt.Sprintf("sriov_totalvfs=%d", total)
 	if capMissing {
 		shortOf = "no SR-IOV PCIe capability (no sriov_numvfs/sriov_totalvfs in sysfs)"
@@ -1033,7 +1072,7 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		if !a.allowReboot {
 			msg += " (reboots are disabled: the agent runs without -allow-reboot, so this needs a manual reboot)"
 		}
-		return msg, false
+		return msg, false, false
 	case sriovWarmLoad:
 		// Arm the pending NV for this warm reboot: the mlxfwreset firmware
 		// reset between the NV apply and the reboot is what makes the warm
@@ -1054,16 +1093,16 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		}
 		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
 			fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %s — requesting the one warm reboot that loads SR-IOV NV (if it does not land, the next step is a cold power cycle, not another reboot)", nic.pci, st.NV, shortOf), nic.pci)
-		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — %sthe one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf, fwMsg), false
+		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — %sthe one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf, fwMsg), false, false
 	case sriovWarmSpent:
-		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d and the warm reboot did not expose it (%s): this firmware loads SR-IOV NV changes only on a cold power cycle — power the node down and back up (MAAS/IPMI power-off, then on; a warm reboot is not enough). The reboot cycle is halted; the walk resumes automatically after the power cycle", nic.pci, st.NV, shortOf), true
+		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d and the warm reboot did not expose it (%s): this firmware loads SR-IOV NV changes only on a cold power cycle — power the node down and back up (MAAS/IPMI power-off, then on; a warm reboot is not enough). The reboot cycle is halted; the walk resumes automatically after the power cycle", nic.pci, st.NV, shortOf), true, false
 	case sriovColdHold:
-		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — waiting for the cold power cycle asked for in the ColdRebootRequired condition; no further reboots will be issued", nic.pci, st.NV, shortOf), true
+		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — waiting for the cold power cycle asked for in the ColdRebootRequired condition; no further reboots will be issued", nic.pci, st.NV, shortOf), true, false
 	case sriovColdSpent:
-		return fmt.Sprintf("%s: %s is still below the %d VFs the profile wants even though a boot has run since the cold-reboot halt: if the full power cycle has not happened yet (a warm reboot does not count), power the node down and back up; if it has, this firmware image clamps the VF count below the demand and the profile's numVFs must be lowered until sriov_totalvfs converges", nic.pci, shortOf, want), true
+		return fmt.Sprintf("%s: %s is still below the %d VFs the profile wants even though a boot has run since the cold-reboot halt: if the full power cycle has not happened yet (a warm reboot does not count), power the node down and back up; if it has, this firmware image clamps the VF count below the demand and the profile's numVFs must be lowered until sriov_totalvfs converges", nic.pci, shortOf, want), true, false
 	}
 	// sriovNeedsApply
-	return fmt.Sprintf("%s: profile wants %d VFs but the running firmware exposes %s: %s", nic.pci, want, shortOf, a.totalvfsAdvice(nic, want, capMissing)), false
+	return fmt.Sprintf("%s: profile wants %d VFs but the running firmware exposes %s: %s", nic.pci, want, shortOf, a.totalvfsAdvice(nic, want, capMissing)), false, true
 }
 
 // stepSriovNumVFs converges every Mellanox function's sriov_numvfs onto the
@@ -1097,6 +1136,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	var converged []string
 	var down []string
 	coldAny := false
+	needsApplyAny := false
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, nic := range a.mellanoxFns {
 		want := vfCountFor(profile, nic)
@@ -1115,8 +1155,9 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			if !a.mutationsAllowed(profile) {
 				return v1alpha1.StepBlocked, fmt.Sprintf("%s: profile wants %d VFs but the firmware exposes no SR-IOV PCIe capability (no sriov_numvfs in sysfs); %s", nic.pci, want, a.totalvfsAdvice(nic, want, true))
 			}
-			msg, cold := a.blockedSriovShort(np, nic, want, 0, true)
+			msg, cold, needsApply := a.blockedSriovShort(np, nic, want, 0, true)
 			coldAny = coldAny || cold
+			needsApplyAny = needsApplyAny || needsApply
 			blockedMsgs = append(blockedMsgs, msg)
 			continue
 		}
@@ -1140,8 +1181,9 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			return v1alpha1.StepBlocked, fmt.Sprintf("%s has %d VFs, profile wants %d (write needs -host-mutations)", nic.pci, got, want)
 		}
 		if terr == nil && want > total {
-			msg, cold := a.blockedSriovShort(np, nic, want, total, false)
+			msg, cold, needsApply := a.blockedSriovShort(np, nic, want, total, false)
 			coldAny = coldAny || cold
+			needsApplyAny = needsApplyAny || needsApply
 			blockedMsgs = append(blockedMsgs, msg)
 			continue
 		}
@@ -1191,6 +1233,23 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			a.setSriovColdReboot(np, true, strings.Join(blockedMsgs, "; "))
 		} else {
 			a.setSriovColdReboot(np, false, "no Mellanox PF is cold-halted; the SR-IOV NV pipeline is in its warm-reboot stages")
+		}
+		// An imported walk (bash-label adoption, design §10) lands at
+		// Finalizing having never run Configuring, so a VF demand above the
+		// committed NV blocks forever on advice — "the mlxconfig step
+		// raises it" — that names a step this walk never runs (0.1.60,
+		// found live on re-adopted bl-r1-c2-06). Flagging here hands the
+		// raise to that step: runStage applies the rewind to its own ledger
+		// (maybeRewindImportedWalk) and flips the phase to Configuring.
+		// Once per NodePrep (the sriov-rewound annotation) so a firmware
+		// that can never satisfy the demand parks in Finalizing instead of
+		// ping-ponging every 5s poll.
+		if needsApplyAny && !coldAny && np.Status.Phase == v1alpha1.PhaseFinalizing {
+			if _, rewound := np.Annotations[sriovRewoundAnnotation]; !rewound {
+				a.sriovRewindRequested = true
+				blockedMsgs = append(blockedMsgs,
+					"the walk was imported at Finalizing and its Configuring stage never ran; re-opening Configuring so the mlxconfig step can raise NUM_OF_VFS")
+			}
 		}
 		return v1alpha1.StepBlocked, strings.Join(blockedMsgs, "; ")
 	}

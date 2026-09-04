@@ -531,7 +531,7 @@ func TestFwResetWarmLoadOncePerChip(t *testing.T) {
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":7,"state":"staged"}}`}
 	np.Status.Reboots.Total = 8
-	msg, cold := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	msg, cold, _ := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	if cold {
 		t.Fatalf("the warm load pass must not report cold, got %q", msg)
 	}
@@ -551,7 +551,7 @@ func TestFwResetWarmLoadOncePerChip(t *testing.T) {
 	// The steady-state pass while the reboot is pending re-records the
 	// request (deduped) but must NOT re-run the reset: the map was seeded
 	// by the transition pass and the message carries no reset fragment.
-	msg, _ = a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	msg, _, _ = a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	if strings.Contains(msg, "firmware reset") {
 		t.Fatalf("steady-state warm-load passes must not re-run the reset, got %q", msg)
 	}
@@ -564,7 +564,7 @@ func TestFwResetWarmLoadOncePerChip(t *testing.T) {
 	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.1":{"nv":4,"reboots":7,"state":"staged"}}`}
 	np2.Status.Reboots.Total = 8
-	if _, cold := a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.1"}, 4, 1, false); cold {
+	if _, cold, _ := a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.1"}, 4, 1, false); cold {
 		t.Fatalf("sibling warm-load pass must not report cold")
 	}
 	if len(a.fwResetChips) != 1 {
@@ -708,7 +708,7 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"cold"}}`}
 	np.Status.Reboots.Total = 9
-	msg, cold := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	msg, cold, _ := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	if !cold {
 		t.Fatalf("cold hold must report cold, got cold=%v", cold)
 	}
@@ -724,7 +724,7 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":9,"state":"load"}}`}
 	np2.Status.Reboots.Total = 10
-	msg, cold = a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	msg, cold, _ = a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	if !cold || !strings.Contains(msg, "power the node down and back up") {
 		t.Fatalf("warm spent must halt with the power-cycle instruction, got cold=%v/%q", cold, msg)
 	}
@@ -747,7 +747,7 @@ func TestBlockedSriovShortColdHaltRecordsNoReboot(t *testing.T) {
 		{reason: v1alpha1.RebootMlxConfigApplied, message: "sibling's fresh warm load", pci: "0000:49:00.1"},
 		{reason: v1alpha1.RebootGrubChanged, message: "unrelated"},
 	}
-	a.blockedSriovShort(np3, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	_, _, _ = a.blockedSriovShort(np3, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
 	for _, r := range a.pendingReboot {
 		if r.reason == v1alpha1.RebootMlxConfigApplied && r.pci == "0000:49:00.0" {
 			t.Fatalf("the cold halt must drop the stale MlxConfigApplied request of the cold PF itself, got %+v", a.pendingReboot)
@@ -903,5 +903,106 @@ func TestSyncColdPhase(t *testing.T) {
 	a.syncColdPhase(context.Background(), np3)
 	if np3.Status.Phase != v1alpha1.PhaseFailed || readPhase() != "Failed" {
 		t.Fatalf("Failed must keep its phase under the cold condition (got in-memory %s, api %q)", np3.Status.Phase, readPhase())
+	}
+}
+
+// The imported-walk rewind (0.1.60): an imported Finalizing ledger — only
+// Finalizing entries, the shape verified live on re-adopted bl-r1-c2-06 —
+// whose VF demand exceeds the committed NV must gain its Configuring stage
+// as Pending (the mlxconfig step that raises NUM_OF_VFS lives there), and
+// pending reboot requests must drop so the re-walk raises fresh ones.
+func TestMaybeRewindImportedWalk(t *testing.T) {
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	ledger := []v1alpha1.StepStatus{
+		{Name: "sriovNumVFs", Stage: v1alpha1.PhaseFinalizing, State: v1alpha1.StepBlocked, Message: "profile wants 8 VFs"},
+		{Name: "vfGuids", Stage: v1alpha1.PhaseFinalizing, State: v1alpha1.StepBlocked},
+		{Name: "udevRules", Stage: v1alpha1.PhaseFinalizing, State: v1alpha1.StepDone},
+	}
+
+	a := &Agent{}
+	a.sriovRewindRequested = true
+	a.pendingReboot = []rebootRequest{{reason: v1alpha1.RebootGrubChanged, message: "stale"}}
+	out, fired := a.maybeRewindImportedWalk(np, ledger)
+	if !fired {
+		t.Fatalf("the rewind must fire when requested")
+	}
+	if len(a.pendingReboot) != 0 {
+		t.Fatalf("the rewind must drop pending reboot requests, got %+v", a.pendingReboot)
+	}
+	var mlx *v1alpha1.StepStatus
+	for i := range out {
+		if out[i].Name == "mlxconfig" && out[i].Stage == v1alpha1.PhaseConfiguring {
+			mlx = &out[i]
+		}
+	}
+	if mlx == nil || mlx.State != v1alpha1.StepPending {
+		t.Fatalf("the rewind must add the Configuring mlxconfig step as Pending, got %+v", out)
+	}
+	// Finalizing states ride along untouched — the blocked sriovNumVFs
+	// keeps reporting until the raise lands.
+	for _, s := range out {
+		if s.Stage == v1alpha1.PhaseFinalizing && s.Name == "sriovNumVFs" && s.State != v1alpha1.StepBlocked {
+			t.Fatalf("the rewind must not touch Finalizing states, got %+v", s)
+		}
+	}
+
+	// Not requested: the ledger passes through untouched.
+	a2 := &Agent{}
+	out2, fired2 := a2.maybeRewindImportedWalk(np, ledger)
+	if fired2 || len(out2) != len(ledger) {
+		t.Fatalf("an unrequested rewind must be a no-op, got fired=%v len=%d", fired2, len(out2))
+	}
+
+	// Idempotent: a re-fire on the already-rewound ledger keeps every
+	// Configuring entry Pending.
+	a3 := &Agent{}
+	a3.sriovRewindRequested = true
+	out3, fired3 := a3.maybeRewindImportedWalk(np, out)
+	if !fired3 {
+		t.Fatalf("a re-fire must still report the rewind")
+	}
+	for _, s := range out3 {
+		if s.Stage == v1alpha1.PhaseConfiguring && s.State != v1alpha1.StepPending {
+			t.Fatalf("a re-fire must keep Configuring steps Pending, got %+v", s)
+		}
+	}
+}
+
+// A PF whose firmware NV is below the demand with no stage armed reports
+// the sriovNeedsApply outcome — the signal the imported-walk rewind keys
+// on. This is exactly the shape of a walk imported at Finalizing: no
+// Configuring pass ever armed a stage, and the committed NV is the old,
+// lower count.
+func TestBlockedSriovShortNeedsApply(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{}
+	npU.SetGroupVersionKind(schema.GroupVersionKind{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: v1alpha1.NodePrepKind})
+	npU.SetName("node-1")
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	a := &Agent{nodeName: "node-1", dyn: dyn, client: clientfake.NewSimpleClientset()}
+
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	msg, cold, needsApply := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 8, 4, false)
+	if cold || !needsApply {
+		t.Fatalf("no stage + short NV must report needsApply and not cold, got cold=%v needsApply=%v", cold, needsApply)
+	}
+	if !strings.Contains(msg, "mlxconfig step raises") {
+		t.Fatalf("the needsApply message must name the mlxconfig step, got %q", msg)
+	}
+	// An armed stage at or above the demand with the load reboot still
+	// pending is a warm-load outcome, never needsApply — the rewind must
+	// not re-run Configuring for a demand the NV already carries. (The
+	// boot count here matches the recorded one, so no stage advance
+	// fires.)
+	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":8,"reboots":4,"state":"load"}}`}
+	np2.Status.Reboots.Total = 4
+	_, cold2, needsApply2 := a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.0"}, 8, 4, false)
+	if needsApply2 || cold2 {
+		t.Fatalf("an armed stage above the demand must be a warm-load outcome, got cold=%v needsApply=%v", cold2, needsApply2)
 	}
 }
