@@ -782,10 +782,14 @@
       eswitch flip, OVS bridges, representor rename rules) and the InfiniBand link-type path (port GUID +
       policy) — each needs the corresponding hardware/mode.</li>
   <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
-      runs <code>eswitch legacy</code> (the step's gate verified).</li>
+      runs <code>eswitch legacy</code> (the step's gate verified). <i>[Parked 2026-09-04 (operator
+      decision): to be validated in the upcoming NVIDIA DSX Air environment, together with the
+      switchdev VF branch (devlink eswitch flip, representor rename rules).]</i></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
-      skips it, so a real application run needs that hardware class.</li>
+      skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
+      decision): to be validated in the upcoming NVIDIA DSX Air environment, which should present
+      SuperNIC-class devices.]</i></li>
   <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs. (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
