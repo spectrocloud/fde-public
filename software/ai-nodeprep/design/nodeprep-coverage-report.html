@@ -862,7 +862,11 @@
       re-applied <code>NUM_OF_VFS=4</code> before the observed boot, so totalvfs 4 was the committed
       value, not a clamp; factory NUM_OF_VFS=8 never actually loaded. Input validation allows up to 127;
       runtime totalvfs has only been observed at 1 and 4 (both committed values), so behavior between 5
-      and 127 remains untested on this card.</li>
+      and 127 remains untested on this card. <i>[Superseded 2026-09-04: runtime
+      <code>totalvfs=8</code> is now observed live on both workers — the 0.1.59 gen-18 escalation
+      landed 8 VFs/PF warm — so the 0.1.50 "clamps at 4" reading was itself the un-loaded-NV
+      artifact. The rest of the 5–127 range is accepted as untested by operator decision and is
+      not tracked as a test need.]</i></li>
   <li><b>0.1.50 — the runtime clamp is real: <code>sriov_totalvfs</code> pins at 4 regardless of the NV;
       load-reboot budget added.</b> The 0.1.49 caveat ("behavior between 5 and 127 untested") was tested
       the same hour: profile gen 16 raised <code>numVFs</code> to 8. The mlxconfig step committed
