@@ -1021,6 +1021,32 @@
       — the annotation is gone. <code>TestClearSriovStage</code> covers the cleanup; the warning
       composition is host-bound (no sysfs seam in v0.1) and live-verified on the next downsize
       walk.</li>
+  <li><b>mlxfwreset before reboot: validated as NOT applicable to our CX-4 Lx (research, no
+      controller change).</b> The Mellanox/NVIDIA <i>nic-configuration-operator</i> ships
+      <code>FW_RESET_AFTER_CONFIG_UPDATE</code>: after <code>mlxconfig</code> applies NV and before
+      the host reboot it runs <code>mlxfwreset --device &lt;pci&gt; reset --yes</code> (source:
+      <code>pkg/configuration/utils.go</code>, <code>ResetNicFirmware</code>), because "on some
+      platforms, explicit FW reset is required before reboot to apply the changes to NV spec" —
+      the README scopes this to DGX servers where the warm reboot does not pick the change up.
+      Our warm reboots behave exactly that way, so the technique was a candidate replacement for
+      the cold-halt machine. Validated on the c2-06 CX-4 Lx mezz (FW 14.32.1010, FS3, MFT
+      4.36.0-147) and rejected: a <b>level-3 reset (its default; driver restart + PCI reset) never
+      applies a staged <code>NUM_OF_VFS</code></b> — <code>sriov_totalvfs</code> was unchanged
+      across three resets over two set→reset→read cycles, because this FW samples
+      <code>NUM_OF_VFS</code> only at real power-on. Worse, the reset is <i>destructive</i> to the
+      staging: with VFs attached it silently reverted the staged NV (flash 8→4, the running
+      config), which would convert a pending escalation into silent convergence-with-drift; with
+      VFs detached it preserved the staging. A <b>level-4 arm (warm-reboot reset) is refused by
+      the FW outright</b> — the MFRL register write fails "bad parameter (265)", with and without
+      VFs attached — even though <code>mlxfwreset q</code> advertises level 4 as Supported: the
+      capability query lies on this firmware. Two operational hazards recorded alongside: the
+      mezz is one chip, so a level-3 reset on one PF full-chip-resets the sibling and can wedge
+      its E-Switch (<code>pci_enable_sriov failed -EIO</code> on stale vports; cleared by the next
+      driver re-init), and the drift machinery handled that collateral live exactly as designed —
+      boot-verify flagged the numvfs drift, re-tainted, repaired to Done once the write succeeded,
+      and released the taint. If a newer-NIC profile (ConnectX-6+/DGX-class, where the operator's
+      technique does work) ever joins the fleet, the gate must check actual MFRL acceptance rather
+      than <code>q</code>'s answer, and never reset with VFs attached.</li>
 </ul>
 
 <h3>On every node</h3>
