@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.61</span>
+    <span>nodeprep-v105.sh → controller v0.1.62</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.61</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.62</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -790,16 +790,22 @@
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
       decision): to be validated in the upcoming NVIDIA DSX Air environment, which should present
       SuperNIC-class devices.]</i></li>
-  <li><b>SR-IOV device-plugin pod bounce</b> after VF creation, so the plugin re-discovers VFs.
-      <i>[Demoted from test need to watch item 2026-09-04 (operator decision, Network Operator now
-      live on the test cluster): the nodeprep taint (NoSchedule) keeps the plugin pod off the node
-      during the walk, so it first schedules at taint release and discovers the existing VFs; and
-      every validated VF change rides a checkpoint reboot, restarting all pods. Residual gap: a
-      VF-count change landing without a reboot on a node whose plugin is already running
-      (NoSchedule does not evict; reachable only as a pure numvfs rewrite under an
-      already-satisfying totalvfs) — watch, don't build. <b>[Proven on the fresh-node walk 2026-09-04:
-      on bl-r1-c2-07 the plugin pod scheduled only at taint release, 31 s after the plain daemonsets,
-      and found all 8 VFs already up with identities — see the changelog entry.]</b></i> (The rshim
+  <li><b>SR-IOV device-plugin pod bounce</b> — <b>implemented in 0.1.62</b> (Kevin's direction, after the
+      gap was hit live): at the walk's single Finalizing→Ready flip, the agent deletes this node's
+      <code>network-operator-sriov-device-plugin</code> pod (namespace <code>nvidia-network-operator</code>,
+      name-prefix match) so the DaemonSet recreates it against the settled hardware state. The plugin
+      discovers VFs once at pod startup and does not watch sysfs, so a VF-count change landing without a
+      reboot left its advertised inventory stale — Kevin hit exactly that on the 4→0 downsize (the pod
+      needed a manual restart to re-inventory the NICs). Best-effort and AFTER the phase flip: a bounce
+      failure can never hold the walk back from Ready; the replacement pod may sit Pending for the few
+      seconds until the taint release, which the DaemonSet retries on its own. A failed bounce (transient
+      API error, missing RBAC) retries on the Ready-phase verify passes (5-min cadence) with one Warning
+      event per pending stretch; a cluster without the operator (list 404s) completes as a no-op.
+      <b>Requires <code>pods list/delete</code> on the nodeprep-agent ClusterRole — externally enforced
+      manifests.</b> Earlier history: demoted to watch item 2026-09-04 (the taint keeps the plugin off
+      during the walk — proven on the fresh-node walk: it scheduled only at taint release, 31 s after the
+      plain daemonsets, and found the VFs in place); the residual gap (a VF-count change without a reboot
+      on a node whose plugin is already running) is what 0.1.62 now covers. (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
   <li><b><span class="no">[pending]</span> VF GUID/MAC ownership under the NVIDIA Network Operator</b> —
@@ -1147,6 +1153,19 @@
       <code>sriov-network-config-daemon</code> stayed idle throughout ("interface policy spec not yet
       set" — no SriovNetworkNodePolicy targets the node), so the operator and nodeprep did not fight
       over the 0-VF state.</li>
+  <li><b>0.1.62 — device-plugin bounce at the Ready flip (Kevin's direction; closes the §7 residual
+      gap he hit live).</b> On every non-Ready→Ready transition, the agent lists pods in
+      <code>nvidia-network-operator</code> (field selector <code>spec.nodeName</code>, name-prefix
+      <code>network-operator-sriov-device-plugin-</code>) and deletes this node's — the DaemonSet then
+      recreates it and re-discovers the inventory, closing the stale-advertisement gap that bit the
+      4→0 downsize. Wired at <code>finalizeAndVerify</code>'s phase flip — the single Finalizing→Ready
+      transition point (cold-halt recovery included, via <code>walkStageFor</code>) — after the flip,
+      so the bounce is best-effort and can never delay Ready. Retry-on-failure rides the Ready-phase
+      verify passes via an in-memory pending flag; one Warning event per pending stretch. Unit-tested
+      (<code>deviceplugin_test.go</code>: node filtering, sibling survival, delete-failure retry
+      round-trip, list-failure pending, missing-operator 404). <b>RBAC gate:</b> the agent ClusterRole
+      gains <code>pods get/list/delete</code> — externally enforced, so the management-system copy must
+      add it or every bounce 403s (surfaced as the Warning event + 5-min log lines).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1337,7 +1356,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.61 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.62 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
