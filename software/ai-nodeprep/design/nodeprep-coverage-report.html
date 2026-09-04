@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.58</span>
+    <span>nodeprep-v105.sh → controller v0.1.60</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.58</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.60</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1021,32 +1021,65 @@
       — the annotation is gone. <code>TestClearSriovStage</code> covers the cleanup; the warning
       composition is host-bound (no sysfs seam in v0.1) and live-verified on the next downsize
       walk.</li>
-  <li><b>mlxfwreset before reboot: validated as NOT applicable to our CX-4 Lx (research, no
-      controller change).</b> The Mellanox/NVIDIA <i>nic-configuration-operator</i> ships
-      <code>FW_RESET_AFTER_CONFIG_UPDATE</code>: after <code>mlxconfig</code> applies NV and before
-      the host reboot it runs <code>mlxfwreset --device &lt;pci&gt; reset --yes</code> (source:
-      <code>pkg/configuration/utils.go</code>, <code>ResetNicFirmware</code>), because "on some
-      platforms, explicit FW reset is required before reboot to apply the changes to NV spec" —
-      the README scopes this to DGX servers where the warm reboot does not pick the change up.
-      Our warm reboots behave exactly that way, so the technique was a candidate replacement for
-      the cold-halt machine. Validated on the c2-06 CX-4 Lx mezz (FW 14.32.1010, FS3, MFT
-      4.36.0-147) and rejected: a <b>level-3 reset (its default; driver restart + PCI reset) never
-      applies a staged <code>NUM_OF_VFS</code></b> — <code>sriov_totalvfs</code> was unchanged
-      across three resets over two set→reset→read cycles, because this FW samples
-      <code>NUM_OF_VFS</code> only at real power-on. Worse, the reset is <i>destructive</i> to the
-      staging: with VFs attached it silently reverted the staged NV (flash 8→4, the running
-      config), which would convert a pending escalation into silent convergence-with-drift; with
-      VFs detached it preserved the staging. A <b>level-4 arm (warm-reboot reset) is refused by
-      the FW outright</b> — the MFRL register write fails "bad parameter (265)", with and without
-      VFs attached — even though <code>mlxfwreset q</code> advertises level 4 as Supported: the
-      capability query lies on this firmware. Two operational hazards recorded alongside: the
-      mezz is one chip, so a level-3 reset on one PF full-chip-resets the sibling and can wedge
-      its E-Switch (<code>pci_enable_sriov failed -EIO</code> on stale vports; cleared by the next
-      driver re-init), and the drift machinery handled that collateral live exactly as designed —
-      boot-verify flagged the numvfs drift, re-tainted, repaired to Done once the write succeeded,
-      and released the taint. If a newer-NIC profile (ConnectX-6+/DGX-class, where the operator's
-      technique does work) ever joins the fleet, the gate must check actual MFRL acceptance rather
-      than <code>q</code>'s answer, and never reset with VFs attached.</li>
+  <li><b>mlxfwreset before reboot — the FW_RESET_AFTER_CONFIG_UPDATE technique, validated and
+      shipped (0.1.59, Kevin's direction; supersedes the earlier "not applicable" reading, which
+      was a measurement artifact).</b> The Mellanox/NVIDIA <i>nic-configuration-operator</i> runs
+      <code>mlxfwreset --device &lt;pci&gt; reset --yes</code> (level 3, driver restart + PCI
+      reset) after <code>mlxconfig</code> applies NV and before the host reboot, because "on some
+      platforms, explicit FW reset is required before reboot to apply the changes to NV spec".
+      <b>The decisive mechanism</b> (settled live on the c2-06 CX-4 Lx mezz, FW 14.32.1010, FS3,
+      MFT 4.36.0-147, and the reason the first validation missed it): the reset does not apply the
+      staged <code>NUM_OF_VFS</code> itself — <code>sriov_totalvfs</code> is indeed unchanged
+      across resets, which is what the first pass saw — it <b>consumes mlxconfig's pending-write
+      latch, and the NEXT WARM BOOT's function init then samples the value</b>. The working
+      sequence, proven in both directions (4→8 escalation and 8→4 restore, where plain warm
+      reboots never moved <code>totalvfs</code>): set <code>NUM_OF_VFS</code> → detach the VFs →
+      <code>mlxfwreset reset --yes</code> → warm reboot. Detaching first matters: with VFs
+      attached the reset silently reverts the staged NV (flash 8→4), converting a pending
+      escalation into silent convergence-with-drift. The hazards from the first validation all
+      reproduce and are load-bearing for the implementation: a <b>level-4 arm is refused by the
+      FW</b> (MFRL "bad parameter (265)") with and without VFs — <code>mlxfwreset q</code>
+      advertising level 4 as Supported is a lie on this firmware; and the mezz is one chip, so a
+      level-3 reset on one PF full-chip-resets the sibling and can wedge its E-Switch
+      (<code>pci_enable_sriov failed -EIO</code> on stale vports; a later reset with nothing
+      staged cleared it, <code>devlink</code> reload and unbind/bind did not).<br>
+      <b>0.1.59 implements it</b> at both NV-write points, once per chip per pass
+      (<code>fwResetOncePerChip</code>, <code>sriovChipKey</code>), best-effort with a VF-detach
+      guard and a 3-minute budget: <code>stepMlxconfig</code> runs the reset after a set carrying
+      <code>NUM_OF_VFS</code> — collapsing the old apply-reboot-then-warm-load ladder into ONE
+      reboot — and <code>blockedSriovShort</code>'s warmLoad case runs it on fresh-issuance passes
+      only (staged→load transition or the anchor; steady-state re-record passes never bounce the
+      driver). Any failure degrades to the plain warm reboot and the sriov-nv-stage cold ladder
+      stays as the backstop. <b>Live: c2-02 walked profile gen 18 (numVFs 4→8) to Ready under
+      0.1.59 with <code>totalvfs=8</code>/<code>numvfs=8</code> on both PFs, identities written,
+      <code>BootVerified</code> — the escalation landed warm.</b> One inefficiency surfaced on the
+      imported-walk path: when the set-time reset and a warmLoad issuance land in the same boot
+      (no reboot between them), the chip's reset runs twice — harmless on this firmware (the
+      detached-VF reset preserves staging; the second run re-arms an already-consumed latch), but
+      a per-boot "reset armed for chip X" marker would dedup it if a profile ever needs the
+      savings.</li>
+  <li><b>0.1.60 — an imported Finalizing walk that owes a VF raise rewinds to Configuring.</b>
+      Re-adoption imports the bash-complete label straight to Finalizing
+      (<code>adoptNode</code> → <code>phases.FromLegacy</code>), and the controller re-stamps that
+      label from the phase every reconcile — so every re-adoption re-imports the same dead end: a
+      VF demand above the committed NV blocks forever on advice naming the mlxconfig step, which
+      an imported walk never runs (found live on re-adopted bl-r1-c2-06 while validating 0.1.59;
+      its ledger holds only Finalizing entries, and deleting the NodePrep to re-adopt raced the
+      controller's label mirror — recreated in Finalizing within 15s). The rewind mirrors the
+      profile-generation re-walk: <code>sriovNumVFs</code> flags the
+      <code>sriovNeedsApply</code> outcome (no stage armed, NV below the demand) in a Finalizing
+      walk, and <code>runStage</code> upserts the Configuring stage into its own ledger as Pending
+      — the reset rides runStage's single ledger patch, since a patch from inside the step body
+      would be clobbered by the full-ledger write at the end of the pass — drops pending reboot
+      requests, flips the phase to Configuring, and stamps a <code>sriov-rewound</code>
+      annotation: once per NodePrep, so firmware that can never satisfy the demand parks instead
+      of ping-ponging every 5s poll. <code>blockedSriovShort</code> now returns the outcome so the
+      caller can distinguish an owed raise from the warm-load ladder.
+      <code>TestMaybeRewindImportedWalk</code> covers the upsert (imported shape: Finalizing-only
+      ledger gains mlxconfig/netplanMTU as Pending; Finalizing states untouched; idempotent),
+      <code>TestBlockedSriovShortNeedsApply</code> the outcome signal. <b>Live: the rewind fired
+      on bl-r1-c2-06, the walk re-ran Configuring, raised <code>NUM_OF_VFS</code> 4→8 with the
+      mlxfwreset arm, and requested its single apply reboot.</b></li>
 </ul>
 
 <h3>On every node</h3>
@@ -1237,7 +1270,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.58 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.60 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
