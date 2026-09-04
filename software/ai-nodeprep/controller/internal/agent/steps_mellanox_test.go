@@ -383,6 +383,49 @@ func TestStepDisableACSVFExclusivity(t *testing.T) {
 // The disableACS message names every device ACS was written to — the
 // operator-facing mutation record — and the steady state says "no ACS
 // changes" instead of "disabled on 0".
+// The bash subtracts 50 bytes from every Ethernet VF's MTU; that headroom is
+// a switchdev requirement only (operator-corrected, 2026-09-04). Legacy VFs
+// carry the full profile MTU.
+func TestVfMTUWant(t *testing.T) {
+	profile := profileForTest(9000, "legacy", true)
+	if got := vfMTUWant(profile); got != 9000 {
+		t.Fatalf("legacy eswitch VF MTU = %d, want full 9000", got)
+	}
+	profile.Spec.EastWest.EswitchMode = "switchdev"
+	if got := vfMTUWant(profile); got != 8950 {
+		t.Fatalf("switchdev VF MTU = %d, want 8950 (bash -50 headroom)", got)
+	}
+	profile.Spec.EastWest.MTU = 0
+	if got := vfMTUWant(profile); got != 0 {
+		t.Fatalf("unset MTU = %d, want 0 (no MTU config)", got)
+	}
+}
+
+// VF MTU/bring-up enumeration is east-west rail-only: DPU-side VFs and
+// non-rail functions are not fn_rename_devices' concern, and a VF itself
+// never has VFs.
+func TestRailVFNetdevsGating(t *testing.T) {
+	a := &Agent{}
+	profile := profileForTest(9000, "legacy", true)
+	profile.Spec.EastWest.NumVFs = 1
+	profile.Spec.NorthSouth.NumVFs = 2
+
+	if got := railVFNetdevs(a, profile, pciDevice{pci: "0000:49:00.0", rail: "dpu", ibdev: "mlx5_0"}); got != nil {
+		t.Fatalf("dpu rail must be excluded: %v", got)
+	}
+	if got := railVFNetdevs(a, profile, pciDevice{pci: "0000:49:00.0", rail: "", ibdev: "mlx5_0"}); got != nil {
+		t.Fatalf("non-rail function must be excluded: %v", got)
+	}
+	if got := railVFNetdevs(a, profile, pciDevice{pci: "0000:49:00.2", rail: "r0_p0", ibdev: "mlx5_2", isVF: true}); got != nil {
+		t.Fatalf("a VF must never have VFs: %v", got)
+	}
+	// A rail PF whose VFs do not exist yet (no virtfn in sysfs) lists nothing
+	// rather than failing.
+	if got := railVFNetdevs(a, profile, pciDevice{pci: "0000:49:00.0", rail: "r0", ibdev: "mlx5_bogus"}); got != nil {
+		t.Fatalf("absent VFs must list empty, got %v", got)
+	}
+}
+
 func TestAcsSummary(t *testing.T) {
 	got := acsSummary([]string{"ff:0f.0", "ff:1d.0"}, []string{"ff:10.0", "ff:11.0", "ff:1e.0"}, nil)
 	want := "disabled ACS on: ff:0f.0, ff:1d.0 (3 already clear, 0 without ACS capability)"

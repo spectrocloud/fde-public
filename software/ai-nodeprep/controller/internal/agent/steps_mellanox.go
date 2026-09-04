@@ -469,10 +469,59 @@ func renamedTo(pci string) string {
 	return ents[0].Name()
 }
 
+// vfMTUWant computes the MTU for the VF netdevs of a rail-mapped PF.
+// Corrected bash logic (operator-directed, 2026-09-04): fn_rename_devices
+// subtracts 50 bytes from every Ethernet VF's MTU, but that headroom is a
+// switchdev requirement — in legacy eswitch mode the VF carries the full
+// profile MTU. 0 = no MTU configured (profile mtu unset).
+func vfMTUWant(profile *v1alpha1.NodePrepProfile) int {
+	mtu := profile.Spec.EastWest.MTU
+	if mtu <= 0 {
+		return 0
+	}
+	if profile.Spec.EastWest.EswitchMode == "switchdev" {
+		return mtu - 50
+	}
+	return mtu
+}
+
+// vfNetdev is one existing VF netdev of a rail-mapped PF.
+type vfNetdev struct {
+	vf   int
+	slot string // PCI address of the VF
+	name string // current netdev name (renamed or kernel)
+}
+
+// railVFNetdevs lists the existing east-west VF netdevs of a rail-mapped PF
+// (bash fn_rename_devices' VF block is east-west only — DPU VFs are not
+// touched there). VFs without a netdev yet are skipped: sriovNumVFs and
+// vfGuids run just before this step in the stage, and a still-probing VF is
+// picked up on a later pass through the same check.
+func railVFNetdevs(a *Agent, profile *v1alpha1.NodePrepProfile, d pciDevice) []vfNetdev {
+	n := vfCountFor(profile, d)
+	if n == 0 || d.isVF || !strings.HasPrefix(d.rail, "r") {
+		return nil
+	}
+	var out []vfNetdev
+	for vf := 0; vf < n; vf++ {
+		slot, err := vfSlotName(d.ibdev, vf)
+		if err != nil {
+			continue
+		}
+		name := renamedTo(slot)
+		if name == "" {
+			continue
+		}
+		out = append(out, vfNetdev{vf: vf, slot: slot, name: name})
+	}
+	return out
+}
+
 // udevCurrent reports whether the rename config and runtime state already
 // match: rule files render identically, every rail function carries its
 // eth_<rail> name, is up with the profile MTU, and has its roce_<rail> IB
-// device.
+// device — and every existing rail VF netdev carries the VF MTU (full in
+// legacy eswitch, -50 in switchdev) and is up.
 func udevCurrent(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice) bool {
 	wantNet, wantRDMA := renderNetRules(rails), renderRDMARules(rails)
 	got, err := os.ReadFile(filepath.Join(a.hostEtcUdev, "70-persistent-net.rules"))
@@ -484,6 +533,7 @@ func udevCurrent(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice)
 		return false
 	}
 	mtu := profile.Spec.EastWest.MTU
+	mtuVF := vfMTUWant(profile)
 	for _, d := range rails {
 		if renamedTo(d.pci) != "eth_"+d.rail {
 			return false
@@ -499,12 +549,24 @@ func udevCurrent(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice)
 		if _, err := os.Stat("/sys/class/infiniband/roce_" + d.rail); err != nil {
 			return false
 		}
+		for _, v := range railVFNetdevs(a, profile, d) {
+			if mtuVF > 0 {
+				if m, err := readSysfsInt("/sys/class/net/" + v.name + "/mtu"); err != nil || m != mtuVF {
+					return false
+				}
+			}
+			if !linkIsUp(v.name) {
+				return false
+			}
+		}
 	}
 	return true
 }
 
 // stepUdevRules implements fn_rename_devices: render the rename rules, reload
-// udev, trigger the renames, then bring every PF up with the profile MTU.
+// udev, trigger the renames, then bring every PF up with the profile MTU and
+// every rail VF netdev up with the VF MTU (full in legacy eswitch, -50 in
+// switchdev — corrected bash logic, operator-directed 2026-09-04).
 // The runtime pieces (trigger, ip link) are re-applied whenever the state
 // drifted — including by the post-boot bootVerify pass, matching the bash
 // script's at-boot precomplete re-run. Renaming only runs on Ethernet rails
@@ -571,7 +633,48 @@ func stepUdevRules(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	if len(errs) > 0 {
 		return v1alpha1.StepFailed, strings.Join(errs, "; ")
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("rail interfaces renamed and up: %s (mtu %d)", railNames(rails), mtu)
+	// VF bring-up (bash fn_rename_devices): after the renames, every rail VF
+	// netdev gets its MTU and is brought up. Corrected bash logic (2026-09-04):
+	// the 50-byte headroom is a switchdev requirement — legacy VFs carry the
+	// full profile MTU. In switchdev the VF representor gets the same -50
+	// treatment, best-effort (reps only exist under switchdev).
+	mtuVF := vfMTUWant(profile)
+	var vfNames []string
+	for _, d := range sortedByPci(rails) {
+		for _, v := range railVFNetdevs(a, profile, d) {
+			args := []string{"link", "set", "dev", v.name}
+			if mtuVF > 0 {
+				args = append(args, "mtu", strconv.Itoa(mtuVF))
+			}
+			args = append(args, "up")
+			if _, err := a.hostExec(nil, 15*time.Second, "ip", args...); err != nil {
+				errs = append(errs, fmt.Sprintf("%s bring-up: %v", v.name, err))
+				continue
+			}
+			vfNames = append(vfNames, v.name)
+			if profile.Spec.EastWest.EswitchMode == "switchdev" {
+				rep := fmt.Sprintf("nic_vf%d_rep_%s", v.vf, d.rail)
+				if _, err := os.Stat("/sys/class/net/" + rep); err == nil {
+					if _, err := a.hostExec(nil, 15*time.Second, "ip", "link", "set", "dev", rep,
+						"mtu", strconv.Itoa(mtuVF), "up"); err != nil {
+						a.logf("udevRules: representor %s bring-up failed: %v", rep, err)
+					}
+				}
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return v1alpha1.StepFailed, strings.Join(errs, "; ")
+	}
+	msg := fmt.Sprintf("rail interfaces renamed and up: %s (mtu %d)", railNames(rails), mtu)
+	if len(vfNames) > 0 {
+		vfMsg := fmt.Sprintf("; VFs up: %s", strings.Join(vfNames, ", "))
+		if mtuVF > 0 {
+			vfMsg += fmt.Sprintf(" (mtu %d)", mtuVF)
+		}
+		msg += vfMsg
+	}
+	return v1alpha1.StepDone, msg
 }
 
 func railNames(rails []pciDevice) string {

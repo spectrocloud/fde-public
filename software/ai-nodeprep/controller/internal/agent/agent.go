@@ -317,15 +317,16 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			// reboot after these steps ran — e.g. a Configuring mlxconfig
 			// reboot riding into the Finalizing stage — wipes the OS-level
 			// state: sriov_numvfs resets to 0 on the driver re-probe, the
-			// per-VF sriov/ sysfs dirs vanish with it, and setpci's ACS
-			// clears are lost. Done steps never re-run, so without this the
-			// walk parks forever (found live on bl-r1-c2-02: vfGuids blocked
-			// on absent sriov/0 while sriovNumVFs read Done "0→1" against a
-			// host showing numvfs=0). All three are cheap, detect-first and
-			// idempotent: converged hosts re-verify in one pass.
+			// per-VF sriov/ sysfs dirs vanish with it, setpci's ACS clears
+			// are lost, and the VF netdevs' MTU/link state (ip link) resets.
+			// Done steps never re-run, so without this the walk parks forever
+			// (found live on bl-r1-c2-02: vfGuids blocked on absent sriov/0
+			// while sriovNumVFs read Done "0→1" against a host showing
+			// numvfs=0). All four are cheap, detect-first and idempotent:
+			// converged hosts re-verify in one pass.
 			for i := range steps {
 				switch steps[i].Name {
-				case "sriovNumVFs", "vfGuids", "disableACS":
+				case "sriovNumVFs", "vfGuids", "disableACS", "udevRules":
 					if steps[i].State == v1alpha1.StepDone {
 						steps[i] = v1alpha1.StepStatus{Name: steps[i].Name, Stage: steps[i].Stage, State: v1alpha1.StepPending}
 					}
