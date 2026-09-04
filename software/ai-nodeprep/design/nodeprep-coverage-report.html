@@ -1165,7 +1165,12 @@
       (<code>deviceplugin_test.go</code>: node filtering, sibling survival, delete-failure retry
       round-trip, list-failure pending, missing-operator 404). <b>RBAC gate:</b> the agent ClusterRole
       gains <code>pods get/list/delete</code> — externally enforced, so the management-system copy must
-      add it or every bounce 403s (surfaced as the Warning event + 5-min log lines).</li>
+      add it or every bounce 403s (surfaced as the Warning event + 5-min log lines). <b>Live-validated
+      the same day:</b> RBAC landed in the management system (verified on the live ClusterRole), the
+      NodePrep delete→re-adopt path re-triggered a walk, and at the Ready flip the
+      <code>DevicePluginBounced</code> event fired — the running plugin pod was deleted and the
+      DaemonSet's replacement reached Running 11 s later (still Pending when the taint released, as
+      designed, then scheduled on its own).</li>
 </ul>
 
 <h3>On every node</h3>
