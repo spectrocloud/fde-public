@@ -654,10 +654,10 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 }
 
 // bootVerify re-runs Detect over the runtime-critical steps (design §6.1).
-// Fresh messages are written into the step ledger as it goes — a verify
-// pass is the step's latest outcome while Ready, and a provisioning-era
-// message would otherwise keep describing state (e.g. a superseded
-// inventory classification) for the life of the boot.
+// Fresh state and messages are written into the step ledger as it goes — a
+// verify pass is the step's latest outcome while Ready, and a
+// provisioning-era message would otherwise keep describing state (e.g. a
+// superseded inventory classification) for the life of the boot.
 func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) bool {
 	changed := false
 	for _, def := range stepDefs {
@@ -671,6 +671,17 @@ func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *
 			// only log record of, say, an ACS drift repair.
 			if s.State != state || s.Message != msg {
 				a.logf("boot-verify step %s: %s — %s", def.name, state, msg)
+			}
+			// The state lands in the ledger alongside the message: the
+			// boot-transient re-open (boot change on an already-Ready
+			// node) flips those steps to Pending, and a message-only
+			// patch left them Pending forever even though this pass had
+			// just run their bodies to Done — found live on bl-r1-c2-02
+			// boot #7: a Ready, boot-verified node whose ledger showed
+			// sriovNumVFs/vfGuids/udevRules/disableACS all Pending.
+			if s.State != state {
+				s.State = state
+				changed = true
 			}
 			if s.Message != msg {
 				s.Message = msg

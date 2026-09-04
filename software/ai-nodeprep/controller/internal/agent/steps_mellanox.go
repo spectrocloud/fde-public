@@ -255,12 +255,14 @@ func buildFlashSet(a *Agent, d pciDevice, vals map[string]string, p mlxconfigPar
 	flash = addKV(a, d, flash, vals, "SRIOV_EN", "1")
 	// PF_NUM_OF_VF_VALID is deliberately NOT set (bash-faithful). Setting it
 	// True was tried live on a Supermicro LOM (FW 14.32.1010) under the
-	// theory that factory False made the firmware ignore NUM_OF_VFS — that
-	// theory came from warm reboots, which never load SR-IOV NV on this
-	// class at all. The truth: with the flag True the firmware drops the
-	// SR-IOV PCIe capability entirely at power-on (no sriov_totalvfs in
-	// sysfs), while a sibling card's factory NV (flag False, NUM_OF_VFS=8,
-	// SRIOV_EN True) shows VFs are honored without the flag. Leave it False.
+	// theory that factory False made the firmware ignore NUM_OF_VFS. The
+	// truth: with the flag True the firmware drops the SR-IOV PCIe
+	// capability entirely at power-on (no sriov_totalvfs in sysfs), while a
+	// sibling card's factory NV (flag False, NUM_OF_VFS=8, SRIOV_EN True)
+	// shows VFs are honored without the flag. Leave it False. (The further
+	// theory that warm reboots never load SR-IOV NV at all was corrected in
+	// 0.1.46: this class commits a mlxconfig change on the boot after the
+	// set and loads it on the boot after that — see sriovNvPendingLoad.)
 	isSuper := d.devType == "SuperNIC"
 	isCx79 := matchesConnectX79(d.devType)
 	if p.lt == 2 {

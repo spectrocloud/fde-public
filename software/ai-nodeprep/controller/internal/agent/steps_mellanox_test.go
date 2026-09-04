@@ -392,6 +392,25 @@ func TestStepDisableACSVFExclusivity(t *testing.T) {
 // exercised live on the test node instead — covered by the live verification
 // in the 0.1.45 walk (vendor_id: GenuineIntel → intel_iommu=on derived).
 
+// sriovNvPendingLoad is the commit/load two-boot predicate: the NV NUM_OF_VFS
+// already satisfies the demand while the running sriov_totalvfs lags. In that
+// state stepSriovNumVFs records its own load-reboot request (0.1.46, live on
+// CX-4 Lx FW 14.32.1010) instead of stalling Blocked forever.
+func TestSriovNvPendingLoad(t *testing.T) {
+	if !sriovNvPendingLoad("4", 1, 4) {
+		t.Fatalf("NV 4 / totalvfs 1 / want 4: committed-but-not-loaded must hold")
+	}
+	if sriovNvPendingLoad("4", 4, 4) {
+		t.Fatalf("NV 4 / totalvfs 4 / want 4: converged, no load reboot")
+	}
+	if sriovNvPendingLoad("2", 1, 4) {
+		t.Fatalf("NV 2 < want 4: the mlxconfig step still owes the apply, not a load boot")
+	}
+	if sriovNvPendingLoad("", 1, 4) {
+		t.Fatalf("unreadable NUM_OF_VFS must not request a load reboot")
+	}
+}
+
 func TestVfMTUWant(t *testing.T) {
 	profile := profileForTest(9000, "legacy", true)
 	if got := vfMTUWant(profile); got != 9000 {

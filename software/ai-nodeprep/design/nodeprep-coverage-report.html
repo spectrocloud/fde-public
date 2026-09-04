@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.46</span>
+    <span>nodeprep-v105.sh → controller v0.1.48</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.46</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.48</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -638,8 +638,10 @@
         <code>Follow</code> for IB, MAC for legacy Ethernet), unbinds/rebinds only changed VFs, and renders the
         <code>71/61-persistent-*-vf.rules</code> rename rules (<code>rdma_rename</code>, ToS 96) — stale rules
         removed first. Transient states (PF re-probing, sriov dirs not yet created) Block instead of burning
-        attempts (§6, 0.1.33). Live it parks at the ceiling gate: the firmware exposes <code>TotalVFs=1</code>
-        until a cold power cycle loads the NV config (§6, 0.1.34). The switchdev branch (devlink eswitch flip +
+        attempts (§6, 0.1.33). Live the resize path is closed too (0.1.46): <code>numVFs</code> 1→4 walked
+        end-to-end — the ceiling gate held the step while the NV shadow was committed-but-not-loaded (the
+        two-boot semantics, see the callout below), then the load boot exposed <code>TotalVFs=4</code> and the
+        step tore down to 0 and wrote 4 on both rail PFs. The switchdev branch (devlink eswitch flip +
         OVS) remains v0.2 (§5). One deliberate divergence from the bash, operator-directed (0.1.35): east-west
         VFs land <b>only</b> on the rail-mapped functions (<code>spec.rails</code>) — the bash applied
         <code>NUMVF_EW</code> to every ConnectX-class function, which would also configure the host's bond0
@@ -769,12 +771,15 @@
   <li><b>BFB flash apply</b> — the BlueField-3 gate, rshim discovery and BFB config plumbing are in and
       gate-proven, but <code>bfb-install</code> itself needs a BlueField-3, which the lab cluster doesn't
       carry (v0.2).</li>
-  <li><b>VF pipeline end-to-end</b> — <b>closed for the base scenario</b> (2026-09-04, 0.1.41/0.1.42): after
-      the fresh reinstall and the 0.1.36 NV revert, <code>numVFs=1</code> walked end-to-end on
-      <code>bl-r1-c2-02</code> — NV config, <code>sriov_numvfs</code>, VF GUID/MAC synthesis and apply (the
-      unbound-window semantics, §2), udev rename rules — to Ready with BootVerified and the taint released.
-      Still open: higher VF counts on this hardware (only 1 VF exercised), the switchdev branch (devlink
-      eswitch flip, OVS bridges, representor rename rules), and the InfiniBand link-type path (port GUID +
+  <li><b>VF pipeline end-to-end</b> — <b>closed for the base scenario and the 4-VF resize</b> (2026-09-04,
+      0.1.41/0.1.42/0.1.46): after the fresh reinstall and the 0.1.36 NV revert, <code>numVFs=1</code> walked
+      end-to-end on <code>bl-r1-c2-02</code> — NV config, <code>sriov_numvfs</code>, VF GUID/MAC synthesis and
+      apply (the unbound-window semantics, §2), udev rename rules — to Ready with BootVerified and the taint
+      released. Raising <code>numVFs</code> to 4 (0.1.46) exercised the resize path (teardown-to-0 then
+      re-create), the fresh-VF identity writes on 8 VFs, and surfaced the two-boot NV semantics (callout
+      above); the converged host matches the bash reference node's 4-VF-per-PF state, with the documented
+      divergences (full-MTU VFs, GUID synthesis, LOM untouched). Still open: the switchdev branch (devlink
+      eswitch flip, OVS bridges, representor rename rules) and the InfiniBand link-type path (port GUID +
       policy) — each needs the corresponding hardware/mode.</li>
   <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
       runs <code>eswitch legacy</code> (the step's gate verified).</li>
@@ -809,6 +814,40 @@
       variants: <code>amd</code>/<code>off</code> (need AMD hardware / an iommu-off profile), hugepages
       params, and <code>grubCPUVendor</code>'s AMD/unknown branches (unit-untestable — reads
       <code>/proc/cpuinfo</code> directly; the Intel path is what this run exercised).</li>
+  <li><b>0.1.46/0.1.47 — <code>numVFs=4</code> + hugepages live-verified; two-boot SR-IOV NV semantics
+      found and fixed.</b> Profile gen 15 raised <code>eastWest.numVFs</code> 1→4 (the bash reference node's
+      exact shape) and set <code>hostBoot.hugepages.pages2M=1024</code>. <b>Hugepages verified</b> in one
+      cycle: <code>grubParams</code> wrote the trio (<code>default_hugepagesz=2M hugepagesz=2M
+      hugepages=1024</code>) into 90-nodeprep.cfg, the checkpoint reboot applied it, and
+      <code>/proc/cmdline</code> + <code>HugePages_Total: 1024</code> ended byte-identical to the reference.
+      <b>The VF half hit the two-boot wall</b> (callout above): the apply-reboot committed but did not load,
+      <code>sriovNumVFs</code> Blocked with the (wrong) cold-cycle advice, and the walk stalled — the exact
+      stall the bash's accidental second reboot papers over. Investigation on the live node: the running NV
+      was byte-identical to the reference's (mlxconfig q diff clean), <code>mlxfwreset</code> full-chip
+      reset did not load it, and a <code>mlxconfig reset</code> revealed the card's <b>factory</b> NV
+      (<code>NUM_OF_VFS=8</code>, <code>SRIOV_EN=True</code>, flag False) whose load at the next warm boot
+      exposed <code>TotalVFs=4</code> (firmware-clamped) — disproving the cold-cycle theory and pinning the
+      commit/load split. 0.1.47 fixes the controller: the Blocked-with-NV-satisfied state now records its
+      own load-reboot request (<code>sriovNvPendingLoad</code> + unit test), the advice text describes the
+      two-boot semantics, and the stale comments in <code>nvSriovAdvice</code>/<code>buildFlashSet</code>
+      are corrected. The walk self-healed the experimental NV drift live (mlxconfig re-applied the desired
+      set and the checkpoint fired the commit boot). Converged host: 8 VFs (4 per rail PF), synthesized
+      GUIDs/MACs, VF MTU 9000 (reference shows 8950 — the bash −50 switchdev bug), renamed
+      <code>nic_vf{0..3}_r0_p{0,1}</code>, Ready with boot verified.</li>
+  <li><b>0.1.48 — boot-verify writes step states, not just messages.</b> Boot #7 was this cluster's first
+      reboot landing on an already-Ready node (the NV commit boot from the 0.1.46/0.1.47 walk), and it
+      exposed a ledger gap in the boot protocol: the boot-transient re-open flipped
+      <code>sriovNumVFs</code>/<code>vfGuids</code>/<code>udevRules</code>/<code>disableACS</code> to
+      Pending, the Ready-phase boot-verify pass then re-ran their bodies to Done (numvfs rewritten 0→4,
+      VF GUIDs/MACs re-applied, all 8 VFs up at MTU 9000 — the host was fully converged), but the pass
+      patched only step <code>Message</code>s, never <code>State</code>s — so the ledger showed four
+      Pending steps on a Ready, boot-verified, taint-released node, indefinitely. No functional harm
+      (the Ready condition ignores ledger states; the next boot's re-open only flips Done steps; the
+      verify pass runs the bodies regardless of ledger state), but the ledger is the operator's view of
+      what ran, and it lied. Fix: <code>bootVerify</code> writes both state and message; non-Done verify
+      results (drift) now land in the ledger as Blocked/Failed too, which routes them through runStage's
+      retry/backoff machinery instead of an unpaced re-verify loop. Unit-tested
+      (<code>TestBootVerifyWritesStepStates</code>, <code>TestBootVerifyWritesNonDoneResult</code>).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -966,19 +1005,23 @@
      <code>False</code>.</p>
 </div>
 <div class="callout warn">
-  <p><b>Warm reboots do not reload SR-IOV NV settings</b> (0.1.34). With <code>NUM_OF_VFS=4</code> <i>and</i>
-     <code>PF_NUM_OF_VF_VALID=True</code> in NV, two full warm reboots left <code>TotalVFs: 1</code> on all four
-     functions — mlxconfig's "please power cycle machine" is literal for this firmware class: the PCIe SR-IOV
-     capability is programmed at device power-on, so only a cold (AC) cycle loads it. The bash script never hits
-     this because it runs inside provisioning, where the fleet tooling cold-cycles the machine right after
-     firmware configuration. Two smaller findings from the same window: <code>vfGuids</code> burned its five
-     attempts on "no IB device" while the PF was re-probing across those reboots — transient states now Block
-     instead of Failed (0.1.33) — and the resume annotation only re-opens Failed steps, so the mid-upgrade
-     residue (mlxconfig already Done before the flag fix) needed a one-time manual NV set on the remaining three
-     functions, the exact command sequence the agent runs. <code>sriovNumVFs</code> now consults the firmware NV
-     in its Blocked message: it distinguishes "NV not yet written (the mlxconfig apply reboot will land it)"
-     from "NV written but not loaded (cold power cycle needed)" — and the live ledger currently says exactly
-     that, with the node parked honestly until the cold cycle.</p>
+  <p><b>SR-IOV NV applies over two boots, not one</b> (0.1.46 — corrects the 0.1.34 reading). The 0.1.34
+     conclusion ("warm reboots do not reload SR-IOV NV; only a cold AC cycle loads it") was a misattribution.
+     Live on CX-4 Lx FW 14.32.1010: a <code>mlxconfig set</code> is <b>committed</b> by the boot after the set
+     (the NV shadow is promoted to the committed image) and <b>loaded</b> by the boot after that — only then
+     does <code>sriov_totalvfs</code> reflect it. The evidence trail: the gen-15 walk raised
+     <code>NUM_OF_VFS</code> 1→4, the controller's single apply-reboot left <code>TotalVFs=1</code> while NV
+     read back 4 (that was the <i>shadow</i>, not the committed image); a manual warm reboot then loaded the
+     previously committed value and <code>TotalVFs</code> moved — no AC cycle anywhere. The bash never
+     stumbles on this because its provision state machine runs <i>two</i> warm reboots between its NV set and
+     <code>fn_set_vfs</code>, providing the commit and load boots by accident. Consequences shipped in 0.1.47:
+     <code>sriovNumVFs</code>, Blocked at the ceiling while the NV already satisfies the demand
+     (<code>sriovNvPendingLoad</code>), records its own load-reboot request (deduped per boot, so the
+     checkpoint advances the pipeline one boot per reboot) instead of stalling forever, and the Blocked advice
+     describes the two-boot semantics rather than prescribing a cold cycle. The 0.1.32-era
+     <code>PF_NUM_OF_VF_VALID</code> capability drop is real and separate (§6, 0.1.36). Two smaller findings
+     from that window stand: transient states Block instead of burning attempts (0.1.33), and the resume
+     annotation only re-opens Failed steps.</p>
 </div>
 <div class="callout ok">
   <p><b>Test-harness hygiene</b>: MachineHealthCheck <code>maxUnhealthy</code> was patched to 0% before the reboot
@@ -995,7 +1038,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.46 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.48 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
