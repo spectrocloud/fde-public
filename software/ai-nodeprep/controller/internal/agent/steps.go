@@ -1279,11 +1279,13 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 }
 
 // sriovDownsizeWarning renders the non-blocking downsize notice (0.1.58).
-// The walk never stages a downward NUM_OF_VFS change, so the committed
-// value only moves when an operator cold power cycle (or an out-of-band
-// firmware reset plus reboot, 0.1.59's mechanism) lands it.
+// The walk DOES stage the downward NUM_OF_VFS at the Configuring stage
+// (applyMlxconfig sets any differing value) and, since 0.1.59, arms the
+// firmware reset so the next boot loads it — until that boot happens the
+// committed ceiling still exceeds the demand, and the node runs the
+// requested count regardless.
 func sriovDownsizeWarning(pci string, total, want int) string {
-	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change lands only after a cold power cycle (or a firmware reset plus reboot); the node runs the requested %d VFs regardless", pci, total, want, want)
+	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change is staged in firmware NV and lands on the boot that follows its firmware-reset arm (the walk's apply reboot, or the next natural boot); the node runs the requested %d VFs regardless", pci, total, want, want)
 }
 
 // stepOvsBridges checks br-rail-rN bridges exist in the OVS database when
