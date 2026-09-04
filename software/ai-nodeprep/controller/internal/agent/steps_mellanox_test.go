@@ -497,6 +497,81 @@ func TestSriovStageAnnotationMerge(t *testing.T) {
 	}
 }
 
+func TestSriovChipKey(t *testing.T) {
+	cases := []struct{ pci, want string }{
+		{"0000:49:00.0", "0000:49:00"},
+		{"0000:49:00.1", "0000:49:00"}, // same chip as .0 — one firmware
+		{"0000:16:00.0", "0000:16:00"}, // the LOM pair is a different chip
+		{"0000:49:00", "0000:49:00"},   // already function-less
+	}
+	for _, c := range cases {
+		if got := sriovChipKey(c.pci); got != c.want {
+			t.Errorf("sriovChipKey(%q) = %q, want %q", c.pci, got, c.want)
+		}
+	}
+}
+
+func TestFwResetWarmLoadOncePerChip(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{nodePrepsGVR: "NodePrepList"})
+	npU := &unstructured.Unstructured{}
+	npU.SetGroupVersionKind(schema.GroupVersionKind{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: v1alpha1.NodePrepKind})
+	npU.SetName("node-1")
+	if _, err := dyn.Resource(nodePrepsGVR).Create(context.Background(), npU, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the fake NodePrep: %v", err)
+	}
+	a := &Agent{nodeName: "node-1", dyn: dyn, client: clientfake.NewSimpleClientset(), allowReboot: true}
+
+	// A staged stage one boot old transitions to load and issues the warm
+	// load: the firmware reset runs on that pass (recorded per chip even
+	// though the tool is absent on the test host — the dedup is the
+	// pass-scoped decision, not the exec), the request is recorded with the
+	// PF's PCI, and the stage lands in the annotation.
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.0":{"nv":4,"reboots":7,"state":"staged"}}`}
+	np.Status.Reboots.Total = 8
+	msg, cold := a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if cold {
+		t.Fatalf("the warm load pass must not report cold, got %q", msg)
+	}
+	if !strings.Contains(msg, "warm load reboot is requested") {
+		t.Fatalf("warm-load message must request the reboot, got %q", msg)
+	}
+	if !a.fwResetChips["0000:49:00"] {
+		t.Fatalf("the transition pass must record the chip for the firmware reset, got %+v", a.fwResetChips)
+	}
+	if st := sriovStageParse(np.Annotations[sriovNvStageAnnotation])["0000:49:00.0"]; st.State != sriovStateLoad || st.Reboots != 8 {
+		t.Fatalf("the transition must persist the load stage at the new boot count, got %+v", st)
+	}
+	if len(a.pendingReboot) != 1 || a.pendingReboot[0].pci != "0000:49:00.0" {
+		t.Fatalf("exactly one warm-load request scoped to the PF expected, got %+v", a.pendingReboot)
+	}
+
+	// The steady-state pass while the reboot is pending re-records the
+	// request (deduped) but must NOT re-run the reset: the map was seeded
+	// by the transition pass and the message carries no reset fragment.
+	msg, _ = a.blockedSriovShort(np, pciDevice{pci: "0000:49:00.0"}, 4, 1, false)
+	if strings.Contains(msg, "firmware reset") {
+		t.Fatalf("steady-state warm-load passes must not re-run the reset, got %q", msg)
+	}
+	if len(a.pendingReboot) != 1 {
+		t.Fatalf("requestRebootBg must dedup the steady-state re-record, got %+v", a.pendingReboot)
+	}
+
+	// The sibling PF of the same chip on the same pass reuses the chip's
+	// reset decision — one entry, not two.
+	np2 := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	np2.Annotations = map[string]string{sriovNvStageAnnotation: `{"0000:49:00.1":{"nv":4,"reboots":7,"state":"staged"}}`}
+	np2.Status.Reboots.Total = 8
+	if _, cold := a.blockedSriovShort(np2, pciDevice{pci: "0000:49:00.1"}, 4, 1, false); cold {
+		t.Fatalf("sibling warm-load pass must not report cold")
+	}
+	if len(a.fwResetChips) != 1 {
+		t.Fatalf("both PFs of one chip must share a single reset decision, got %+v", a.fwResetChips)
+	}
+}
+
 func TestVfMTUWant(t *testing.T) {
 	profile := profileForTest(9000, "legacy", true)
 	if got := vfMTUWant(profile); got != 9000 {

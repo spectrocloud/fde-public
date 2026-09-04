@@ -179,6 +179,8 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 
 	var configured, matched []string
 	var failures []string
+	var nvChanged []string             // PFs whose set carried a NUM_OF_VFS change (0.1.59 firmware reset)
+	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, d := range a.mellanoxFns {
 		if d.isVF {
 			// VFs have no device NV of their own (mlxconfig query exits 3)
@@ -225,6 +227,7 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			for _, kv := range flash {
 				if kv.key == "NUM_OF_VFS" {
 					a.setSriovStage(np, d.pci, sriovNvStage{NV: kv.valN(), Reboots: np.Status.Reboots.Total, State: sriovStateStaged})
+					nvChanged = append(nvChanged, d.pci)
 					break
 				}
 			}
@@ -236,11 +239,28 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	if len(failures) > 0 {
 		return v1alpha1.StepFailed, strings.Join(failures, "; ")
 	}
+	// A NUM_OF_VFS change is armed for the apply reboot with the mlxfwreset
+	// firmware reset (0.1.59): the reset consumes mlxconfig's pending-write
+	// latch so the next warm boot's function init loads the staged value —
+	// on firmware that otherwise loads SR-IOV NV only at a real power cycle
+	// this collapses the old apply-reboot-then-warm-load ladder into one
+	// reboot. Once per chip (the mezz's two PFs share one firmware);
+	// best-effort, the sriov-nv-stage machine backstops.
+	fwMsgs := []string{}
+	for _, pci := range nvChanged {
+		if m := a.fwResetOncePerChip(np, pci); m != "" {
+			fwMsgs = append(fwMsgs, m)
+		}
+	}
 	if len(configured) > 0 {
 		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
 			fmt.Sprintf("mlxconfig applied to %s; reboot required for SR-IOV/eswitch config", strings.Join(configured, ",")), "")
-		return v1alpha1.StepBlocked, fmt.Sprintf("firmware config written to %d device(s) (%s), %d already matched; reboot requested",
+		msg := fmt.Sprintf("firmware config written to %d device(s) (%s), %d already matched; reboot requested",
 			len(configured), strings.Join(configured, ", "), len(matched))
+		if len(fwMsgs) > 0 {
+			msg += "; " + strings.Join(fwMsgs, "; ")
+		}
+		return v1alpha1.StepBlocked, msg
 	}
 	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched))
 }

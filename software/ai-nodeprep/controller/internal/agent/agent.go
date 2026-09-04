@@ -92,6 +92,13 @@ type Agent struct {
 	// cleared on success and on the resume annotation.
 	backoffUntil map[string]time.Time
 
+	// fwResetChips dedups the mlxfwreset firmware reset (0.1.59) to one run
+	// per physical chip per step pass — the mezz's two PFs share one
+	// firmware, so a reset staged for either function reinitializes both,
+	// and a second reset would just bounce the driver again. Cleared at the
+	// top of the steps that issue resets.
+	fwResetChips map[string]bool
+
 	// lastBootVerify paces Ready-phase boot-verify: verify runs immediately
 	// on a boot change, otherwise at most every bootVerifyInterval (the
 	// critical-step bodies cost hundreds of host commands per pass).

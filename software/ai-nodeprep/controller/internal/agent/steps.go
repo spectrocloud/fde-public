@@ -827,6 +827,74 @@ func (a *Agent) clearSriovStage(np *v1alpha1.NodePrep, pci string) {
 	}
 }
 
+// sriovChipKey groups the PCI functions of one physical device: strip the
+// function suffix. 0000:49:00.0 and 0000:49:00.1 are two ports of one
+// firmware chip — a reset on either reinitializes both (observed live: the
+// sibling's VFs drop and its E-Switch re-enables with the reset's driver
+// restart), so every FW-reset decision is per chip, not per PF.
+func sriovChipKey(pci string) string {
+	if i := strings.LastIndex(pci, "."); i >= 0 {
+		return pci[:i]
+	}
+	return pci
+}
+
+// fwResetOncePerChip runs the firmware reset that makes the next warm
+// reboot consume a pending SR-IOV NV change (0.1.59), at most once per
+// physical chip per pass. Recipe validated live on the CX-4 Lx mezz
+// (FW 14.32.1010): set NUM_OF_VFS, detach the VFs, `mlxfwreset --device
+// <pci> reset --yes` (default level 3: driver restart + PCI reset), then
+// the warm reboot loads the staged NUM_OF_VFS — where a warm reboot without
+// the reset never does, and the reset alone never lands it either (the
+// firmware samples NUM_OF_VFS at function init, not at FW reload; the
+// reset consumes mlxconfig's pending-write latch so the boot's function
+// init sees the new value). This is the Mellanox nic-configuration-
+// operator's FW_RESET_AFTER_CONFIG_UPDATE flow (its ResetNicFirmware runs
+// between the NV apply and the host reboot).
+//
+// The VFs are detached first: a reset with VFs attached silently reverts
+// the staged NV on this firmware (flash rewound to the running config,
+// observed live) — which would turn a pending escalation into silent
+// convergence-with-drift. Detaching is bounded by the reboot that follows
+// in this pipeline anyway; the walk recreates the VFs once totalvfs
+// permits. The reset is best-effort: on any failure (tool missing, refused,
+// timeout) the message says so and the walk falls through to the plain
+// warm-load-then-cold ladder, which remains the ultimate backstop.
+//
+// Returns a message fragment for the ledger ("" when this chip was already
+// reset in this pass), and never fails the calling step.
+func (a *Agent) fwResetOncePerChip(np *v1alpha1.NodePrep, pci string) string {
+	chip := sriovChipKey(pci)
+	if a.fwResetChips == nil {
+		a.fwResetChips = map[string]bool{}
+	}
+	if a.fwResetChips[chip] {
+		return ""
+	}
+	a.fwResetChips[chip] = true
+	if _, err := findHostTool("mlxfwreset"); err != nil {
+		return fmt.Sprintf("firmware reset skipped on %s: %v", chip, err)
+	}
+	// Detach the VFs of every PF on the chip — the reset reinitializes
+	// them all, and attached VFs revert the staging.
+	for _, fn := range a.mellanoxFns {
+		if fn.isVF || sriovChipKey(fn.pci) != chip {
+			continue
+		}
+		base := "/sys/bus/pci/devices/" + fn.pci
+		if got, err := readSysfsInt(base + "/sriov_numvfs"); err == nil && got > 0 {
+			if err := a.writeSysfs(base+"/sriov_numvfs", "0\n"); err != nil {
+				return fmt.Sprintf("firmware reset aborted on %s: detaching VFs on %s failed (%v) — a reset with VFs attached reverts the staged NV", chip, fn.pci, err)
+			}
+		}
+	}
+	out, err := a.hostExec(nil, 3*time.Minute, "mlxfwreset", "--device", pci, "reset", "--yes")
+	if err != nil {
+		return fmt.Sprintf("firmware reset failed on %s (%s): %v — falling back to the plain warm reboot", chip, strings.TrimSpace(out), err)
+	}
+	return fmt.Sprintf("mlxfwreset firmware reset performed on %s (driver restart + PCI reset) to arm the staged NV for the warm reboot", chip)
+}
+
 // sriovStageOutcome is what a sriov_totalvfs shortfall wants next, given
 // the PF's stage and the node's reboot count.
 type sriovStageOutcome int
@@ -932,6 +1000,7 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		shortOf = "no SR-IOV PCIe capability (no sriov_numvfs/sriov_totalvfs in sysfs)"
 	}
 	st := sriovStageParse(np.Annotations[sriovNvStageAnnotation])[nic.pci]
+	anchored := false
 	if st.State == "" || st.NV < want {
 		// No usable stage. One mlxconfig query distinguishes "the
 		// mlxconfig step has not applied a satisfying NUM_OF_VFS yet"
@@ -942,6 +1011,7 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 			if nvN, err := strconv.Atoi(vals["NUM_OF_VFS"]); err == nil && nvN >= want {
 				st = sriovNvStage{NV: nvN, Reboots: np.Status.Reboots.Total, State: sriovStateLoad}
 				a.setSriovStage(np, nic.pci, st)
+				anchored = true
 			}
 		}
 	}
@@ -965,9 +1035,26 @@ func (a *Agent) blockedSriovShort(np *v1alpha1.NodePrep, nic pciDevice, want, to
 		}
 		return msg, false
 	case sriovWarmLoad:
+		// Arm the pending NV for this warm reboot: the mlxfwreset firmware
+		// reset between the NV apply and the reboot is what makes the warm
+		// boot consume the change on firmware that otherwise loads SR-IOV
+		// NV only at a real power cycle (0.1.59, validated live on the
+		// CX-4 Lx mezz). It runs only on the pass that issues the load
+		// fresh — the staged→load transition, or the anchor pass above —
+		// never on the steady-state passes that merely re-record the
+		// request while the reboot is pending (those would otherwise
+		// bounce the driver every poll). Best-effort — on failure the
+		// plain warm reboot runs anyway and the cold ladder stays as the
+		// backstop.
+		var fwMsg string
+		if anchored || next != nil {
+			if m := a.fwResetOncePerChip(np, nic.pci); m != "" {
+				fwMsg = m + "; "
+			}
+		}
 		a.requestRebootBg(v1alpha1.RebootMlxConfigApplied,
 			fmt.Sprintf("%s: NUM_OF_VFS=%d is committed but the running firmware still exposes %s — requesting the one warm reboot that loads SR-IOV NV (if it does not land, the next step is a cold power cycle, not another reboot)", nic.pci, st.NV, shortOf), nic.pci)
-		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — the one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf), false
+		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d but the running firmware still exposes %s — %sthe one warm load reboot is requested; if the count is still short after it, the walk halts and a cold power cycle is required", nic.pci, st.NV, shortOf, fwMsg), false
 	case sriovWarmSpent:
 		return fmt.Sprintf("%s: firmware NV carries NUM_OF_VFS=%d and the warm reboot did not expose it (%s): this firmware loads SR-IOV NV changes only on a cold power cycle — power the node down and back up (MAAS/IPMI power-off, then on; a warm reboot is not enough). The reboot cycle is halted; the walk resumes automatically after the power cycle", nic.pci, st.NV, shortOf), true
 	case sriovColdHold:
@@ -1010,6 +1097,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	var converged []string
 	var down []string
 	coldAny := false
+	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, nic := range a.mellanoxFns {
 		want := vfCountFor(profile, nic)
 		base := "/sys/bus/pci/devices/" + nic.pci
@@ -1132,8 +1220,11 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 }
 
 // sriovDownsizeWarning renders the non-blocking downsize notice (0.1.58).
+// The walk never stages a downward NUM_OF_VFS change, so the committed
+// value only moves when an operator cold power cycle (or an out-of-band
+// firmware reset plus reboot, 0.1.59's mechanism) lands it.
 func sriovDownsizeWarning(pci string, total, want int) string {
-	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change lands only after a cold power cycle; the node runs the requested %d VFs regardless", pci, total, want, want)
+	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change lands only after a cold power cycle (or a firmware reset plus reboot); the node runs the requested %d VFs regardless", pci, total, want, want)
 }
 
 // stepOvsBridges checks br-rail-rN bridges exist in the OVS database when
