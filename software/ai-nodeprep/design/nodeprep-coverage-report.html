@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.56</span>
+    <span>nodeprep-v105.sh → controller v0.1.57</span>
     <span>2026-09-03</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.56</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.57</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -987,6 +987,23 @@
       "(0 VFs)" (seen live on c2-06's post-cycle boot-verify). The message now reports the actual
       per-PF readbacks (<code>"VF counts match profile: 0000:49:00.0=4, 0000:49:00.1=4"</code>),
       falling back to the old format only when no rail-mapped PF exists.</li>
+  <li><b>0.1.57 — hardware inventory scans PFs only (user-reported).</b> <code>enrichMellanox</code>
+      classified <b>every</b> Mellanox function including VFs — but a VF has no device NV of its own,
+      so every query fails with exit 3, the failure is never cached, and all 8 VFs on a VF-bearing
+      node re-logged <code>"inventory: … not classified"</code> on <b>every refresh, forever</b>
+      (the noise Kevin flagged on <code>nodeprep-agent-strl8</code>). The bash reference never scans
+      VFs (<code>mst status</code> lists PFs only), and <code>status.nics</code> is the hardware
+      inventory — a VF is runtime state of its PF (it appears and disappears with the PF's
+      <code>sriov_numvfs</code>, its configuration is inherited), not a separate hardware entry.
+      Fix: VFs are skipped in <code>enrichMellanox</code> (no exec, no log, no cache, not in the
+      MFT-pending count) and excluded from the published <code>nics</code>; the in-memory functions
+      list keeps them (the VF-count and VF-GUID steps walk them). Side fix:
+      <code>refreshInventory</code> re-rendered <code>nics</code> by index
+      (<code>nics[i] = mellanox[i]</code>) — silently dependent on both slices having equal length
+      and order; now an explicit PF-only rebuild. Verified live: 0 "not classified" lines per
+      refresh, <code>status.nics</code> lists 4 fully classified PFs on c2-06. Not unit-tested (the
+      sysfs/exec paths have no test seam in v0.1; the parsers above the seam are the tested
+      surface).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1177,7 +1194,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.56 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.57 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
