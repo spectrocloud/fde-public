@@ -1129,6 +1129,24 @@
       and the <b>network-operator-sriov-device-plugin pod scheduled on the node only at taint release</b>
       (its pod is 31 s younger than the plain daemonsets that ignored nothing), finding the VFs already in
       place — the §7 watch item's scheduling-order argument, proven end-to-end on a fresh node.</li>
+  <li><b>VF-disable direction (profile gen 20, <code>numVFs</code> 4→0, same node): the ladder closes with
+      no apply reboot, and the firmware floor keeps NV legal.</b> Returning the profile to 0 VFs after the
+      fresh-node walk exercised the last direction: Configuring's flash set carried
+      <code>NUM_OF_VFS=1</code> — the bash config-stage floor (<code>fwVFCount</code>: firmware
+      <code>NUM_OF_VFS</code> never goes below 1; the OS-level count is the sriov step's business) — and
+      <code>applyMlxconfig</code>'s standing drift path ran <code>mlxconfig -y reset</code> (factory NV)
+      then the full desired set, armed by the 0.1.59 firmware reset. <b>The teardown itself was performed
+      by the reset's VF-detach guard</b> (numvfs 4→0 before the chip reset), so the Finalizing pass read
+      0 live and converged without the explicit teardown write (that write path was proven in the 8→4
+      walk). <b>The walk reached Ready without firing the recorded apply reboot</b> — the 0.1.39
+      checkpoint's documented legitimate case: every step converged without needing the fresh boot, so
+      the staged NV (totalvfs 4→1) rides the node's next natural reboot and the OS-level demand (0 VFs)
+      is already satisfied. Same walk, the delete→re-adopt path validated live: the NodePrep was deleted
+      after Ready and the controller re-adopted it ~40 s later — the fresh walk re-ran every stage
+      idempotently (no hardware writes, ~8 s to Ready, fresh reboot ledger). The
+      <code>sriov-network-config-daemon</code> stayed idle throughout ("interface policy spec not yet
+      set" — no SriovNetworkNodePolicy targets the node), so the operator and nodeprep did not fight
+      over the 0-VF state.</li>
 </ul>
 
 <h3>On every node</h3>
