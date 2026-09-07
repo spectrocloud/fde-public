@@ -134,22 +134,7 @@ func scanInventory(profile *v1alpha1.NodePrepProfile) (nics []v1alpha1.NicStatus
 
 	// Rail assignment, second pass so multi-function cards (two ports on
 	// one PCI device) get the bash r<N>_p<port> grammar per function.
-	fnCount := map[string]int{}
-	for _, d := range mellanox {
-		fnCount[d.fn]++
-	}
-	for i := range mellanox {
-		d := &mellanox[i]
-		base := railByFn[d.fn]
-		if base == "" {
-			continue
-		}
-		if fnCount[d.fn] > 1 {
-			d.rail = base + "_p" + railPort(d.pci)
-		} else {
-			d.rail = base
-		}
-	}
+	assignRails(mellanox, railByFn)
 
 	// status.nics is the hardware inventory: PFs only, matching the bash
 	// scan (mst status lists PFs, never VFs) and the design's status
@@ -192,6 +177,38 @@ func (d pciDevice) nicStatus() v1alpha1.NicStatus {
 
 // railLabel renders the rail label the bash script would have produced:
 // mapped rail name, "dpu" for DPUs, empty when unassigned.
+// assignRails maps rail-mapped functions to their bash rail keys: a
+// function alone on its bus:device gets r<N>, a function sharing it with
+// another PF gets r<N>_p<fn> (bash L211-233). The count is PFs only — the
+// bash scans PFs (mst status lists PFs, never VFs), and a VF enumerates
+// under its PF's bus:device (0000:05:00.2 → fn 05:00), so counting VFs
+// would flip every keyed rail to the _p0 form the moment numvfs>0 and the
+// OVS/udev/VF steps would re-apply against netdevs and bridges that do not
+// exist (found live on DSX Air: the pre-reboot boot keyed r0_p0 with VFs
+// present, the post-reboot boot keyed r0 with none — the walk converged on
+// the latter only because numvfs was still 0 at Ready).
+func assignRails(mellanox []pciDevice, railByFn map[string]string) {
+	fnCount := map[string]int{}
+	for _, d := range mellanox {
+		if d.isVF {
+			continue
+		}
+		fnCount[d.fn]++
+	}
+	for i := range mellanox {
+		d := &mellanox[i]
+		base := railByFn[d.fn]
+		if base == "" {
+			continue
+		}
+		if fnCount[d.fn] > 1 {
+			d.rail = base + "_p" + railPort(d.pci)
+		} else {
+			d.rail = base
+		}
+	}
+}
+
 func railLabel(d pciDevice) string {
 	if d.rail != "" {
 		return d.rail

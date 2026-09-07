@@ -172,3 +172,27 @@ func TestOvsStepsSkipGates(t *testing.T) {
 		t.Fatalf("switchdev ovsBridges without OVS tooling must Block, got %s %q", st, msg)
 	}
 }
+
+// The rail-key grammar must not flip when VFs appear: a VF enumerates under
+// its PF's bus:device (0000:05:00.2 → fn 05:00), and counting it in the
+// multi-function check keyed every rail r0_p0 the moment numvfs>0 — the
+// OVS/udev steps then re-applied against eth_r0_p0/br-rail-r0_p0, which do
+// not exist (found live on DSX Air, 0.1.70: pre-reboot keys r0_p0, post-
+// reboot keys r0, both "correct" for their boot's inventory). The bash
+// scans PFs only (mst status), so the count is PFs only.
+func TestAssignRailsIgnoresVFs(t *testing.T) {
+	rails := map[string]string{"05:00": "r0", "06:00": "r1"}
+	fns := []pciDevice{
+		{pci: "0000:05:00.0", fn: "05:00"},
+		{pci: "0000:05:00.2", fn: "05:00", isVF: true},
+		{pci: "0000:06:00.0", fn: "06:00"},
+		{pci: "0000:06:00.1", fn: "06:00"},
+	}
+	assignRails(fns, rails)
+	want := []string{"r0", "r0", "r1_p0", "r1_p1"}
+	for i, w := range want {
+		if fns[i].rail != w {
+			t.Fatalf("fn %s: rail = %q, want %q", fns[i].pci, fns[i].rail, w)
+		}
+	}
+}
