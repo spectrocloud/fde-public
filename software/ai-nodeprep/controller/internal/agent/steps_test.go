@@ -198,3 +198,32 @@ func TestStepNfsRdmaGates(t *testing.T) {
 		t.Fatalf("detect-only must block: %s %s", state, msg)
 	}
 }
+
+// systemd's unit-missing wording varies by subcommand and release; all
+// observed forms must read as "skip", and ordinary failures must not.
+func TestSystemctlUnitMissing(t *testing.T) {
+	missing := []string{
+		"Failed to enable unit: Unit file rshim.service does not exist.", // enable, DSX Air live
+		"Failed to query unit: Unit file rshim.service does not exist.",  // is-enabled, newer systemd
+		"Failed to start rshim.service: Unit rshim.service not found.",   // older wording
+		"Unit file rshim.service does not exist.\n",
+		"rshim.service not-found", // list-unit-files style
+		"No such file or directory",
+	}
+	for _, out := range missing {
+		if !systemctlUnitMissing(out) {
+			t.Errorf("systemctlUnitMissing(%q) = false, want true", out)
+		}
+	}
+	present := []string{
+		"",                    // clean enable
+		"Created symlink ...", // clean enable output
+		"enabled",             // is-enabled answer
+		"Failed to restart rshim.service: Job failed. See system logs.", // real failure
+	}
+	for _, out := range present {
+		if systemctlUnitMissing(out) {
+			t.Errorf("systemctlUnitMissing(%q) = true, want false", out)
+		}
+	}
+}

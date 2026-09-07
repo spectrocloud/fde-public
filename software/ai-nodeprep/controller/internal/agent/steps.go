@@ -633,12 +633,38 @@ func stepLldpdConfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 // every run; the controller's steps are detect-first and idempotent). A node
 // without the unit — mft not in the package list, or no rshim in the image —
 // skips honestly: there is nothing to enable.
+// systemctlUnitMissing reports whether systemd's combined output says the
+// queried unit does not exist. The wording varies by subcommand and release:
+// "Failed to query unit: Unit file X.service does not exist." (is-enabled,
+// newer systemd), "Failed to enable unit: Unit file X.service does not
+// exist." (enable), the older "No such file or directory", and bare
+// "not-found" from list-unit-files style probes. Found live on DSX Air
+// (0.1.64): matching only the older "No such file" wording let a
+// BlueField-less host fall through to `enable`, whose different wording
+// failed the step — the DSX Air fleet has no rshim anywhere (emulated
+// ConnectX-7), the first host without the unit where the step ran.
+func systemctlUnitMissing(out string) bool {
+	return strings.Contains(out, "does not exist") ||
+		strings.Contains(out, "No such file") ||
+		strings.Contains(out, "not-found") ||
+		strings.Contains(out, "not found")
+}
+
 func stepRshimService(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	env := os.Environ()
 	out, err := a.hostExec(env, 30*time.Second, "systemctl", "is-enabled", "rshim")
-	if err != nil && strings.Contains(out, "No such file") {
-		// systemctl prints the missing-unit complaint to stderr, which
-		// CombinedOutput merges into out.
+	// The unit-missing skip keys on systemd's own wording, which varies by
+	// invocation: `is-enabled` prints "Failed to query unit: Unit file
+	// rshim.service does not exist." (or the older "No such file or
+	// directory"), `enable` prints "Failed to enable unit: Unit file
+	// rshim.service does not exist.", and `systemctl cat`-style probes
+	// return "not-found" — all seen across the lab fleet and DSX Air
+	// (0.1.64: the `is-enabled` "No such file" probe alone let a
+	// unit-less host fall through to the enable call, whose "Failed to
+	// enable unit" error then burned a retry). The enable failure below
+	// re-checks the same wording so a unit that vanishes mid-step also
+	// lands here as a skip, not a Failed.
+	if err != nil && systemctlUnitMissing(out) {
 		return v1alpha1.StepDone, "skipped: rshim unit not present (install mft via firmware.doca.packages)"
 	}
 	enabled := err == nil && strings.TrimSpace(out) == "enabled"
@@ -654,7 +680,10 @@ func stepRshimService(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 		return v1alpha1.StepFailed, fmt.Sprintf("daemon-reload: %v", err)
 	}
 	if !enabled {
-		if _, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", "rshim"); err != nil {
+		if out, err := a.hostExec(env, 30*time.Second, "systemctl", "enable", "rshim"); err != nil {
+			if systemctlUnitMissing(out) {
+				return v1alpha1.StepDone, "skipped: rshim unit not present (install mft via firmware.doca.packages)"
+			}
 			return v1alpha1.StepFailed, fmt.Sprintf("enabling rshim: %v", err)
 		}
 	}
