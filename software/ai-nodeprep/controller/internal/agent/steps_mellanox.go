@@ -161,13 +161,12 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	}
 	if a.verifyOnly {
 		// boot-verify (Ready phase) must not rewrite firmware NV: detect and
-		// report only. A boot-verify pass runs within the first minute of a
-		// boot, and the emulated NV table reads pre-init DEVICE_DEFAULT
-		// values in that window (DSX Air 0.1.71 live: the same untouched NV
-		// parsed as 0/8 devices drifted at boot+60s and verified Done at
-		// boot+6min) — the walk-time apply on that read reset the firmware
-		// NV, re-wrote identical values and armed a reboot, a cycle repeated
-		// on every boot and each reset wiping non-profile NV config.
+		// report only. 0.1.71 live: the boot-verify pass ran the walk-time
+		// apply minutes after a boot, its reset+set re-wrote the NV, armed a
+		// reboot, and the cycle repeated every boot. Root cause was a single
+		// non-persistent key (ROCE_ADAPTIVE_ROUTING_EN, see
+		// mlxconfigAirReverted) — but a Ready node's verification has no
+		// business rewriting firmware NV regardless of what it reads.
 		return stepMlxconfigVerify(a, profile)
 	}
 	if !a.mutationsAllowed(profile) {
@@ -356,7 +355,7 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	}
 	if len(drifted) > 0 {
 		return v1alpha1.StepBlocked, fmt.Sprintf(
-			"firmware NV diverges from the profile on %d device(s): %s; boot-verify reports only — the walk-time step applies the config, and an early-boot read can carry pre-init defaults that a re-verify matches",
+			"firmware NV diverges from the profile on %d device(s): %s; boot-verify reports only — the walk-time step applies the config",
 			len(drifted), strings.Join(drifted, "; ")) + mlxconfigAirRevertNote(airReverted)
 	}
 	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched)) + mlxconfigAirRevertNote(airReverted)
