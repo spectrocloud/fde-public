@@ -189,6 +189,7 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	}
 
 	var configured, matched []string
+	var airReverted []string // DSX Air devices reading the ROCE_ADAPTIVE_ROUTING_EN revert (not drift)
 	var failures []string
 	var nvChanged []string             // PFs whose set carried a NUM_OF_VFS change (0.1.59 firmware reset)
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
@@ -230,6 +231,12 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			configured = append(configured, d.pci)
 		} else {
 			matched = append(matched, d.pci)
+			for _, kv := range flash {
+				if cur, ok := vals[kv.key]; ok && mlxconfigAirReverted(d, kv.key, kv.val, cur) {
+					airReverted = append(airReverted, d.pci)
+					break
+				}
+			}
 		}
 	}
 	if len(failures) > 0 {
@@ -256,9 +263,9 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 		if len(fwMsgs) > 0 {
 			msg += "; " + strings.Join(fwMsgs, "; ")
 		}
-		return v1alpha1.StepBlocked, msg
+		return v1alpha1.StepBlocked, msg + mlxconfigAirRevertNote(airReverted)
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched))
+	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched)) + mlxconfigAirRevertNote(airReverted)
 }
 
 // mlxconfigScope reports whether firmware config addresses this function,
@@ -309,6 +316,7 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	}
 
 	var matched, drifted, failures []string
+	var airReverted []string
 	for _, d := range a.mellanoxFns {
 		if ok, why := mlxconfigScope(d, profile); !ok {
 			a.logf("mlxconfig: %s %s, skipping", d.pci, why)
@@ -331,8 +339,10 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 				keys = append(keys, fmt.Sprintf("%s absent from query (want %s)", kv.key, kv.val))
 				continue
 			}
-			if cur != kv.val {
+			if mlxconfigDrift(d, kv.key, kv.val, cur) {
 				keys = append(keys, fmt.Sprintf("%s=%s want %s", kv.key, cur, kv.val))
+			} else if mlxconfigAirReverted(d, kv.key, kv.val, cur) {
+				airReverted = append(airReverted, d.pci)
 			}
 		}
 		if len(keys) == 0 {
@@ -347,9 +357,41 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	if len(drifted) > 0 {
 		return v1alpha1.StepBlocked, fmt.Sprintf(
 			"firmware NV diverges from the profile on %d device(s): %s; boot-verify reports only — the walk-time step applies the config, and an early-boot read can carry pre-init defaults that a re-verify matches",
-			len(drifted), strings.Join(drifted, "; "))
+			len(drifted), strings.Join(drifted, "; ")) + mlxconfigAirRevertNote(airReverted)
 	}
-	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched))
+	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched)) + mlxconfigAirRevertNote(airReverted)
+}
+
+// mlxconfigAirReverted reports the DSX Air exception (0.1.73, Kevin's
+// direction): the emulated adapter reverts ROCE_ADAPTIVE_ROUTING_EN to 0 at
+// every boot no matter what the walk staged — the 0.1.72 apply set it to 1
+// and the post-set verify read 1, the next boot read 0 on all 8 devices.
+// The key cannot hold its value on the emulator, so that read is not drift;
+// it is reported informationally instead. Physical hardware still enforces
+// the key.
+func mlxconfigAirReverted(d pciDevice, key, want, cur string) bool {
+	return d.variant == "Air" && key == "ROCE_ADAPTIVE_ROUTING_EN" && want == "1" && cur == "0"
+}
+
+// mlxconfigDrift is the single drift comparison for a flash key, shared by
+// the walk-time detect, its post-set verify, and boot-verify so the DSX Air
+// exception can never diverge between them.
+func mlxconfigDrift(d pciDevice, key, want, cur string) bool {
+	if mlxconfigAirReverted(d, key, want, cur) {
+		return false
+	}
+	return cur != want
+}
+
+// mlxconfigAirRevertNote renders the DSX Air caveat when devices read the
+// reverted value, so the ledger explains why the key sits at 0 next to a
+// profile that wants 1 — the failure mode of 0.1.71 was a step message that
+// could not explain its own verdict.
+func mlxconfigAirRevertNote(pcis []string) string {
+	if len(pcis) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; ROCE_ADAPTIVE_ROUTING_EN reads 0 on %d emulated device(s) — DSX Air reverts it every boot (ignored)", len(pcis))
 }
 
 // mlxconfigParams carries the resolved profile values into the per-device
@@ -466,7 +508,7 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]
 			errs = append(errs, fmt.Sprintf("%s: key %s absent from query", d.pci, kv.key))
 			continue
 		}
-		if cur != kv.val {
+		if mlxconfigDrift(d, kv.key, kv.val, cur) {
 			need = true
 			drifted = append(drifted, fmt.Sprintf("%s=%s want %s", kv.key, cur, kv.val))
 		}
@@ -495,7 +537,7 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]
 		return true, append(errs, fmt.Sprintf("%s: verify query: %v", d.pci, err))
 	}
 	for _, kv := range flash {
-		if cur := fresh[kv.key]; cur != kv.val {
+		if cur := fresh[kv.key]; mlxconfigDrift(d, kv.key, kv.val, cur) {
 			errs = append(errs, fmt.Sprintf("%s: verify %s: want %s got %q", d.pci, kv.key, kv.val, cur))
 		}
 	}

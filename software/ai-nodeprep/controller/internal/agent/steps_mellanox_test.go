@@ -1311,3 +1311,95 @@ func TestMlxconfigBootVerifyDetectOnly(t *testing.T) {
 		t.Fatalf("walk path must run the reset, got %v", cmds)
 	}
 }
+
+// The DSX Air exception (0.1.73, Kevin's direction): the emulated adapter
+// reverts ROCE_ADAPTIVE_ROUTING_EN to 0 at every boot no matter what the
+// walk staged (0.1.72 live: the 16:26 apply set 1 and its post-set verify
+// read 1; the next boot read 0 on all 8 devices). The revert must not read
+// as drift on an emulated device — boot-verify reports Done with the
+// revert noted, and the walk-time detect must not reset+set (that was the
+// reboot loop) — while the same read on Physical hardware is still drift.
+func TestMlxconfigAirAdaptiveRevertNotDrift(t *testing.T) {
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+	profile.Spec.EastWest.RoceCC = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	// Every flash key matches the profile except ROCE_ADAPTIVE_ROUTING_EN,
+	// which the emulator dropped back to 0 at boot.
+	full := map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "ROCE_CC_RTT_TIMESTAMP_FORMAT": "0",
+		"ROCE_RTT_RESP_DSCP_P1": "48", "ROCE_RTT_RESP_DSCP_MODE_P1": "1",
+		"ROCE_ADAPTIVE_ROUTING_EN": "0", "USER_PROGRAMMABLE_CC": "1",
+		"TX_SCHEDULER_LOCALITY_MODE": "2", "ROCE_CC_STEERING_EXT": "2", "LINK_TYPE_P1": "2",
+	}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	var cmds []string
+	newAgent := func(variant string) *Agent {
+		cmds = nil
+		return &Agent{
+			mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", variant: variant, rail: "r0"}},
+			execFn: func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
+				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				if name == "mlxconfig" && len(args) == 3 && args[2] == "q" {
+					return mlxconfigAirQuery(full), nil
+				}
+				return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+			},
+		}
+	}
+
+	// Air, boot-verify: Done from the query alone, the revert noted.
+	a := newAgent("Air")
+	a.verifyOnly = true
+	st, msg := stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("the Air revert must not Block boot-verify, got %s %q", st, msg)
+	}
+	if !strings.Contains(msg, "ROCE_ADAPTIVE_ROUTING_EN reads 0") {
+		t.Fatalf("the Done message must note the ignored revert, got %q", msg)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("detect-only must exec only the query, got %v", cmds)
+	}
+
+	// Air, walk path: matched without a write — no reset, no set, no
+	// reboot request (the reboot-loop killer).
+	a = newAgent("Air")
+	a.hostMutations = true
+	st, msg = stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("the walk path must treat the Air revert as matched, got %s %q", st, msg)
+	}
+	if len(cmds) != 1 || strings.Contains(strings.Join(cmds, "\n"), "reset") {
+		t.Fatalf("the Air revert must not trigger a reset+set, got %v", cmds)
+	}
+	if len(a.pendingReboot) != 0 {
+		t.Fatalf("no write means no reboot request, got %v", a.pendingReboot)
+	}
+
+	// Physical hardware: the same read is real drift — boot-verify Blocks
+	// naming the key, and the note must not leak into the message.
+	a = newAgent("Physical")
+	a.verifyOnly = true
+	st, msg = stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepBlocked || !strings.Contains(msg, "ROCE_ADAPTIVE_ROUTING_EN=0 want 1") {
+		t.Fatalf("on Physical hardware the same read must stay drift, got %s %q", st, msg)
+	}
+	if strings.Contains(msg, "ignored") {
+		t.Fatalf("the Air note must not appear for Physical hardware, got %q", msg)
+	}
+}
