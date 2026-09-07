@@ -927,6 +927,7 @@ func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *
 	a.verifyOnly = true
 	defer func() { a.verifyOnly = false }()
 	changed := false
+	ok := true
 	for _, def := range stepDefs {
 		if !def.critical {
 			continue
@@ -956,10 +957,14 @@ func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *
 			}
 		}
 		if state != v1alpha1.StepDone {
-			if changed {
-				_ = a.patchStatus(ctx, map[string]interface{}{"steps": np.Status.Steps})
-			}
-			return false
+			ok = false
+			// No early return: a step early in the defs order that fails
+			// would starve every later step's re-open behind it for the
+			// whole boot (DSX Air 0.1.72: a Blocked mlxconfig — the
+			// emulated NV's pre-init read — parked the pass before the
+			// Finalizing steps could re-apply the boot-wiped runtime
+			// state). Run every critical step, aggregate, and fail the
+			// pass once.
 		}
 	}
 	if changed {
@@ -967,7 +972,7 @@ func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *
 			a.logf("boot-verify step patch failed: %v", err)
 		}
 	}
-	return true
+	return ok
 }
 
 // ensureSteps merges the current stage's step definitions into the

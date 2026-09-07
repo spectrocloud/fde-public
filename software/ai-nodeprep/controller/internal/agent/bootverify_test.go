@@ -94,3 +94,46 @@ func newVerifyTestAgent(t *testing.T) *Agent {
 		),
 	}
 }
+
+// A failing step must not starve the steps behind it: boot-verify runs
+// every critical step and fails the pass once. Found live on DSX Air
+// (0.1.72): a Blocked mlxconfig (the emulated NV's pre-init read, boot
+// bcb904f5) parked the pass before the Finalizing steps could re-apply the
+// boot-wiped runtime state — eswitch stayed legacy, no VFs, no eth_rN
+// netdevs, for the whole boot.
+func TestBootVerifyRunsStepsBehindAFailedOne(t *testing.T) {
+	orig := stepDefs
+	defer func() { stepDefs = orig }()
+	ran := map[string]bool{}
+	stepDefs = []stepDef{
+		{name: "fakeEarly", stage: v1alpha1.PhaseFinalizing, critical: true,
+			run: func(a *Agent, np *v1alpha1.NodePrep, p *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+				ran["fakeEarly"] = true
+				return v1alpha1.StepBlocked, "early drift"
+			}},
+		{name: "fakeLate", stage: v1alpha1.PhaseFinalizing, critical: true,
+			run: func(a *Agent, np *v1alpha1.NodePrep, p *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+				ran["fakeLate"] = true
+				return v1alpha1.StepDone, "late converged"
+			}},
+	}
+
+	np := &v1alpha1.NodePrep{Status: v1alpha1.NodePrepStatus{
+		Steps: []v1alpha1.StepStatus{
+			{Name: "fakeEarly", Stage: v1alpha1.PhaseFinalizing, State: v1alpha1.StepDone, Message: "old"},
+			{Name: "fakeLate", Stage: v1alpha1.PhaseFinalizing, State: v1alpha1.StepPending, Message: "stale"},
+		},
+	}}
+	if newVerifyTestAgent(t).bootVerify(context.Background(), np, &v1alpha1.NodePrepProfile{}) {
+		t.Fatal("bootVerify must fail when the early step reports Blocked")
+	}
+	if !ran["fakeEarly"] || !ran["fakeLate"] {
+		t.Fatalf("both steps must run despite the early failure: ran=%v", ran)
+	}
+	if got := np.Status.Steps[0]; got.State != v1alpha1.StepBlocked || got.Message != "early drift" {
+		t.Fatalf("early step ledger not updated: %+v", got)
+	}
+	if got := np.Status.Steps[1]; got.State != v1alpha1.StepDone || got.Message != "late converged" {
+		t.Fatalf("late step must still run to Done: %+v", got)
+	}
+}
