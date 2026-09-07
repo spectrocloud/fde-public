@@ -75,7 +75,7 @@ Real, exercised end-to-end:
 
 Detect-first steps (report Blocked honestly rather than half-configure):
 `downloads` is fully real (HTTP + sha256 + atomic rename); `ibCoreNetns`,
-`udevRules`, `ovsBridges`
+`udevRules`
 detect current host state and compare it to the profile; flashing/
 mlxconfig/lossless-RoCE steps gate on Mellanox presence and MFT
 tooling. With `-host-mutations` **off** (the default, mirrored by
@@ -118,6 +118,26 @@ the boot hook: the agent renders `nodeprep-boot.service` + its script onto
 the host (content-hashed, `Before=kubelet.service`, design §6.2), carrying
 the kubelet reset and the two-condition-gated `mlnx_interface_mgr` wait
 into every future boot.
+
+The switchdev branch (`spec.eastWest.eswitchMode: switchdev`) is real too,
+in the bash's order. **Configuring:** `netplanMTU` writes the rail stanzas
+with `ignore-carrier: true` (the PF has no carrier until OVS takes it).
+**Finalizing:** `sriovNumVFs` flips a legacy eswitch to switchdev before
+the VF count lands (bash L625-633: teardown to 0 → mode legacy →
+`flow_steering_mode hmfs` → mode switchdev; runtime state, so the
+boot-transient re-open re-flips after every boot), `vfGuids` skips the VF
+MAC write (switchdev VFs take identity from the PF) and renders the
+representor rename rule from the devlink port table, `ovsSetup` (the tail
+of fn_set_vfs, bash L775-793) resets the OVS database, applies the
+DOCA/hw-offload `other_config` (`doca-eswitch-max` = rail count), and
+creates one `br-rail-rN` bridge per rail (fail-mode=secure,
+datapath_type=netdev, MTU−50) — `udevRules` brings PF, VFs and VF
+representors up at the switchdev MTU, and `ovsBridges`
+(fn_add_pfs_to_rail_bridges) attaches each rail PF to its bridge as a
+DPDK interface after `losslessRoce` has configured it — the bash's
+ordering, so the PFC/ECN work lands on the PF before OVS's PMD takes it
+over. OVS absence (no `ovs-vsctl`, no `openvswitch-switch` unit) reports
+Blocked with the remedy rather than half-configuring.
 
 ## Safety model
 

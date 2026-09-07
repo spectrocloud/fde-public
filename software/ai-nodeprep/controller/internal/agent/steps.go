@@ -60,6 +60,9 @@ var stepDefs = []stepDef{
 	// --- Finalizing (bash fn_set_vfs et al.) ---
 	{name: "sriovNumVFs", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepSriovNumVFs},
 	{name: "vfGuids", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepVfGuids},
+	// The OVS setup is the tail of fn_set_vfs (bash L775-793): it runs before
+	// the rename/VF bring-up; the PF ports attach later in ovsBridges.
+	{name: "ovsSetup", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepOvsSetup},
 	{name: "udevRules", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepUdevRules},
 	{name: "losslessRoce", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepLosslessRoce},
 	{name: "ovsBridges", stage: v1alpha1.PhaseFinalizing, critical: true, run: stepOvsBridges},
@@ -1168,6 +1171,7 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	var blockedMsgs []string
 	var converged []string
 	var down []string
+	var flipped []string
 	coldAny := false
 	needsApplyAny := false
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
@@ -1198,6 +1202,46 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		// demand it means the committed NV still carries the older, higher
 		// count (0.1.58).
 		total, terr := readSysfsInt(base + "/sriov_totalvfs")
+		// fn_set_vfs's eswitch block (bash L625-633): under a switchdev
+		// profile with an east-west VF demand on it, a ConnectX-class
+		// function still in legacy eswitch is flipped BEFORE the VF count
+		// lands — VFs created under legacy carry the wrong switching model
+		// and the OVS rail bridges cannot steer them (0.1.68). The bash
+		// sequence: sriov_numvfs to 0, eswitch mode legacy, flow_steering
+		// mode hmfs, eswitch mode switchdev. The block is skipped when
+		// devlink already reports switchdev (the post-boot steady state);
+		// runtime eswitch state resets to legacy at every boot, so the
+		// boot-transient re-open (sriovNumVFs in the re-open list) re-runs
+		// this step and the flip re-fires with vfGuids re-opened behind it.
+		if switchdevFlip(profile, nic) {
+			mode, merr := a.eswitchMode(nic.pci)
+			if merr != nil {
+				// Transient (device re-probing) or tooling missing — report
+				// Blocked and retry rather than burn the attempt budget.
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf("%s: devlink eswitch mode query failed: %v", nic.pci, merr))
+				continue
+			}
+			if mode == "legacy" {
+				if !a.mutationsAllowed(profile) {
+					blockedMsgs = append(blockedMsgs, fmt.Sprintf("%s: eswitch is legacy, profile wants switchdev (devlink flip needs -host-mutations)", nic.pci))
+					continue
+				}
+				// bash L629-633: teardown to 0 first, then legacy → hmfs →
+				// switchdev. A flip failure fails the step: the switchdev
+				// scenario cannot proceed on a function the bridges cannot
+				// steer, and the retry budget re-runs the idempotent block.
+				if got > 0 {
+					if err := a.writeSysfs(base+"/sriov_numvfs", "0\n"); err != nil {
+						return v1alpha1.StepFailed, fmt.Sprintf("tearing down VFs on %s before the eswitch flip: %v", nic.pci, err)
+					}
+					got = 0
+				}
+				if err := a.setEswitchMode(nic.pci); err != nil {
+					return v1alpha1.StepFailed, fmt.Sprintf("eswitch flip to switchdev on %s: %v", nic.pci, err)
+				}
+				flipped = append(flipped, nic.pci)
+			}
+		}
 		if got == want {
 			if want > 0 {
 				converged = append(converged, fmt.Sprintf("%s=%d", nic.pci, got))
@@ -1300,6 +1344,9 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	default:
 		msg = fmt.Sprintf("VF counts match profile (%d VFs)", vfCountFor(profile, a.mellanoxFns[0]))
 	}
+	if len(flipped) > 0 {
+		msg += "; eswitch flipped legacy→switchdev: " + strings.Join(flipped, ", ")
+	}
 	if len(down) > 0 {
 		// Downsize under a higher ceiling: non-blocking by design — say so
 		// once, in the ledger and as a Warning event (0.1.58).
@@ -1321,8 +1368,237 @@ func sriovDownsizeWarning(pci string, total, want int) string {
 	return fmt.Sprintf("%s: firmware ceiling sriov_totalvfs=%d still exceeds the requested %d VFs — the downward NUM_OF_VFS change is staged in firmware NV and lands on the boot that follows its firmware-reset arm (the walk's apply reboot, or the next natural boot); the node runs the requested %d VFs regardless", pci, total, want, want)
 }
 
-// stepOvsBridges checks br-rail-rN bridges exist in the OVS database when
-// switchdev is requested.
+// switchdevFlip reports whether fn_set_vfs's eswitch block (bash L625)
+// applies to this function: switchdev requested, an east-west VF demand on
+// it, ConnectX/SuperNIC class. The bash gate is class + NUMVF_EW + mode;
+// the controller's VF demand is rail-mapped (vfCountFor — Kevin's
+// correction, 2026-09-03), so the flip follows the same mapping.
+func switchdevFlip(profile *v1alpha1.NodePrepProfile, nic pciDevice) bool {
+	return strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") &&
+		vfCountFor(profile, nic) > 0 && vfClassGUID(nic)
+}
+
+// eswitchMode reads the devlink eswitch mode of one PCI function
+// ("legacy" | "switchdev").
+func (a *Agent) eswitchMode(pci string) (string, error) {
+	out, err := a.hostExec(nil, 30*time.Second, "devlink", "dev", "eswitch", "show", "pci/"+pci)
+	if err != nil {
+		return "", err
+	}
+	return parseEswitchMode(out), nil
+}
+
+// parseEswitchMode extracts the mode from `devlink dev eswitch show`
+// output ("pci/0000:05:00.0: mode legacy inline-mode none encap-mode none").
+func parseEswitchMode(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		for i, w := range f {
+			if w == "mode" && i+1 < len(f) {
+				return f[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// setEswitchMode runs the bash flip sequence (fn_set_vfs L630-633): the
+// mode change to legacy is a no-op when the function is already legacy but
+// the bash issues it anyway, and flow_steering_mode hmfs is set between the
+// two mode writes — hmfs (hardware-mode flow steering) is what the OVS
+// rail bridges steer with.
+func (a *Agent) setEswitchMode(pci string) error {
+	steps := [][]string{
+		{"devlink", "dev", "eswitch", "set", "pci/" + pci, "mode", "legacy"},
+		{"devlink", "dev", "param", "set", "pci/" + pci, "name", "flow_steering_mode", "value", "hmfs", "cmode", "runtime"},
+		{"devlink", "dev", "eswitch", "set", "pci/" + pci, "mode", "switchdev"},
+	}
+	for _, s := range steps {
+		if _, err := a.hostExec(nil, 60*time.Second, s[0], s[1:]...); err != nil {
+			return fmt.Errorf("%s: %v", strings.Join(s, " "), err)
+		}
+	}
+	return nil
+}
+
+// ovsValue normalizes an `ovs-vsctl get` scalar: surrounding whitespace and
+// the quotes OVS puts around string-typed columns ("300000" → 300000).
+func ovsValue(out string) string {
+	v := strings.TrimSpace(out)
+	v = strings.Trim(v, "\"")
+	return strings.TrimSpace(v)
+}
+
+// ovsRailsMTU is the switchdev bridge/VF/representor MTU: the profile MTU
+// minus the 50-byte headroom the bash applies in every switchdev MTU write
+// (bridges fn_set_vfs L788, ports fn_add_pfs_to_rail_bridges, VF/reps in
+// fn_rename_devices). 0 when no MTU is configured.
+func ovsRailsMTU(profile *v1alpha1.NodePrepProfile) int {
+	if m := profile.Spec.EastWest.MTU; m > 50 {
+		return m - 50
+	}
+	return 0
+}
+
+// ovsRunning reports whether the OVS CLI answers (ovsdb-server up and the
+// ovs-vswitchd config readable). A down daemon reads as not running — the
+// setup step's apply path starts it.
+func (a *Agent) ovsRunning() bool {
+	out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "Open_vSwitch", ".", "_uuid")
+	return err == nil && ovsValue(out) != ""
+}
+
+// stepOvsSetup implements the DOCA OVS block that closes fn_set_vfs (bash
+// L775-793, switchdev only): stop openvswitch-switch, reset the OVS
+// database, start, apply the hw-offload/doc other_config, restart, and
+// create one br-rail-rN bridge per rail (fail-mode=secure,
+// datapath_type=netdev) brought up at the switchdev MTU. It runs between
+// vfGuids and udevRules — the bash's position: the tail of fn_set_vfs,
+// before the rename/VF bring-up; the PF ports are attached later by
+// ovsBridges (fn_add_pfs_to_rail_bridges), after losslessRoce.
+//
+// Detect-first: when every other_config value and every bridge already
+// matches, the step reports Done without touching the OVS database — the
+// bash re-runs its destructive conf.db reset on every complete-stage pass,
+// which a converged 5s-poll re-verify must not (a reset drops any OVS state
+// outside the rails). When anything deviates the full bash sequence runs.
+func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
+		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
+	}
+	if profile.Spec.EastWest.NumVFs+profile.Spec.NorthSouth.NumVFs == 0 {
+		// The OVS block lives inside fn_set_vfs's any-VF-demand gate.
+		return v1alpha1.StepDone, "skipped: no VFs requested (fn_set_vfs gate)"
+	}
+	if !a.hasMellanox() {
+		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
+	}
+	rails := railFns(profile, a)
+	if len(rails) == 0 {
+		return v1alpha1.StepDone, "skipped: no rail NICs to bridge"
+	}
+	if _, err := findHostTool("ovs-vsctl"); err != nil {
+		return v1alpha1.StepBlocked, fmt.Sprintf("ovs-vsctl not found on host (install the DOCA OVS / openvswitch-switch package): %v", err)
+	}
+	if st, msg := ovsSetupConverged(a, profile, rails); st != "" {
+		return v1alpha1.StepDone, msg
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "OVS bridge setup requires -host-mutations (detect-only run)"
+	}
+	// A present-but-inactive unit is NOT blocked: the apply path itself
+	// starts openvswitch-switch (bash L776-779 stop/rm/start), and live on
+	// DSX Air DOCA ships the unit disabled — only an absent unit is a real
+	// blocker.
+	if out, _ := a.hostExec(nil, 15*time.Second, "systemctl", "status", "openvswitch-switch", "--no-pager"); strings.Contains(out, "could not be found") {
+		return v1alpha1.StepBlocked, "openvswitch-switch unit not present on host (install the DOCA OVS / openvswitch-switch package)"
+	}
+	if err := a.applyOvsSetup(profile, rails); err != nil {
+		return v1alpha1.StepFailed, err.Error()
+	}
+	if st, msg := ovsSetupConverged(a, profile, rails); st != "" {
+		return v1alpha1.StepDone, msg
+	}
+	return v1alpha1.StepFailed, "OVS setup ran but the other_config/bridge readback still diverges from the profile"
+}
+
+// ovsSetupConverged verifies the OVS state the setup step manages; the
+// first return value is "" when converged, else the divergence description.
+func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice) (string, string) {
+	if !a.ovsRunning() {
+		return "divergent", "OVS is not answering ovs-vsctl"
+	}
+	numRails := len(rails)
+	wantOC := map[string]string{
+		"doca-init":          "true",
+		"hw-offload":         "true",
+		"hw-offload-ct-size": "0",
+		"max-idle":           "300000",
+		"doca-eswitch-max":   strconv.Itoa(numRails),
+	}
+	for _, k := range []string{"doca-init", "hw-offload", "hw-offload-ct-size", "max-idle", "doca-eswitch-max"} {
+		out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "Open_vSwitch", ".", "other_config:"+k)
+		if err != nil || ovsValue(out) != wantOC[k] {
+			return "divergent", fmt.Sprintf("other_config:%s = %q, want %s", k, ovsValue(out), wantOC[k])
+		}
+	}
+	mtu := ovsRailsMTU(profile)
+	var bridges []string
+	for _, d := range sortedByPci(rails) {
+		br := "br-rail-" + d.rail
+		out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "bridge", br, "fail_mode")
+		if err != nil || ovsValue(out) != "secure" {
+			return "divergent", fmt.Sprintf("%s fail_mode = %q, want secure", br, ovsValue(out))
+		}
+		out, err = a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "bridge", br, "datapath_type")
+		if err != nil || ovsValue(out) != "netdev" {
+			return "divergent", fmt.Sprintf("%s datapath_type = %q, want netdev", br, ovsValue(out))
+		}
+		if m, err := readSysfsInt("/sys/class/net/" + br + "/mtu"); err != nil || m != mtu {
+			return "divergent", fmt.Sprintf("%s mtu = %d, want %d", br, m, mtu)
+		}
+		if !linkIsUp(br) {
+			return "divergent", fmt.Sprintf("%s is not up", br)
+		}
+		bridges = append(bridges, br)
+	}
+	return "", fmt.Sprintf("OVS rail bridges verified: %s (hw-offload, doca-eswitch-max %d)", strings.Join(bridges, ", "), numRails)
+}
+
+// applyOvsSetup runs the bash L775-793 sequence verbatim.
+func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
+	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
+		return fmt.Errorf("stop openvswitch-switch: %v", err)
+	}
+	// The bash removes the OVS database so the DOCA other_config lands on a
+	// pristine one; bridges and flows outside the rails are dropped too —
+	// the bash's contract, kept.
+	if err := os.Remove("/host/var/lib/openvswitch/conf.db"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reset /var/lib/openvswitch/conf.db: %v", err)
+	}
+	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
+		return fmt.Errorf("start openvswitch-switch: %v", err)
+	}
+	sets := [][2]string{
+		{"doca-init", "true"},
+		{"hw-offload", "true"},
+		{"hw-offload-ct-size", "0"},
+		{"max-idle", "300000"},
+		{"doca-eswitch-max", strconv.Itoa(len(rails))},
+	}
+	for _, kv := range sets {
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
+			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
+		}
+	}
+	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "restart", "openvswitch-switch"); err != nil {
+		return fmt.Errorf("restart openvswitch-switch: %v", err)
+	}
+	mtu := ovsRailsMTU(profile)
+	for _, d := range sortedByPci(rails) {
+		br := "br-rail-" + d.rail
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--may-exist", "add-br", br,
+			"--", "set", "br", br, "fail-mode=secure", "datapath_type=netdev"); err != nil {
+			return fmt.Errorf("add-br %s: %v", br, err)
+		}
+		args := []string{"link", "set", "dev", br}
+		if mtu > 0 {
+			args = append(args, "mtu", strconv.Itoa(mtu))
+		}
+		args = append(args, "up")
+		if _, err := a.hostExec(nil, 15*time.Second, "ip", args...); err != nil {
+			return fmt.Errorf("bring up %s: %v", br, err)
+		}
+	}
+	return nil
+}
+
+// stepOvsBridges implements fn_add_pfs_to_rail_bridges (bash L863-874,
+// switchdev only): attach every rail PF to its br-rail-rN OVS bridge as a
+// DPDK interface at the switchdev MTU. It runs after losslessRoce — the
+// bash's position — so the PFC/ECN/register work lands on the PF before
+// OVS's PMD takes it over. Detect-first: an attached, correctly-typed,
+// correctly-sized port reads as converged without touching OVS.
 func stepOvsBridges(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
 		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
@@ -1330,10 +1606,80 @@ func stepOvsBridges(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
 	}
-	if _, err := os.Stat("/host/var/run/openvswitch/conf.db"); err != nil {
-		return v1alpha1.StepBlocked, "OVS not found on host (libovsdb integration lands in v0.2)"
+	rails := railFns(profile, a)
+	if len(rails) == 0 {
+		return v1alpha1.StepDone, "skipped: no rail NICs to bridge"
 	}
-	return v1alpha1.StepBlocked, "bridge convergence via libovsdb lands in v0.2"
+	if _, err := findHostTool("ovs-vsctl"); err != nil {
+		return v1alpha1.StepBlocked, fmt.Sprintf("ovs-vsctl not found on host (install the DOCA OVS / openvswitch-switch package): %v", err)
+	}
+	if !a.ovsRunning() {
+		return v1alpha1.StepBlocked, "OVS is not answering ovs-vsctl (openvswitch-switch down or uninstalled)"
+	}
+	mtu := ovsRailsMTU(profile)
+	var missing, attached []string
+	for _, d := range sortedByPci(rails) {
+		br, pf := "br-rail-"+d.rail, "eth_"+d.rail
+		if converged, why := ovsPortConverged(a, br, pf, mtu); converged {
+			attached = append(attached, pf+"→"+br)
+		} else {
+			missing = append(missing, why)
+		}
+	}
+	if len(missing) == 0 {
+		return v1alpha1.StepDone, "rail PFs attached to OVS bridges: " + strings.Join(attached, ", ")
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "OVS port attach requires -host-mutations (detect-only run): " + strings.Join(missing, "; ")
+	}
+	for _, d := range sortedByPci(rails) {
+		br, pf := "br-rail-"+d.rail, "eth_"+d.rail
+		// Bash-exact pair: the combined add-port/set, then the redundant
+		// second mtu_request set (L867-870).
+		cmd := "ovs-vsctl --may-exist add-port " + br + " " + pf + " -- set int " + pf + " mtu_request=" + strconv.Itoa(mtu) + " type=dpdk"
+		if _, err := a.hostExec(nil, 30*time.Second, "sh", "-c", cmd); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("%s: %v", cmd, err)
+		}
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "set", "int", pf, "mtu_request="+strconv.Itoa(mtu)); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("set int %s mtu_request: %v", pf, err)
+		}
+	}
+	for _, d := range sortedByPci(rails) {
+		br, pf := "br-rail-"+d.rail, "eth_"+d.rail
+		if ok, why := ovsPortConverged(a, br, pf, mtu); !ok {
+			return v1alpha1.StepFailed, fmt.Sprintf("%s on %s: %s", pf, br, why)
+		}
+		attached = append(attached, pf+"→"+br)
+	}
+	return v1alpha1.StepDone, "rail PFs attached to OVS bridges: " + strings.Join(attached, ", ")
+}
+
+// ovsPortConverged verifies one PF's OVS port: listed on the bridge,
+// interface type dpdk, mtu_request at the switchdev MTU.
+func ovsPortConverged(a *Agent, br, pf string, mtu int) (bool, string) {
+	out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "list-ports", br)
+	if err != nil {
+		return false, fmt.Sprintf("list-ports %s: %v", br, err)
+	}
+	found := false
+	for _, p := range strings.Fields(out) {
+		if p == pf {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, fmt.Sprintf("not attached to %s", br)
+	}
+	out, err = a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "interface", pf, "type")
+	if err != nil || ovsValue(out) != "dpdk" {
+		return false, fmt.Sprintf("interface type %q, want dpdk", ovsValue(out))
+	}
+	out, err = a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "interface", pf, "mtu_request")
+	if err != nil || ovsValue(out) != strconv.Itoa(mtu) {
+		return false, fmt.Sprintf("mtu_request %q, want %d", ovsValue(out), mtu)
+	}
+	return true, ""
 }
 
 // stepKubeletState clears the kubelet CPU/Memory manager state files the way
