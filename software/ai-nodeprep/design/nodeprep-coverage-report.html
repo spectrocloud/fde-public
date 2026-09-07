@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.66</span>
+    <span>nodeprep-v105.sh → controller v0.1.67</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.66</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.67</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1267,6 +1267,25 @@
       server discarded the whole event (live: <code>Event "nodeprep-bw89v" is invalid: message: ...
       can have at most 1024 characters</code>). Both deployed to DSX Air in the same session (agent
       digest <code>sha256:9a8fd057…</code>).</li>
+  <li><b>0.1.67 — the losslessRoce ECN writes never reached the host: read-only pod /sys.</b>
+      With DOCA 3.5.0 on DSX Air the ECN sysfs tree finally existed (0.1.65's openibd fix worked) —
+      and the step <i>still</i> failed 5/5 on all eight rails with readback failures, while a manual
+      write to the very same attribute stuck. The isolation pass settled it in one round: write →
+      <code>mlnx_qos</code> → ROCE_ACCL → PIPG → both 0x5006 writes → a backgrounded
+      <code>doca_spcx_cc</code> (present again on 3.5.0; it errors out on the emulator's
+      unsupported DPA and exits) all left the value at 1. Root cause was upstream of the tools: the
+      writes used <code>os.WriteFile</code> on the <b>pod's read-only /sys mount</b> (the
+      detect-only posture mounts it <code>readOnly: true</code>), failed EROFS into
+      <code>notes</code> — and the <code>Failed</code> return dropped the notes, so the step read
+      back the untouched defaults with no hint why. Every other sysfs mutation (sriov_numvfs, VF
+      GUIDs/MACs, PCI bind/unbind) already goes through <code>writeSysfs</code>'s nsenter tee into
+      the host namespace; <code>writeEcnAttr</code> now routes the ECN writes through the same
+      channel, and the <code>Failed</code> return carries the notes alongside the errors.
+      <code>TestWriteEcnAttrLandsWhereReadbackLooks</code> pins the write/read contract. The
+      isolation also sharpened the emulator picture: nothing in the bash-faithful apply sequence
+      resets ECN state — the readback failures were purely the dead transport. Controller rolled to
+      0.1.67 in the same session (it had still been running 0.1.65 since the event clamp lives in
+      shared <code>k8sutil</code>); agent digest <code>sha256:bf511040…</code>.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1457,7 +1476,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.66 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.67 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
