@@ -31,7 +31,16 @@ spec:
       # fn_init_sw_stage's exact install set: the DOCA bundle plus the
       # companion packages (mft is a hard prerequisite of the Mellanox-gated
       # steps — mlxconfig/bfb-install/mlnx_qos).
-      packages: [doca-all, lldpd, mft, netplan.io, pv, psmisc]
+      packages:
+      - linux-headers-$(uname -r)
+      - gcc-12
+      - libgcc-12-dev
+      - doca-all
+      - lldpd
+      - mft
+      - netplan.io
+      - pv
+      - psmisc
     aptUpgrade: false
 
   eastWest: # LINKTYPE_EW=2, NUMVF_EW=8, MTU_EW=9216, ESWITCH_MODE=switchdev
