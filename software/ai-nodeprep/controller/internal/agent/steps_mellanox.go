@@ -786,6 +786,27 @@ func stepLosslessRoce(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 	}
 
 	var notes, errs []string
+	// The bash restarts a failed openibd right before the lossless work
+	// (fn_inventory_hw L192-193, called at L962 immediately ahead of
+	// fn_set_lossless_roce): the RDMA/congestion-control stack openibd
+	// brings up is what creates the ECN sysfs tree this step writes.
+	// Found live on DSX Air: openibd failed at boot, the tree never
+	// appeared, and the step burned its whole retry budget on readbacks
+	// that could never pass. The bash gates its restart on IB link type;
+	// this step already gates on Ethernet + roceCC + device class, so the
+	// check lives here — same remedy, the scope where the stack matters.
+	if out, _ := a.hostExecQuiet(nil, 15*time.Second, "systemctl", "status", "openibd", "--no-pager"); out != "" {
+		switch openibdRestartDecision(out) {
+		case "restart":
+			if _, err := a.hostExec(nil, 120*time.Second, "systemctl", "restart", "openibd"); err != nil {
+				notes = append(notes, fmt.Sprintf("openibd restart failed: %v", err))
+			} else {
+				notes = append(notes, "openibd was failed; restarted so the RDMA/CC stack (and the ECN sysfs tree) comes up")
+			}
+		case "absent":
+			notes = append(notes, "openibd unit not present (no RDMA stack installed)")
+		}
+	}
 	for _, d := range sortedByPci(lossless) {
 		dev := renamedTo(d.pci)
 		if dev == "" {
@@ -799,15 +820,27 @@ func stepLosslessRoce(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 			errs = append(errs, fmt.Sprintf("%s: mlnx_qos: %v", dev, err))
 			continue
 		}
-		for n := 0; n <= 7; n++ {
-			for _, dir := range []string{"roce_rp", "roce_np"} {
-				if err := os.WriteFile(fmt.Sprintf("/sys/class/net/%s/ecn/%s/enable/%d", dev, dir, n), []byte("1"), 0o644); err != nil {
-					notes = append(notes, fmt.Sprintf("%s ecn %s/%d: %v", dev, dir, n, err))
+		// The ECN tree (/sys/class/net/<dev>/ecn) is created by the
+		// RDMA/congestion-control stack openibd brings up; when openibd
+		// fails at boot (root cause, found live on DSX Air) the tree never
+		// appears — the openibd restart above is the fix, and this path
+		// keeps the step honest when the tree still isn't there. The bash
+		// treats failed writes here as log-and-continue (no
+		// fn_process_result); mirror that — PFC/DSCP trust are applied and
+		// verified regardless.
+		if !ecnTreePresent(dev) {
+			notes = append(notes, fmt.Sprintf("%s: ecn sysfs interface absent — skipping ECN enables (PFC/DSCP trust still applied and verified)", dev))
+		} else {
+			for n := 0; n <= 7; n++ {
+				for _, dir := range []string{"roce_rp", "roce_np"} {
+					if err := os.WriteFile(filepath.Join(sysClassNetRoot, dev, "ecn", dir, "enable", strconv.Itoa(n)), []byte("1"), 0o644); err != nil {
+						notes = append(notes, fmt.Sprintf("%s ecn %s/%d: %v", dev, dir, n, err))
+					}
 				}
 			}
-		}
-		if err := os.WriteFile(fmt.Sprintf("/sys/class/net/%s/ecn/roce_np/cnp_dscp", dev), []byte("48"), 0o644); err != nil {
-			notes = append(notes, fmt.Sprintf("%s cnp_dscp: %v", dev, err))
+			if err := os.WriteFile(filepath.Join(sysClassNetRoot, dev, "ecn", "roce_np", "cnp_dscp"), []byte("48"), 0o644); err != nil {
+				notes = append(notes, fmt.Sprintf("%s cnp_dscp: %v", dev, err))
+			}
 		}
 		a.applySpectrumXCC(d, dev)
 	}
@@ -904,21 +937,59 @@ func (a *Agent) verifyLossless(rails []pciDevice) string {
 		if got := pfcEnabled(out); got != "0,0,0,1,0,0,0,0" {
 			errs = append(errs, fmt.Sprintf("%s: PFC readback is %q, want 0,0,0,1,0,0,0,0", dev, got))
 		}
-		for _, probe := range []struct {
-			path string
-			want string
-		}{
-			{fmt.Sprintf("/sys/class/net/%s/ecn/roce_rp/enable/3", dev), "1"},
-			{fmt.Sprintf("/sys/class/net/%s/ecn/roce_np/enable/3", dev), "1"},
-			{fmt.Sprintf("/sys/class/net/%s/ecn/roce_np/cnp_dscp", dev), "48"},
-		} {
-			b, err := os.ReadFile(probe.path)
-			if err != nil || strings.TrimSpace(string(b)) != probe.want {
-				errs = append(errs, fmt.Sprintf("%s: %s readback failed", dev, probe.path))
-			}
+		// Devices without the ECN tree are noted by the step body; verify
+		// only what exists (0.1.65).
+		if ecnTreePresent(dev) {
+			errs = append(errs, ecnReadbackErrs(dev)...)
 		}
 	}
 	return strings.Join(errs, "; ")
+}
+
+// ecnReadbackErrs verifies the freshly written ECN state of one netdev;
+// called only for devices that expose the tree.
+func ecnReadbackErrs(dev string) []string {
+	var errs []string
+	for _, probe := range []struct {
+		path string
+		want string
+	}{
+		{filepath.Join(sysClassNetRoot, dev, "ecn", "roce_rp", "enable", "3"), "1"},
+		{filepath.Join(sysClassNetRoot, dev, "ecn", "roce_np", "enable", "3"), "1"},
+		{filepath.Join(sysClassNetRoot, dev, "ecn", "roce_np", "cnp_dscp"), "48"},
+	} {
+		b, err := os.ReadFile(probe.path)
+		if err != nil || strings.TrimSpace(string(b)) != probe.want {
+			errs = append(errs, fmt.Sprintf("%s: %s readback failed", dev, probe.path))
+		}
+	}
+	return errs
+}
+
+// ecnTreePresent reports whether the netdev exposes the mlx5 ECN sysfs
+// tree. sysClassNetRoot is a var so tests can point it at a temp dir.
+var sysClassNetRoot = "/sys/class/net"
+
+func ecnTreePresent(dev string) bool {
+	_, err := os.Stat(filepath.Join(sysClassNetRoot, dev, "ecn"))
+	return err == nil
+}
+
+// openibdRestartDecision mirrors the bash fn_inventory_hw probe (L192):
+// `systemctl status openibd | grep "Active: failed"` → restart. Absent
+// units and healthy services need nothing; other states (inactive,
+// activating) the bash leaves alone. Returns the decision verb.
+func openibdRestartDecision(statusOut string) string {
+	switch {
+	case strings.Contains(statusOut, "could not be found"):
+		return "absent"
+	case strings.Contains(statusOut, "Active: failed"):
+		return "restart"
+	case strings.Contains(statusOut, "Active: active"):
+		return "healthy"
+	default:
+		return "other"
+	}
 }
 
 // stepDisableACS implements fn_disable_acs: clear the ACS Control Register

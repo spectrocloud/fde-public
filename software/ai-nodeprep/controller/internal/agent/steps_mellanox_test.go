@@ -1077,3 +1077,80 @@ func TestBlockedSriovShortNeedsApply(t *testing.T) {
 		t.Fatalf("an armed stage above the demand must be a warm-load outcome, got cold=%v needsApply=%v", cold2, needsApply2)
 	}
 }
+
+// The ECN tree hangs off the RDMA/CC stack openibd brings up; when
+// openibd fails at boot (found live on DSX Air) it never appears. 0.1.65:
+// the step restarts a failed openibd (bash fn_inventory_hw) and treats a
+// still-absent tree as log-and-continue (bash's non-fatal ECN writes) —
+// a missing tree must not fail the step, while a present-but-wrong tree
+// still must.
+
+func TestOpenibdRestartDecision(t *testing.T) {
+	failed := "\u00d7 openibd.service - openibd - configure Mellanox devices\n" +
+		"     Loaded: loaded (/usr/lib/systemd/system/openibd.service; enabled; preset: enabled)\n" +
+		"     Active: failed (Result: exit-code) since Mon 2026-09-07 11:56:24 UTC; 11min ago\n" +
+		"    Main PID: 2140 (code=exited, status=1/FAILURE)"
+	if got := openibdRestartDecision(failed); got != "restart" {
+		t.Fatalf("real failed status must restart, got %q", got)
+	}
+	if got := openibdRestartDecision("\u25cf openibd.service - openibd\n     Active: active (running) since Mon 2026-09-07; 3s ago"); got != "healthy" {
+		t.Fatalf("running service must be left alone, got %q", got)
+	}
+	if got := openibdRestartDecision("Unit openibd.service could not be found."); got != "absent" {
+		t.Fatalf("missing unit must be reported absent, got %q", got)
+	}
+	if got := openibdRestartDecision("\u25cf openibd.service\n     Active: inactive (dead)"); got != "other" {
+		t.Fatalf("inactive must be left alone like the bash, got %q", got)
+	}
+}
+
+func TestLosslessEcnTreeGate(t *testing.T) {
+	root := t.TempDir()
+	old := sysClassNetRoot
+	sysClassNetRoot = root
+	t.Cleanup(func() { sysClassNetRoot = old })
+
+	// renamedTo reads the real sysfs for the PCI function's netdev; keep
+	// the query failing so the device falls back to d.netdev (this host
+	// has no /sys/bus/pci either).
+	a := &Agent{}
+
+	// Absent tree: no ecn readback errors may appear (the mlnx_qos exec
+	// still fails in the unit environment — that error is expected).
+	if err := os.MkdirAll(filepath.Join(root, "eth_r0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	errsStr := a.verifyLossless([]pciDevice{{pci: "0000:05:00.0", netdev: "eth_r0", devType: "ConnectX7", rail: "r0"}})
+	joined := errsStr
+	if strings.Contains(joined, "ecn") {
+		t.Fatalf("absent ecn tree must not produce readback errors: %s", joined)
+	}
+	if !strings.Contains(joined, "mlnx_qos query") {
+		t.Fatalf("expected the mlnx_qos query error, got: %s", joined)
+	}
+
+	// Present tree with wrong values: readback failures must still fire.
+	for _, p := range [][]string{
+		{"eth_r1", "ecn", "roce_rp", "enable"},
+		{"eth_r1", "ecn", "roce_np", "enable"},
+	} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Join(p...)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(root, "eth_r1", "ecn", "roce_rp", "enable", "3"),
+		filepath.Join(root, "eth_r1", "ecn", "roce_np", "enable", "3"),
+	} {
+		if err := os.WriteFile(f, []byte("0"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Present tree with wrong values: readback failures must still fire.
+	// ecnReadbackErrs directly — verifyLossless's mlnx_qos query fails in
+	// the unit environment and continues past the probes.
+	errsStr = strings.Join(ecnReadbackErrs("eth_r1"), "; ")
+	if !strings.Contains(errsStr, "ecn/roce_rp/enable/3 readback failed") || !strings.Contains(errsStr, "ecn/roce_np/enable/3 readback failed") || !strings.Contains(errsStr, "cnp_dscp readback failed") {
+		t.Fatalf("present-but-wrong ecn tree must fail readback: %s", errsStr)
+	}
+}
