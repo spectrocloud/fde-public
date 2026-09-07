@@ -66,7 +66,10 @@ type Agent struct {
 
 	// pendingReboot accumulates reboot requests raised by step bodies
 	// during a stage pass; checkpointReboot fires them once the walk goes
-	// quiet (bash needs_reboot semantics, design §5.2).
+	// quiet (bash needs_reboot semantics, design §5.2). A recorded request
+	// also blocks the stage transition and a halt-now request stops the
+	// pass itself (0.1.66) — the walk can no longer carry a pending reboot
+	// into later steps or stages.
 	pendingReboot []rebootRequest
 
 	// stageProgressed reports whether the last runStage pass changed any
@@ -578,8 +581,9 @@ func (a *Agent) refreshInventory(ctx context.Context, np *v1alpha1.NodePrep, pro
 func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) {
 	phase := walkStageFor(np.Status.Phase)
 	// Quiescence signal for the reboot checkpoint: only a pass that actually
-	// changed a step counts as progress; early returns (admission gates)
-	// leave it false so an already-applied mutation's reboot still fires.
+	// changed a step counts as progress; early returns (admission gates, the
+	// halt-now hold, the pending-reboot stage block) leave it false so a
+	// recorded request still fires.
 	a.stageProgressed = false
 	// Pass-scoped request from the step bodies (sriovNumVFs sets it when an
 	// imported Finalizing walk blocks on a VF raise its Configuring stage
@@ -587,6 +591,16 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 	a.sriovRewindRequested = false
 	if phase == v1alpha1.PhasePending {
 		a.setPhase(ctx, v1alpha1.PhaseProvisioning, "start", "inventory done; starting provisioning")
+		return
+	}
+
+	// A halt-now reboot request (requestRebootHalt) recorded by a previous
+	// pass stops this one before any step runs: the host is carrying a
+	// staged but unapplied install, and this pass is the quiet pass
+	// checkpointReboot fires the reboot from. Without the hold the walk
+	// would keep consuming steps against a host that is about to reboot.
+	if a.hasHaltNowRequest() {
+		a.logf("halt-now reboot request pending; holding the stage pass until the boot_id changes")
 		return
 	}
 
@@ -674,6 +688,17 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 				a.logf("step %s -> %s: %s", def.name, s.State, s.Message)
 			}
 		}
+		// A step body just recorded a halt-now request (DOCA install, bash
+		// v105 L353 "rebooting now"): stop consuming the stage. Later steps
+		// must not run against a host that is about to reboot — found live
+		// on DSX Air 0.1.65, where mlxconfig ran in the same pass DOCA
+		// finished and staged its own NV request on top. The ledger patch
+		// below still persists this pass's results, and the stage block
+		// keeps the walk from advancing over the steps that never ran.
+		if a.hasHaltNowRequest() {
+			a.logf("step %s requested an immediate reboot; halting the pass before later steps", def.name)
+			break
+		}
 	}
 	ledger, rewound := a.maybeRewindImportedWalk(np, ledger)
 	if err := a.patchStatus(ctx, map[string]interface{}{"steps": ledger}); err != nil {
@@ -711,9 +736,21 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		return // a step is Failed under budget; hold and retry — never advance past it
 	}
 
-	// Stage complete → advance.
+	// Stage complete → advance. A recorded reboot request blocks the
+	// transition first (bash v105 L938-943: NEEDREBOOT ends the stage at
+	// fn_update_state <stage> reboot — the walk re-enters the SAME stage
+	// after the boot instead of advancing). Found live on DSX Air 0.1.65:
+	// the MlxConfigApplied request rode the quiet checkpoint while the walk
+	// advanced to Finalizing, and Finalizing steps ran against the
+	// staged-but-unapplied firmware state. The Ready transition stays
+	// exempt: a request only a natural boot can satisfy (e.g. a firmware
+	// ceiling above the wanted VF count) must not park a converged node
+	// (checkpointReboot's doc carries that escape).
 	next, ok := nextStage(phase)
 	if !ok {
+		return
+	}
+	if len(a.pendingReboot) > 0 && next != v1alpha1.PhaseReady {
 		return
 	}
 	if next == v1alpha1.PhaseReady {
@@ -1067,27 +1104,65 @@ type rebootRequest struct {
 	reason  string
 	message string
 	pci     string
+	// haltNow stops the stage pass the moment the request is recorded
+	// (requestRebootHalt): later steps must not run against a host that is
+	// about to reboot. The bash reserves this for the DOCA install (v105
+	// L353); every other request rides to the stage boundary.
+	haltNow bool
 }
 
 // requestRebootBg lets step bodies (which carry no context) request a
 // reboot. The request is RECORDED, not executed: checkpointReboot fires it
-// once the stage pass goes quiet — bash semantics (v105 accumulates
-// needs_reboot across a block and reboots after the block finishes).
-// Firing at request time raced multi-cycle steps live: grub's request
-// armed the 60s timer while aptPackages was still configuring doca-all,
-// the grace expired mid-dpkg, and the reboot left dpkg interrupted —
-// aptPackages then burned its retry budget and failed the NodePrep
-// (bl-r1-c2-02, 0.1.38). Requests dedup by reason because blocked steps
-// re-request on every cycle while the walk converges around them.
+// once the stage pass goes quiet, and the recorded request blocks the
+// stage transition (runStage) so later stages never start on a host whose
+// requested reboot has not landed — bash semantics (v105 accumulates
+// needs_reboot across a stage and re-enters the stage after the boot,
+// L938-943). Firing at request time raced multi-cycle steps live: grub's
+// request armed the 60s timer while aptPackages was still configuring
+// doca-all, the grace expired mid-dpkg, and the reboot left dpkg
+// interrupted — aptPackages then burned its retry budget and failed the
+// NodePrep (bl-r1-c2-02, 0.1.38). Requests dedup by reason because blocked
+// steps re-request on every cycle while the walk converges around them.
 func (a *Agent) requestRebootBg(reason, message string, pci string) {
+	a.recordRebootRequest(reason, message, pci, false)
+}
+
+// requestRebootHalt records a reboot request that additionally stops the
+// stage pass the moment it lands (runStage breaks before later steps).
+// The bash reserves this for the DOCA install (v105 L353-354 "Host reboot
+// is needed after installing DOCA, rebooting now..." — fn_update_state
+// inithw reboot, mid-stage, before any later step runs). Found live on
+// DSX Air 0.1.65: the DOCA request rode the quiet checkpoint, mlxconfig
+// ran and staged its own NV request in the same pass, and the walk then
+// carried both across the Configuring→Finalizing advance.
+func (a *Agent) requestRebootHalt(reason, message string, pci string) {
+	a.recordRebootRequest(reason, message, pci, true)
+}
+
+func (a *Agent) recordRebootRequest(reason, message, pci string, haltNow bool) {
 	for _, r := range a.pendingReboot {
 		if r.reason == reason && r.pci == pci {
 			return
 		}
 	}
-	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message, pci: pci})
+	a.pendingReboot = append(a.pendingReboot, rebootRequest{reason: reason, message: message, pci: pci, haltNow: haltNow})
+	tense := "reboot fires when the walk goes quiet; the walk holds at the stage boundary until it lands"
+	if haltNow {
+		tense = "reboot fires at the end of this pass; later steps hold until the node reboots"
+	}
 	a.emit(context.Background(), corev1.EventTypeNormal, "RebootRequested",
-		fmt.Sprintf("%s: %s (reboot fires when the walk goes quiet)", reason, message))
+		fmt.Sprintf("%s: %s (%s)", reason, message, tense))
+}
+
+// hasHaltNowRequest reports whether any recorded reboot request must stop
+// the stage pass immediately (requestRebootHalt).
+func (a *Agent) hasHaltNowRequest() bool {
+	for _, r := range a.pendingReboot {
+		if r.haltNow {
+			return true
+		}
+	}
+	return false
 }
 
 // dropPendingReboots discards recorded requests of one reason without
@@ -1114,7 +1189,12 @@ func (a *Agent) dropPendingReboots(reason string, pci string) {
 // single boot, exactly the grouping the bash performs). A pass that made
 // progress — a step converged, a failed step is retrying — keeps the walk
 // going; the pending requests ride along and fire at the first quiet pass.
-// Reaching Ready with a pending request is legitimate: if every step
+// Since 0.1.66 the ride is bounded: the recorded requests block the stage
+// transition in runStage (and a halt-now request stops the pass itself),
+// so the first quiet pass arrives at the latest when the stage runs out of
+// steps — a walk can no longer carry a request into a later stage (found
+// live on DSX Air: the MlxConfigApplied request rode the advance into
+// Finalizing). Reaching Ready with a pending request is legitimate: if every step
 // converged without needing the fresh boot (e.g. the firmware ceiling
 // already covered the wanted VF count), the NV change simply applies at
 // the node's next natural reboot and nothing fires.

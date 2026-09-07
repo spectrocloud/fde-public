@@ -53,6 +53,12 @@ Real, exercised end-to-end:
   and failure re-applies the taint.
 - **Boot protocol** (§5.2): boot_id changes are detected, counted per stage,
   and force re-verification before the taint is released.
+- **Reboot checkpoint** (§5.2): a step's reboot request is recorded, fires on
+  the first quiet pass, and until it fires it **blocks the stage transition** —
+  a walk never carries a pending reboot into later steps or stages (the walk
+  re-enters the same stage after the boot, as the bash's `NEEDREBOOT` does).
+  DOCA install goes further and halts its own pass outright (bash L353:
+  "rebooting now"), so no later step runs against the pre-reboot driver stack.
 - **CAPI absorption** (§6.3): Machines matching `status.nodeRef.name` are
   paused (`cluster.x-k8s.io/paused`) while prepping and unpaused at Ready;
   a Failed NodePrep stays paused; de-adoption releases the Machine. Every

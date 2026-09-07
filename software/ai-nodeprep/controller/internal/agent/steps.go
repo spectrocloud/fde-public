@@ -564,10 +564,14 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	// Bash-faithful (v105 L353 "Host reboot is needed after installing
 	// DOCA"): a fresh DOCA/driver install binds cleanly against a fresh
 	// boot — and covers a kernel aptUpgrade pulled in moments earlier.
-	// Under the checkpoint protocol this request rides until the stage
-	// goes quiet and shares its reboot with grub/ib_core requests.
+	// requestRebootHalt (0.1.66) stops the stage pass here, matching the
+	// bash's immediate mid-stage reboot; any requests recorded earlier in
+	// the pass (grub, ib_core) ride the same reboot. Before 0.1.66 the
+	// request rode the quiet checkpoint, mlxconfig ran in the same pass
+	// against the pre-reboot driver stack, and both requests crossed the
+	// stage advance (DSX Air).
 	if debNeeded || slices.Contains(missing, "doca-all") {
-		a.requestRebootBg(v1alpha1.RebootDocaInstalled,
+		a.requestRebootHalt(v1alpha1.RebootDocaInstalled,
 			"DOCA host software installed; reboot loads the OFED driver stack", "")
 	}
 	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
