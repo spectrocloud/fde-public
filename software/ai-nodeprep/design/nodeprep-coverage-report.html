@@ -794,12 +794,15 @@
       fn_set_vfs, bash L775-793: conf.db reset, the five DOCA/hw-offload <code>other_config</code> values,
       restart, per-rail <code>br-rail-rN</code> fail-mode=secure datapath_type=netdev bridges) plus the real
       <code>ovsBridges</code> attach (type=dpdk, mtu_request). The v0.2 libovsdb plan was dropped for
-      bash-faithful <code>ovs-vsctl</code> exec through the existing host channel. <i>[Validation on DSX
-      Air 2026-09-07: <code>ovs-vsctl</code> present via DOCA 3.5.0, the <code>openvswitch-switch</code>
-      unit disabled/inactive — the apply path starts it. The first live walk (0.1.68) caught the
-      convergence inversion — divergent detect read Done, apply never ran; fixed 0.1.69/0.1.70 with the
-      re-open list covering both OVS steps and <code>losslessRoce</code>. The live reboot walk is in
-      flight.]</i></li>
+      bash-faithful <code>ovs-vsctl</code> exec through the existing host channel. <i>[Validated live on
+      DSX Air 2026-09-07, 0.1.70: node rebooted → boot re-open fired → resume → the walk flipped all 8
+      rail PFs legacy→switchdev (devlink show → teardown → mode legacy → mode switchdev), ran the
+      conf.db reset + five other_config + restart, created br-rail-r0..r7, and attached eth_r0..eth_r7
+      as DPDK ports at mtu_request 9166 — host readback after Ready: eswitch switchdev, 8 bridges,
+      hw-offload true, doca-eswitch-max 8, 1 VF per PF; walk reached Ready, BootVerified=True, taint
+      released. Rail keys were the single-function form r0..r7 on this boot (one Mellanox function per
+      PCI address); the pre-reboot boot presented multi-function addresses and keyed r0_p0 — both the
+      bash's L211-233 grammar, adapted per boot's PCI topology.]</i></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
