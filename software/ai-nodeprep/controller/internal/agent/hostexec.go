@@ -46,7 +46,13 @@ func (a *Agent) hostExecV(env []string, timeout time.Duration, name string, quie
 	}
 	quiet = quiet && !a.verbose // -verbose (troubleshooting) logs everything
 	cmdline := strings.Join(append([]string{name}, args...), " ")
-	if !quiet {
+	// A successful exec logs nothing: the step bodies aggregate their
+	// outcomes into one ledger message per pass ("step sriovNumVFs: Done —
+	// set sriov_numvfs: 0000:05:00.0 0→1, …"), so a per-exec echo was pure
+	// noise — ~620 of 1577 lines on a routine Finalizing walk (0.1.74).
+	// Failures still log once, with the command (runLogged); -verbose
+	// restores the full per-exec trace.
+	if a.verbose {
 		a.logf("host exec: %s", cmdline)
 	}
 
@@ -134,9 +140,11 @@ func heavyEnvForward(e string) bool {
 
 // runLogged is the shared execution-and-audit body of hostExec and
 // heavyHostExec: run, time, log the outcome with a bounded output tail.
-// quiet (hostExecQuiet) suppresses the attempt and outcome lines; a timeout
-// still logs there because it is never an expected result. (hostExecV
-// already folded -verbose into quiet.)
+// A success logs only in verbose mode (hostExecV already folded -verbose
+// into quiet); a failure logs once with the command and the output tail —
+// a quiet failure stays silent because the caller aggregates it into the
+// step message — and a timeout always logs, being never an expected
+// result.
 func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline string, cmd *exec.Cmd, quiet bool) (string, error) {
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
@@ -146,11 +154,11 @@ func (a *Agent) runLogged(cctx context.Context, timeout time.Duration, cmdline s
 		if cctx.Err() == context.DeadlineExceeded {
 			a.logf("host exec TIMED OUT after %s: %s", timeout, cmdline)
 		} else if !quiet {
-			a.logf("host exec failed after %s: %s", dur, tail)
+			a.logf("host exec failed after %s: %s: %s", dur, cmdline, tail)
 		}
 		return string(out), err
 	}
-	if !quiet {
+	if a.verbose {
 		a.logf("host exec ok (%s): %s", dur, tail)
 	}
 	return string(out), nil
