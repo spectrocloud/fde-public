@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.72</span>
+    <span>nodeprep-v105.sh → controller v0.1.73</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.72</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.73</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -820,13 +820,13 @@
   <li><b>0.1.72 — boot-verify must never rewrite firmware NV (the third live catch, same afternoon).</b>
       Kevin reported the agent "reset the firmware config and reapplied it" on a node whose firmware he
       had verified correct by hand immediately after reboot. The agent log showed the mechanism: the
-      boot-verify pass on an already-Ready node ran the walk-time mlxconfig apply <em>within the first
-      minute of a boot</em>, where the emulated NV table (DSX Air ConnectX-7) reports pre-init
-      DEVICE_DEFAULT values — the same untouched NV parsed as <b>0/8 devices drifted at boot+60s</b>
-      (agent ran <code>mlxconfig -y reset</code> + <code>set</code>, re-writing identical values, and
-      armed a warm reboot) and as <b>Done at boot+6min</b> on the paced re-verify, with no external
-      change in between. A reboot loop fed entirely by a transient read; each cycle's
-      <code>reset</code> also wipes non-profile NV config. Fix: <code>bootVerify</code> sets
+      boot-verify pass on an already-Ready node ran the walk-time mlxconfig apply minutes after a boot,
+      its <code>mlxconfig -y reset</code> + <code>set</code> re-wrote the NV, armed a warm reboot, and
+      the cycle repeated on every boot — each reset also wiping non-profile NV config. (The initial
+      attribution — a pre-init DEVICE_DEFAULT read window — was <b>wrong</b>: 0.1.73's per-key drift
+      report showed exactly one key drifting at boot+1min, every other flash key reading correct; the
+      boot+60s "0/8 drifted" vs boot+6min "Done" discrepancy is explained by the reset+set in between.
+      The true root cause is 0.1.73's non-persistent key, below.) Fix: <code>bootVerify</code> sets
       <code>a.verifyOnly</code> and the firmware-config step's boot-verify body
       (<code>stepMlxconfigVerify</code>) runs the same per-device flash set as a comparison against the
       query — never reset, never set, never a reboot request; drift is reported per key (the walk-time
@@ -837,6 +837,36 @@
       alone; drifted → Blocked with the key named and no reboot armed; the walk path still reaches the
       apply). Lesson: <b>a verify pass on a Ready node shares the walk's step bodies but not its
       authority to mutate — destructive steps need a mode gate, not a caller convention.</b></li>
+  <li><b>0.1.73 — the DSX Air exception: ROCE_ADAPTIVE_ROUTING_EN reverting to 0 is not drift (Kevin's
+      direction, validated live the same hour).</b> The emulated ConnectX-7 accepts the write and reads
+      it back within the boot that set it (0.1.72's post-set verify read 1) but <b>never persists the
+      key across a boot</b> — every other flash key (SRIOV_EN, NUM_OF_VFS, LINK_TYPE_P1, the DSCP/CC
+      keys) persists normally. So at every boot the one key read 0 against a profile wanting 1, and
+      0.1.71's any-key-drift → reset-everything behavior turned that single non-persistent key into a
+      full NV reset + reboot request per boot — exactly the cycle Kevin saw, and his "the firmware
+      config was already correct" was right: everything else persists. Fix:
+      <code>mlxconfigDrift</code> is now the single drift comparison (walk-time detect, post-set
+      verify, and boot-verify share it so the carve-out cannot diverge between paths) with the
+      Air-variant exception (<code>mlxconfigAirReverted</code>: variant Air + this key + want 1 got 0
+      → not drift); Physical hardware still enforces the key. The ledger notes the revert when devices
+      read it (<code>mlxconfigAirRevertNote</code>) — live: <i>"Done — adapter firmware config verified
+      on 8 device(s); ROCE_ADAPTIVE_ROUTING_EN reads 0 on 8 emulated device(s) — DSX Air reverts it
+      every boot (ignored)"</i>, zero reset/set lines, reboot counter unchanged. Deployed together with
+      the boot-verify run-all change (below). <code>TestMlxconfigAirAdaptiveRevertNotDrift</code> pins
+      it (Air boot-verify Done with the note; Air walk path matched without a write; Physical still
+      Blocked).</li>
+  <li><b>0.1.73 — boot-verify runs every critical step instead of stopping at the first failure.</b>
+      The verify loop returned on the first non-Done step, so one Blocked step early in the defs order
+      starved every later step's re-open behind it for the whole boot (DSX Air boot <code>bcb904f5</code>
+      live: a Blocked mlxconfig — the 0.1.72 detect-only report of the adaptive revert — parked the
+      pass before <code>sriovNumVFs</code>/<code>ovsSetup</code>/<code>losslessRoce</code> could
+      re-apply the boot-wiped runtime state; eswitch stayed legacy, no VFs, no eth_rN netdevs for the
+      whole boot). Now all critical steps run and the pass fails once. Validated live in the same pass
+      that shipped 0.1.73: mlxconfig Done (revert ignored) <em>and</em> all seven runtime steps
+      re-applied to Done in one verify pass — eswitch flipped legacy→switchdev, sriov_numvfs 0→1, VF
+      GUIDs/MACs, OVS bridges + DPDK ports, udev renames, lossless RoCE — Ready condition back to
+      "node prepared and boot verified", taint released. <code>TestBootVerifyRunsStepsBehindAFailedOne</code>
+      pins it.</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
@@ -1582,7 +1612,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.72 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.73 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
