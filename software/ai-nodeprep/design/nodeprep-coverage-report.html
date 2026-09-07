@@ -800,9 +800,23 @@
       conf.db reset + five other_config + restart, created br-rail-r0..r7, and attached eth_r0..eth_r7
       as DPDK ports at mtu_request 9166 — host readback after Ready: eswitch switchdev, 8 bridges,
       hw-offload true, doca-eswitch-max 8, 1 VF per PF; walk reached Ready, BootVerified=True, taint
-      released. Rail keys were the single-function form r0..r7 on this boot (one Mellanox function per
-      PCI address); the pre-reboot boot presented multi-function addresses and keyed r0_p0 — both the
-      bash's L211-233 grammar, adapted per boot's PCI topology.]</i></li>
+      released.]</i></li>
+  <li><b>0.1.71 — the rail keys must not flip when VFs appear (the second live catch, minutes after
+      the first).</b> The inventory re-keyed the moment <code>numvfs&gt;0</code>: a VF enumerates under
+      its PF's bus:device (<code>0000:05:00.2</code> → fn <code>05:00</code>), so counting VFs in the
+      multi-function check flipped every rail key from <code>r0</code> to <code>r0_p0</code> — and the
+      next detect pass would re-apply the OVS/udev work against <code>eth_r0_p0</code>/
+      <code>br-rail-r0_p0</code>, which do not exist. The 0.1.70 walk converged only because numvfs was
+      still 0 at Ready; the <code>RebootRequired=MlxConfigApplied</code> reboot fired minutes later and
+      the re-verify on the new boot ran with the buggy grammar — the fix (<code>assignRails</code>
+      counts PFs only, as the bash's mst-status scan does; VF entries inherit their PF's key) landed
+      before its paced verify could re-apply. The accidental second boot doubled as the boot-protocol
+      test: on boot <code>8467e640</code> the re-open fired, <code>sriovNumVFs</code> flipped eswitch
+      legacy→switchdev <em>again</em> (runtime state wiped, re-applied), the OVS bridges restored from
+      ovsdb on disk and converged, all runtime steps re-verified Done, BootVerified=True, taint
+      released. Extracted <code>assignRails</code> from <code>scanInventory</code>;
+      <code>TestAssignRailsIgnoresVFs</code> pins both grammars (VF under a single-PF fn → plain
+      <code>r0</code>; a true dual-PF card → <code>r1_p0</code>/<code>r1_p1</code>).</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
