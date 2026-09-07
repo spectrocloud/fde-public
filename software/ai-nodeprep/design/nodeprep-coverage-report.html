@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.68</span>
+    <span>nodeprep-v105.sh → controller v0.1.70</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.68</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.70</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -676,7 +676,11 @@
         0.1.15: the bash's whole-body device-class gate restored, off-class hardware skipped honestly with
         inventory, PFC readback parses the column table. The apply body (mlnx_qos/mlnxreg) is exercised for
         class devices only; none exist on the lab hardware, so a true lossless-RoCE application still needs
-        SuperNIC/CX-7..9 hardware.</td>
+        SuperNIC/CX-7..9 hardware. <b>0.1.70: joined the boot-transient re-open list</b> (with
+        <code>ovsSetup</code>/<code>ovsBridges</code>, §5) — PFC/ECN are NIC runtime state a boot wipes,
+        and re-opening keeps the bash's boot-pass order: fn_set_lossless_roce configures the PF before
+        fn_add_pfs_to_rail_bridges hands it to OVS's PMD. Live-validated Done on the CX-7 rails (DOCA
+        3.5.0, ECN transport fix 0.1.67).</td>
   </tr>
   <tr>
     <td><code>fn_add_pfs_to_rail_bridges</code> <small>L863</small></td>
@@ -792,8 +796,10 @@
       <code>ovsBridges</code> attach (type=dpdk, mtu_request). The v0.2 libovsdb plan was dropped for
       bash-faithful <code>ovs-vsctl</code> exec through the existing host channel. <i>[Validation on DSX
       Air 2026-09-07: <code>ovs-vsctl</code> present via DOCA 3.5.0, the <code>openvswitch-switch</code>
-      unit disabled/inactive — the apply path starts it; walk parked pending the live reboot
-      test.]</i></li>
+      unit disabled/inactive — the apply path starts it. The first live walk (0.1.68) caught the
+      convergence inversion — divergent detect read Done, apply never ran; fixed 0.1.69/0.1.70 with the
+      re-open list covering both OVS steps and <code>losslessRoce</code>. The live reboot walk is in
+      flight.]</i></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
@@ -1321,6 +1327,34 @@
       <code>TestOvsStepsSkipGates</code>); the exec bodies validate live on DSX Air, where DOCA 3.5.0
       ships <code>ovs-vsctl</code> with the <code>openvswitch-switch</code> unit disabled and eswitch in
       legacy — the live reboot walk is the flip's first exercise.</li>
+  <li><b>0.1.69/0.1.70 — the ovsSetup convergence inversion, caught by the first live walk.</b> The
+      deployed 0.1.68 never applied anything: <code>ovsSetupConverged</code>'s contract is "empty first
+      return = converged", but both call sites read a <em>non-empty</em> first return as success — so a
+      fully divergent host ("OVS is not answering <code>ovs-vsctl</code>",
+      <code>other_config:doca-init = no key, want true</code>) reported <b>Done with the divergence as its
+      message</b> and the bash's stop/rm/start/other_config/bridges sequence never ran;
+      <code>ovsBridges</code> then burned its 5 attempts against bridges ovsSetup was supposed to create
+      and the walk went Failed. The unit suite missed it because the detect path sits behind
+      <code>findHostTool</code>'s <code>/host/usr/{bin,sbin}</code> probe — unreachable without a host
+      mount — so the gates were pinned but the convergence branch never executed in a test. Fix: the call
+      sites fall through on divergence to the mutations gate and apply;
+      <code>findHostTool</code> probes a <code>hostToolRoot</code> seam (same pattern as
+      <code>sysClassNetRoot</code>); <code>TestOvsSetupDivergenceMustNotReadDone</code> drives a divergent
+      bare-agent detect and asserts it Blocks (mutations off) / Fails the apply (mutations on) — never
+      Done. The same live walk exposed two boot-semantics gaps against the bash's at-boot precomplete
+      pass: <code>ovsSetup</code> and <code>ovsBridges</code> were not in the boot-transient re-open list
+      (eswitch mode, OVS bridges and DPDK port attachments are all runtime state a boot wipes —
+      ovsdb-server is not even running post-boot until ovsSetup starts it), and <code>losslessRoce</code>
+      re-opens with them so the boot-pass order stays the bash's: fn_set_lossless_roce configures the PF
+      before fn_add_pfs_to_rail_bridges hands it to OVS's PMD. One naming note recorded for the record:
+      the bash creates its bridges with an index-only loop (<code>br-rail-r$r</code>, r=0..N−1, bash L787)
+      but attaches ports to the full rail key (<code>br-rail-${arrBF[$i,11]}</code>, L868) — on
+      multi-port devices (rail key <code>r0_p0</code>, this hardware) those names disagree and the bash's
+      own attach would target a bridge it never created. The controller pairs both sides on the rail key
+      (<code>br-rail-r0_p0</code> ↔ <code>eth_r0_p0</code>), which is byte-identical to the bash on
+      single-port devices and is what the bash's own log line ("Add eth_r0_p0 to OVS bridge
+      br-rail-r0_p0") states as the intent. Live validation on DSX Air in flight (agent digest
+      <code>sha256:1a70f25a…</code>).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1511,7 +1545,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.68 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.70 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
