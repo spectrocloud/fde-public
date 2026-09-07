@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.67</span>
+    <span>nodeprep-v105.sh → controller v0.1.68</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,11 +164,11 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.67</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.68</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
-  <span><b>3</b> steps gate-verified, bodies v0.2</span>
+  <span><b>1</b> step gate-verified, body v0.2</span>
   <span><b>14</b> v0.1 features beyond the bash script</span>
   <span><b>13</b> defects found &amp; fixed by live testing</span>
 </div>
@@ -642,7 +642,8 @@
         end-to-end — the ceiling gate held the step while the NV shadow was committed-but-not-loaded (the
         two-boot semantics, see the callout below), then the load boot exposed <code>TotalVFs=4</code> and the
         step tore down to 0 and wrote 4 on both rail PFs. The switchdev branch (devlink eswitch flip +
-        OVS) remains v0.2 (§5). One deliberate divergence from the bash, operator-directed (0.1.35): east-west
+        OVS) landed in 0.1.68 (§5): the eswitch flip runs inside this step, before the VF count lands.
+        One deliberate divergence from the bash, operator-directed (0.1.35): east-west
         VFs land <b>only</b> on the rail-mapped functions (<code>spec.rails</code>) — the bash applied
         <code>NUMVF_EW</code> to every ConnectX-class function, which would also configure the host's bond0
         uplink card; <code>vfCountFor</code> now returns 0 for unmapped functions and the mlxconfig loop skips
@@ -682,14 +683,17 @@
     <td><code>ovs-vsctl</code> adds PFs to <code>br-rail-*</code> bridges</td>
     <td><code>ovsBridges</code> <small>(critical)</small></td>
     <td><span class="pill gate">Gate verified</span> Es-switch-mode gate honored ("eswitch mode is not
-        switchdev"); the profile here uses <code>legacy</code>. libovsdb convergence v0.2.</td>
+        switchdev"); the profile here uses <code>legacy</code>. <b>0.1.68: the convergence body is real</b> —
+        <code>ovs-vsctl</code> attach per rail (type=dpdk, mtu_request=MTU−50), detect-first on
+        list-ports/type/mtu_request, ordered after <code>losslessRoce</code> as the bash orders it.</td>
   </tr>
   <tr>
     <td><code>fn_restart_sriov_devplugin</code> <small>L876</small></td>
     <td>Deletes the SR-IOV device-plugin pod and uncordons the node</td>
     <td>Folded into taint release</td>
-    <td><span class="pill missing">Missing</span> The controller releases its own taint on Ready, but nothing yet
-        bounces the SR-IOV device-plugin pod so it re-discovers VFs. v0.2.</td>
+    <td><span class="pill live">Implemented 0.1.62</span> The controller bounces this node's
+        <code>network-operator-sriov-device-plugin</code> pod at the Ready flip, when the VF inventory it
+        re-discovers is final (§7).</td>
   </tr>
   <tr>
     <td><code>fn_setup_nfsrdma</code> <small>L884</small></td>
@@ -778,13 +782,18 @@
       released. Raising <code>numVFs</code> to 4 (0.1.46) exercised the resize path (teardown-to-0 then
       re-create), the fresh-VF identity writes on 8 VFs, and surfaced the two-boot NV semantics (callout
       above); the converged host matches the bash reference node's 4-VF-per-PF state, with the documented
-      divergences (full-MTU VFs, GUID synthesis, LOM untouched). Still open: the switchdev branch (devlink
-      eswitch flip, OVS bridges, representor rename rules) and the InfiniBand link-type path (port GUID +
-      policy) — each needs the corresponding hardware/mode.</li>
-  <li><b>OVS switchdev convergence</b> — <code>br-rail-*</code> bridge membership (libovsdb) is v0.2; the lab
-      runs <code>eswitch legacy</code> (the step's gate verified). <i>[Parked 2026-09-04 (operator
-      decision): to be validated in the upcoming NVIDIA DSX Air environment, together with the
-      switchdev VF branch (devlink eswitch flip, representor rename rules).]</i></li>
+      divergences (full-MTU VFs, GUID synthesis, LOM untouched). Still open: the InfiniBand link-type path
+      (port GUID + policy) — needs the corresponding hardware/mode. <b>The switchdev branch landed in
+      0.1.68</b> (devlink eswitch flip in <code>sriovNumVFs</code>, <code>ovsSetup</code>, real
+      <code>ovsBridges</code>, representor rename rules) — validation on DSX Air.</li>
+  <li><b>OVS switchdev convergence</b> — <b>landed in 0.1.68</b> as <code>ovsSetup</code> (the tail of
+      fn_set_vfs, bash L775-793: conf.db reset, the five DOCA/hw-offload <code>other_config</code> values,
+      restart, per-rail <code>br-rail-rN</code> fail-mode=secure datapath_type=netdev bridges) plus the real
+      <code>ovsBridges</code> attach (type=dpdk, mtu_request). The v0.2 libovsdb plan was dropped for
+      bash-faithful <code>ovs-vsctl</code> exec through the existing host channel. <i>[Validation on DSX
+      Air 2026-09-07: <code>ovs-vsctl</code> present via DOCA 3.5.0, the <code>openvswitch-switch</code>
+      unit disabled/inactive — the apply path starts it; walk parked pending the live reboot
+      test.]</i></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
@@ -1286,6 +1295,32 @@
       resets ECN state — the readback failures were purely the dead transport. Controller rolled to
       0.1.67 in the same session (it had still been running 0.1.65 since the event clamp lives in
       shared <code>k8sutil</code>); agent digest <code>sha256:bf511040…</code>.</li>
+  <li><b>0.1.68 — the switchdev branch is wired: eswitch flip, ovsSetup, real ovsBridges.</b>
+      The bash's switchdev path (operator directive: netplan <code>ignore-carrier</code> in the firmware
+      config stage, everything else in Finalizing inside fn_set_vfs and fn_add_pfs_to_rail_bridges) in its
+      order. <code>netplanMTU</code>'s <code>ignore-carrier: true</code> and <code>vfGuids</code>' switchdev
+      gating (no VF MAC write, devlink-table representor rename rule) already existed; the new pieces:
+      <b>sriovNumVFs</b> now runs fn_set_vfs's eswitch block (bash L625-633) before the VF count lands — a
+      rail ConnectX-class function still in <code>legacy</code> eswitch is torn down to 0 VFs and flipped
+      (mode legacy → <code>flow_steering_mode hmfs</code> → mode switchdev) before the count is written,
+      because VFs created under legacy carry the wrong switching model and the OVS rail bridges cannot steer
+      them. Eswitch mode is runtime state (resets to legacy every boot), and the step sits in the
+      boot-transient re-open list, so the flip re-fires with <code>vfGuids</code> re-opened behind it —
+      exactly the bash's at-boot precomplete re-run. <b>ovsSetup</b> (new Finalizing step, critical, the
+      tail of fn_set_vfs, bash L775-793) stops <code>openvswitch-switch</code>, resets
+      <code>conf.db</code>, applies the five DOCA/hw-offload <code>other_config</code> values
+      (<code>doca-eswitch-max</code> = rail count), restarts, and creates one <code>br-rail-rN</code> bridge
+      per rail (fail-mode=secure, datapath_type=netdev, MTU−50, up) — detect-first: converged state reads
+      Done and never resets a healthy OVS db; a present-but-inactive unit proceeds to the apply path (the
+      bash starts the service itself; DSX Air ships the unit disabled). <b>ovsBridges</b> (the v0.2 stub
+      replaced) implements fn_add_pfs_to_rail_bridges: each rail PF attaches to its bridge as a DPDK
+      interface at MTU−50, after <code>losslessRoce</code> — the bash's ordering, so PFC/ECN land on the PF
+      before OVS's PMD takes it over. The v0.2 libovsdb plan was dropped for bash-faithful
+      <code>ovs-vsctl</code> exec through the existing host channel. Tests pin the gates and parsing
+      (<code>TestParseEswitchMode</code>, <code>TestSwitchdevFlipGate</code>, <code>TestOvsValueTrim</code>,
+      <code>TestOvsStepsSkipGates</code>); the exec bodies validate live on DSX Air, where DOCA 3.5.0
+      ships <code>ovs-vsctl</code> with the <code>openvswitch-switch</code> unit disabled and eswitch in
+      legacy — the live reboot walk is the flip's first exercise.</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1476,7 +1511,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.67 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.68 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
