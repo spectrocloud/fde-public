@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.70</span>
+    <span>nodeprep-v105.sh → controller v0.1.72</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.70</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.72</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -817,6 +817,26 @@
       released. Extracted <code>assignRails</code> from <code>scanInventory</code>;
       <code>TestAssignRailsIgnoresVFs</code> pins both grammars (VF under a single-PF fn → plain
       <code>r0</code>; a true dual-PF card → <code>r1_p0</code>/<code>r1_p1</code>).</li>
+  <li><b>0.1.72 — boot-verify must never rewrite firmware NV (the third live catch, same afternoon).</b>
+      Kevin reported the agent "reset the firmware config and reapplied it" on a node whose firmware he
+      had verified correct by hand immediately after reboot. The agent log showed the mechanism: the
+      boot-verify pass on an already-Ready node ran the walk-time mlxconfig apply <em>within the first
+      minute of a boot</em>, where the emulated NV table (DSX Air ConnectX-7) reports pre-init
+      DEVICE_DEFAULT values — the same untouched NV parsed as <b>0/8 devices drifted at boot+60s</b>
+      (agent ran <code>mlxconfig -y reset</code> + <code>set</code>, re-writing identical values, and
+      armed a warm reboot) and as <b>Done at boot+6min</b> on the paced re-verify, with no external
+      change in between. A reboot loop fed entirely by a transient read; each cycle's
+      <code>reset</code> also wipes non-profile NV config. Fix: <code>bootVerify</code> sets
+      <code>a.verifyOnly</code> and the firmware-config step's boot-verify body
+      (<code>stepMlxconfigVerify</code>) runs the same per-device flash set as a comparison against the
+      query — never reset, never set, never a reboot request; drift is reported per key (the walk-time
+      message carried only counts, so "0 already matched" was unexplainable after the fact —
+      <code>applyMlxconfig</code> now also logs the per-key drift before any walk-time reset).
+      <code>mlxconfigScope</code> extracts the shared VF/DPU/rail skip logic;
+      <code>TestMlxconfigBootVerifyDetectOnly</code> pins the contract (matched → Done from the query
+      alone; drifted → Blocked with the key named and no reboot armed; the walk path still reaches the
+      apply). Lesson: <b>a verify pass on a Ready node shares the walk's step bodies but not its
+      authority to mutate — destructive steps need a mode gate, not a caller convention.</b></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
       skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
@@ -1562,7 +1582,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.70 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.72 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
