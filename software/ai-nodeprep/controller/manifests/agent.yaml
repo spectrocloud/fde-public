@@ -47,8 +47,8 @@ spec:
             - -interval=5s
             # Safety flags (design: experimental gate). Both default false in
             # the binary; uncomment to let steps mutate the host / reboot it.
-            # - -host-mutations
-            # - -allow-reboot
+            - -host-mutations
+            - -allow-reboot
             # Verbose host-exec logging (troubleshooting): every exec and
             # tool dump is logged in full. Can also be toggled on a running
             # cluster without editing this file:
