@@ -1480,7 +1480,7 @@ func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	if _, err := findHostTool("ovs-vsctl"); err != nil {
 		return v1alpha1.StepBlocked, fmt.Sprintf("ovs-vsctl not found on host (install the DOCA OVS / openvswitch-switch package): %v", err)
 	}
-	if st, msg := ovsSetupConverged(a, profile, rails); st != "" {
+	if st, msg := ovsSetupConverged(a, profile, rails); st == "" {
 		return v1alpha1.StepDone, msg
 	}
 	if !a.mutationsAllowed(profile) {
@@ -1496,7 +1496,7 @@ func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	if err := a.applyOvsSetup(profile, rails); err != nil {
 		return v1alpha1.StepFailed, err.Error()
 	}
-	if st, msg := ovsSetupConverged(a, profile, rails); st != "" {
+	if st, msg := ovsSetupConverged(a, profile, rails); st == "" {
 		return v1alpha1.StepDone, msg
 	}
 	return v1alpha1.StepFailed, "OVS setup ran but the other_config/bridge readback still diverges from the profile"
@@ -1862,13 +1862,17 @@ func stepDriverReady(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	return v1alpha1.StepDone, "driver-ready marker written (GPU Operator GDS workaround)"
 }
 
+// hostToolRoot is the host filesystem root findHostTool probes; the test
+// seam points it at a temp dir (same pattern as sysClassNetRoot).
+var hostToolRoot = "/host"
+
 // findHostTool looks for a tool on PATH or in the host mount.
 func findHostTool(name string) (string, error) {
-	if _, err := os.Stat(filepath.Join("/host/usr/bin", name)); err == nil {
-		return filepath.Join("/host/usr/bin", name), nil
+	if _, err := os.Stat(filepath.Join(hostToolRoot, "usr/bin", name)); err == nil {
+		return filepath.Join(hostToolRoot, "usr/bin", name), nil
 	}
-	if _, err := os.Stat(filepath.Join("/host/usr/sbin", name)); err == nil {
-		return filepath.Join("/host/usr/sbin", name), nil
+	if _, err := os.Stat(filepath.Join(hostToolRoot, "usr/sbin", name)); err == nil {
+		return filepath.Join(hostToolRoot, "usr/sbin", name), nil
 	}
 	return "", fmt.Errorf("%s not found in /host/usr/{bin,sbin}", name)
 }

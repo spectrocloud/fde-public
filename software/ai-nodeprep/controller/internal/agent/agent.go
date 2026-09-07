@@ -381,9 +381,20 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 			// while sriovNumVFs read Done "0→1" against a host showing
 			// numvfs=0). All four are cheap, detect-first and idempotent:
 			// converged hosts re-verify in one pass.
+			// The OVS steps re-open too: the eswitch mode the flip leaves
+			// behind, the bridges and the DPDK port attachments are all
+			// runtime state that a boot wipes (ovsdb-server is not running
+			// post-boot until the setup step starts it; the bash re-runs
+			// fn_set_vfs's OVS block and fn_add_pfs_to_rail_bridges in the
+			// at-boot precomplete pass). losslessRoce re-opens for the same
+			// reason (PFC/ECN are NIC runtime state) and — with ovsBridges —
+			// preserves the bash's boot-pass order: fn_set_lossless_roce
+			// configures the PF before fn_add_pfs_to_rail_bridges hands it
+			// to OVS's PMD. ovsSetup runs before ovsBridges in the ledger,
+			// so a fresh boot converges OVS before the ports attach.
 			for i := range steps {
 				switch steps[i].Name {
-				case "sriovNumVFs", "vfGuids", "disableACS", "udevRules":
+				case "sriovNumVFs", "vfGuids", "disableACS", "udevRules", "ovsSetup", "ovsBridges", "losslessRoce":
 					if steps[i].State == v1alpha1.StepDone {
 						steps[i] = v1alpha1.StepStatus{Name: steps[i].Name, Stage: steps[i].Stage, State: v1alpha1.StepPending}
 					}

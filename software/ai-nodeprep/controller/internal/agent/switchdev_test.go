@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,6 +81,53 @@ func TestOvsValueTrim(t *testing.T) {
 		if got := ovsValue(c.in); got != c.want {
 			t.Fatalf("ovsValue(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// The convergence contract: ovsSetupConverged returns "" only when
+// converged, and stepOvsSetup must treat a divergence as work to do — never
+// Done. Found live on DSX Air (0.1.68): the call sites read the inverted
+// contract, so a divergent host ("OVS is not answering ovs-vsctl",
+// "other_config:doca-init = no key, want true") reported StepDone and the
+// apply path never ran; ovsBridges then failed forever against bridges
+// ovsSetup was supposed to create.
+func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "ovs-vsctl"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.EswitchMode = "switchdev"
+	profile.Spec.EastWest.NumVFs = 1
+
+	// A bare agent cannot exec the host: OVS is not answering — divergent.
+	// The step must fall through to the mutations gate (Blocked on a bare
+	// agent), never return Done with the divergence as its message.
+	st, msg := stepOvsSetup(a, np, profile)
+	if st == v1alpha1.StepDone {
+		t.Fatalf("divergent OVS state must not read Done, got Done %q", msg)
+	}
+	if st != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
+		t.Fatalf("divergent detect with mutations off must Block, got %s %q", st, msg)
+	}
+
+	// The same divergence behind the mutations gate: with mutations on the
+	// step must attempt the apply (which fails hostExec on a bare agent —
+	// Failed, still never Done).
+	a.hostMutations = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+	if st, msg := stepOvsSetup(a, np, profile); st == v1alpha1.StepDone {
+		t.Fatalf("a failed apply must not read Done, got Done %q", msg)
 	}
 }
 
