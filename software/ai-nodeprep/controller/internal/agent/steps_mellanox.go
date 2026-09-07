@@ -833,19 +833,26 @@ func stepLosslessRoce(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 		} else {
 			for n := 0; n <= 7; n++ {
 				for _, dir := range []string{"roce_rp", "roce_np"} {
-					if err := os.WriteFile(filepath.Join(sysClassNetRoot, dev, "ecn", dir, "enable", strconv.Itoa(n)), []byte("1"), 0o644); err != nil {
+					if err := a.writeEcnAttr(filepath.Join(sysClassNetRoot, dev, "ecn", dir, "enable", strconv.Itoa(n)), "1"); err != nil {
 						notes = append(notes, fmt.Sprintf("%s ecn %s/%d: %v", dev, dir, n, err))
 					}
 				}
 			}
-			if err := os.WriteFile(filepath.Join(sysClassNetRoot, dev, "ecn", "roce_np", "cnp_dscp"), []byte("48"), 0o644); err != nil {
+			if err := a.writeEcnAttr(filepath.Join(sysClassNetRoot, dev, "ecn", "roce_np", "cnp_dscp"), "48"); err != nil {
 				notes = append(notes, fmt.Sprintf("%s cnp_dscp: %v", dev, err))
 			}
 		}
 		a.applySpectrumXCC(d, dev)
 	}
+	// notes ride the Failed return too: before 0.1.67 the EROFS write
+	// failures that explained the readback failures were collected here and
+	// silently dropped (DSX Air — the step failed 5/5 with no hint why).
 	if len(errs) > 0 {
-		return v1alpha1.StepFailed, strings.Join(errs, "; ")
+		msg := strings.Join(errs, "; ")
+		if len(notes) > 0 {
+			msg += "; notes: " + strings.Join(notes, "; ")
+		}
+		return v1alpha1.StepFailed, msg
 	}
 	// runtime settings are lost on reboot; bootVerify re-runs this step and
 	// re-applies them, so verify the freshly applied state now.
@@ -968,11 +975,31 @@ func ecnReadbackErrs(dev string) []string {
 
 // ecnTreePresent reports whether the netdev exposes the mlx5 ECN sysfs
 // tree. sysClassNetRoot is a var so tests can point it at a temp dir.
-var sysClassNetRoot = "/sys/class/net"
+const defaultSysClassNetRoot = "/sys/class/net"
+
+var sysClassNetRoot = defaultSysClassNetRoot
 
 func ecnTreePresent(dev string) bool {
 	_, err := os.Stat(filepath.Join(sysClassNetRoot, dev, "ecn"))
 	return err == nil
+}
+
+// writeEcnAttr writes one ECN sysfs attribute. The pod's /sys is mounted
+// read-only (the detect-only posture — writeSysfs's doc carries the
+// contract), so at the production root the write goes through the host's
+// tee via writeSysfs, the same channel as every other sysfs mutation
+// (sriov_numvfs, VF GUIDs/MACs, PCI bind/unbind). Found live on DSX Air
+// 0.1.66: the writes used os.WriteFile on the read-only pod mount, failed
+// EROFS into notes, and the notes were dropped on the Failed return — the
+// step then read back the untouched defaults and failed 5/5 on all eight
+// rails the moment DOCA 3.5.0 created the tree. Tests point
+// sysClassNetRoot at a temp dir, which is writable, so a plain write is
+// correct there.
+func (a *Agent) writeEcnAttr(path string, content string) error {
+	if sysClassNetRoot == defaultSysClassNetRoot {
+		return a.writeSysfs(path, content)
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 // openibdRestartDecision mirrors the bash fn_inventory_hw probe (L192):

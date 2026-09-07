@@ -1154,3 +1154,38 @@ func TestLosslessEcnTreeGate(t *testing.T) {
 		t.Fatalf("present-but-wrong ecn tree must fail readback: %s", errsStr)
 	}
 }
+
+// 0.1.66 live finding: the ECN writes used os.WriteFile on the pod's
+// read-only /sys mount, failed EROFS into notes, and the notes were dropped
+// on the Failed return — the step then read back the untouched defaults and
+// failed 5/5 on all eight rails the moment DOCA 3.5.0 created the tree.
+// writeEcnAttr routes production writes through writeSysfs (the nsenter tee
+// channel sriov_numvfs and the VF GUIDs already use); over the test seam
+// (sysClassNetRoot at a temp dir) it stays a plain write, and what it
+// writes must be exactly what ecnReadbackErrs looks for.
+func TestWriteEcnAttrLandsWhereReadbackLooks(t *testing.T) {
+	root := t.TempDir()
+	old := sysClassNetRoot
+	sysClassNetRoot = root
+	t.Cleanup(func() { sysClassNetRoot = old })
+
+	a := &Agent{}
+	for _, attr := range []struct{ path, val string }{
+		{filepath.Join(root, "eth_r0", "ecn", "roce_rp", "enable", "3"), "1"},
+		{filepath.Join(root, "eth_r0", "ecn", "roce_np", "enable", "3"), "1"},
+		{filepath.Join(root, "eth_r0", "ecn", "roce_np", "cnp_dscp"), "48"},
+	} {
+		if err := os.MkdirAll(filepath.Dir(attr.path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.writeEcnAttr(attr.path, attr.val); err != nil {
+			t.Fatalf("writeEcnAttr(%s): %v", attr.path, err)
+		}
+		if got, err := os.ReadFile(attr.path); err != nil || string(got) != attr.val {
+			t.Fatalf("written value must stick at %s, got %q err %v", attr.path, got, err)
+		}
+	}
+	if errs := ecnReadbackErrs("eth_r0"); len(errs) != 0 {
+		t.Fatalf("a fully-written tree must pass readback, got %v", errs)
+	}
+}
