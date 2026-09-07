@@ -257,7 +257,6 @@ type PolicySpec struct {
 	CAPause              bool   `json:"capiPause,omitempty"`            // pause CAPI Machines while prepping
 	WorkerRoleLabel      string `json:"workerRoleLabel,omitempty"`      // manage | ignore
 	LabelCompat          string `json:"labelCompat,omitempty"`          // v1: mirror legacy state label
-	ControlPlanePrep     bool   `json:"controlPlanePrep,omitempty"`     // may prep control-plane nodes
 
 	// TaintEnabled defaults to true: the nodeprep taint is applied at adoption
 	// and released only after boot-verify (design §6.1). Pointer so the zero
@@ -296,11 +295,23 @@ type NFSRDMASpec struct {
 }
 
 type ControlPlaneSpec struct {
-	Prep           bool   `json:"prep,omitempty"`
+	// Prep gates whether nodeprep runs on control-plane nodes at all
+	// (design §3.1). Pointer with nil = prep them: the CP-prep posture is
+	// the design default, and the zero value must not silently un-prep CPs
+	// for profiles that never mention the block. This is the sole CP gate —
+	// a former duplicate (policy.controlPlanePrep) shadowed it and kept a
+	// prep=false CP in scope until 0.1.65 (found live on DSX Air).
+	Prep           *bool  `json:"prep,omitempty"`
 	ExpectedCount  int    `json:"expectedCount,omitempty"` // 0 = auto (KubeadmControlPlane replicas)
 	Strategy       string `json:"strategy,omitempty"`      // serial | background
 	BootstrapGate  string `json:"bootstrapGate,omitempty"` // auto | delay | off
 	BootstrapDelay string `json:"bootstrapDelay,omitempty"`
+}
+
+// PrepOn reports whether control-plane nodes should be prepped; nil = true
+// (see Prep).
+func (c ControlPlaneSpec) PrepOn() bool {
+	return c.Prep == nil || *c.Prep
 }
 
 type NodePrep struct {

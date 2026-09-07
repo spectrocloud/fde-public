@@ -46,7 +46,7 @@ spec:
                       description: |
                         labelSelector (default) gates on nodeSelector; allWorkers
                         adopts every non-control-plane node; allNodes also adopts
-                        control planes (requires policy.controlPlanePrep; quorum
+                        control planes (gated by controlPlane.prep; quorum
                         choreography per §6.4).
                       type: string
                       enum: [labelSelector, allWorkers, allNodes, ""]
@@ -209,8 +209,6 @@ spec:
                       description: v1 mirrors the legacy spectrocloud.com/nodeprep label.
                       type: string
                       enum: [v1, off, ""]
-                    controlPlanePrep:
-                      type: boolean
                     taintEnabled:
                       description: Default true. Held from adoption until boot-verify passes.
                       type: boolean
@@ -245,6 +243,9 @@ spec:
                   type: object
                   properties:
                     prep:
+                      description: May nodeprep run on control-plane nodes at all
+                        (design §3.1). Omitted = true. The sole CP gate — selection
+                        scopes the profile to nodes, this decides whether CPs prep.
                       type: boolean
                     expectedCount:
                       description: 0 = auto from KubeadmControlPlane replicas.

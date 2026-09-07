@@ -31,11 +31,12 @@ Real, exercised end-to-end:
 - **Node selection** (§3.1): `spec.selection` picks the node set —
   `mode: labelSelector` (default) gates on `selection.nodeSelector`;
   `mode: allWorkers` adopts every non-control-plane node, no label needed;
-  `mode: allNodes` also adopts control planes (with
-  `policy.controlPlanePrep: true`; quorum choreography below).
+  `mode: allNodes` also adopts control planes (gated by
+  `controlPlane.prep`; quorum choreography below).
   `selection.excludeLabel ("key" or "key=value") disqualifies individual
   nodes under every mode.
-- **Control-plane prep** (§6.4): with `policy.controlPlanePrep: true`,
+- **Control-plane prep** (§6.4): with `controlPlane.prep: true` (the
+  default; set `false` to keep nodeprep off CP nodes entirely),
   control-plane nodes run the same step machine, admitted through the quorum
   window — at most `expected − quorum(expected)` members mid-prep
   concurrently (1 of 3, 2 of 5), computed from the KubeadmControlPlane

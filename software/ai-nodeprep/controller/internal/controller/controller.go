@@ -227,7 +227,13 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 	delete(c.noProfileLogged, nodeName)
 
 	isCP := isControlPlane(node)
-	if isCP && !profile.Spec.Policy.ControlPlanePrep {
+	// The design's sole CP gate (§3.1 controlPlane.prep, "may nodeprep run
+	// on control-plane nodes at all"). selection.mode=allNodes scopes the
+	// profile to every node; this gate decides whether CPs actually prep.
+	// A retained NodePrep above the gate stays frozen in place (audit
+	// record, design §10) — the walk stops here, the taint stays until an
+	// operator deletes the NodePrep.
+	if isCP && !profile.Spec.ControlPlane.PrepOn() {
 		return
 	}
 

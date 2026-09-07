@@ -216,3 +216,22 @@ func TestMatchesSelection(t *testing.T) {
 		t.Error("a profile with no selection must adopt nothing")
 	}
 }
+
+// controlPlane.prep is the sole CP gate (design §3.1) — nil prep means
+// "prep CPs" (the design default posture); an explicit false must keep a
+// CP out of the walk even when selection.mode=allNodes matches it
+// (0.1.65: the duplicate policy.controlPlanePrep shadowed this and a
+// prep=false CP still walked, found live on DSX Air).
+func TestControlPlanePrepGate(t *testing.T) {
+	if !(v1alpha1.ControlPlaneSpec{}).PrepOn() {
+		t.Fatalf("absent controlPlane block must prep CPs (nil = true)")
+	}
+	prep := true
+	if !(v1alpha1.ControlPlaneSpec{Prep: &prep}).PrepOn() {
+		t.Fatalf("prep: true must prep CPs")
+	}
+	off := false
+	if (v1alpha1.ControlPlaneSpec{Prep: &off}).PrepOn() {
+		t.Fatalf("prep: false must keep CPs out of the walk")
+	}
+}
