@@ -86,20 +86,20 @@ spec:
                       type: string
                     aptUpgrade:
                       type: boolean
-                    version:
-                      description: >
-                        Target Mellanox firmware version (the version inside the
-                        configured BFB, e.g. "32.49.1014"). BlueField-3 only: the
-                        agent compares it against the running firmware and skips
-                        the flash/reboot when they match. ConnectX-class adapters
-                        take firmware from the DOCA install and are never compared.
-                      type: string
                     bfb:
                       type: object
                       properties:
                         name:
                           type: string
                         minVersion:
+                          description: >
+                            Firmware floor for the BFB flash gate (BlueField-3
+                            only): a card whose running firmware (flint q) sorts
+                            below this is outdated and is flashed; one at or
+                            above it needs no flash and no reboot. Dot-separated
+                            numeric comparison with zero-padding ("32.49" sorts
+                            below "32.49.1014"). ConnectX-class adapters take
+                            firmware from the DOCA install and are never compared.
                           type: string
                         sha256:
                           type: string

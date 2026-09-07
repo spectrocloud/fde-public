@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -349,6 +350,70 @@ func parseFlint(out string) (fwVer, psid string) {
 		}
 	}
 	return fwVer, psid
+}
+
+// fwVerComp is the bash vercomp (nodeprep-v105.sh L50) for the BFB flash
+// gate: dot-separated fields compared base-10 numerically, a missing field
+// counting as 0 ("32.49" < "32.49.1014" — the zero-padding the design §8.2
+// calls out). Returns -1 when a sorts below b, 0 when equal, 1 when above.
+//
+// A field may carry a "-<build>" tail (bundle versions like "3.3.0-202").
+// The bash compares such a field as the arithmetic expression 10#num-build
+// (0-92 → −92, 0-202 → −202), which orders a NEWER build as OLDER — a
+// 3.3.0-92 card would "supersede" a 3.3.0-202 floor. This comparator
+// tie-breaks the tail semantically instead: (number, build) pairs, both
+// numeric, build 0 when absent — 3.3.0-92 < 3.3.0-202. Pure-numeric fields
+// (flint's FW version form) follow the bash exactly.
+func fwVerComp(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		av, bv := "0", "0"
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		if c := fwFieldComp(av, bv); c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
+// fwFieldComp compares one dot-field, optionally carrying a "-<build>" tail.
+func fwFieldComp(a, b string) int {
+	an, ab := splitBuild(a)
+	bn, bb := splitBuild(b)
+	if an != bn {
+		if an < bn {
+			return -1
+		}
+		return 1
+	}
+	if ab != bb {
+		if ab < bb {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// splitBuild parses "num" or "num-build" into (num, build); unparsable
+// pieces count as 0, matching the bash's 10#${v:=0} default.
+func splitBuild(s string) (num, build int) {
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		build, _ = strconv.Atoi(s[i+1:])
+		s = s[:i]
+	}
+	num, _ = strconv.Atoi(s)
+	return num, build
 }
 
 // ibdevFor returns the first IB device of the PCI function from sysfs.

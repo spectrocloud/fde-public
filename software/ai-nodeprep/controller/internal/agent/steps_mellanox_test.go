@@ -76,6 +76,77 @@ func TestParseFlint(t *testing.T) {
 	}
 }
 
+func TestFwVerComp(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"32.49.1014", "32.49.1014", 0},   // equal
+		{"32.49.1000", "32.49.1014", -1},  // patch below
+		{"32.50.0", "32.49.1014", 1},      // minor above decides before patch
+		{"33.0.0", "32.49.1014", 1},       // major above
+		{"32.49", "32.49.1014", -1},       // zero-padding: missing field = 0
+		{"32.49.1014.0", "32.49.1014", 0}, // trailing zero field equals absent
+		{"14.32.0100", "14.32.100", 0},    // leading zeros are base-10 (bash 10#)
+		{"3.3.0-92", "3.3.0-202", -1},     // build tail: newer build sorts above
+		{"3.3.0-202", "3.3.0-92", 1},      // (bash vercomp's arithmetic is wrong here)
+		{"3.3.1-0", "3.3.0-999", 1},       // number decides before build
+		{"4.0", "3.9.9", 1},
+	}
+	for _, tc := range cases {
+		if got := fwVerComp(tc.a, tc.b); got != tc.want {
+			t.Errorf("fwVerComp(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// The 0.1.63 gate: firmware.bfb.minVersion is the sole version input — a
+// floor (vercomp >= 0 skips the flash), not an exact match.
+func TestBFBFlashMinVersionGate(t *testing.T) {
+	bf3 := func(fw string) pciDevice {
+		return pciDevice{devType: "BlueField3", rawType: "BlueField3", pci: "0000:05:00.0", rshim: "/dev/rshim0", fwVer: fw}
+	}
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		Firmware: v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf.bfb", MinVersion: "32.49.1014"}},
+	}}
+	run := func(d pciDevice) (v1alpha1.StepState, string) {
+		a := &Agent{mellanoxFns: []pciDevice{d}}
+		return stepBFBFlash(a, &v1alpha1.NodePrep{}, profile)
+	}
+
+	// At the floor: no flash, no reboot.
+	st, msg := run(bf3("32.49.1014"))
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "matches or supersedes") {
+		t.Fatalf("at-floor: %s %q", st, msg)
+	}
+	// Above the floor (a newer card must NOT be flashed — floor, not pin):
+	st, msg = run(bf3("32.50.1"))
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "matches or supersedes") {
+		t.Fatalf("above-floor: %s %q", st, msg)
+	}
+	// Zero-padded equality counts as current.
+	st, _ = run(bf3("32.49.1014.0"))
+	if st != v1alpha1.StepDone {
+		t.Fatalf("zero-padded equal: %s", st)
+	}
+	// Below the floor: the upgrade trigger.
+	st, msg = run(bf3("32.39.1002"))
+	if st != v1alpha1.StepBlocked || !strings.Contains(msg, "firmware upgrade required") || !strings.Contains(msg, "running 32.39.1002, floor 32.49.1014") {
+		t.Fatalf("below-floor: %s %q", st, msg)
+	}
+	// Unreadable version is MFT-pending, never a false match.
+	st, msg = run(bf3(""))
+	if st != v1alpha1.StepBlocked || !strings.Contains(msg, "MFT classification pending") {
+		t.Fatalf("unknown fw: %s %q", st, msg)
+	}
+	// Empty floor: no version gate at all (falls through to the flash body).
+	profile.Spec.Firmware.BFB.MinVersion = ""
+	st, msg = run(bf3("32.39.1002"))
+	if st != v1alpha1.StepBlocked || strings.Contains(msg, "floor") {
+		t.Fatalf("empty floor must skip the gate, got %s %q", st, msg)
+	}
+}
+
 // The flash gate is BlueField-3 only: ConnectX, BlueField-2 and unclassified
 // devices are all reported as not flashable.
 func TestBFBFlashGate(t *testing.T) {

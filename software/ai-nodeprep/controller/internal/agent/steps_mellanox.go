@@ -1018,14 +1018,15 @@ func stepBFBFlash(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	if fw.BFB.Name == "" {
 		return v1alpha1.StepBlocked, fmt.Sprintf("BlueField-3 present (%s) but no firmware.bfb configured", strings.Join(bf3, ", "))
 	}
-	// Firmware-version gate (profile firmware.version, e.g. "32.49.1014" —
-	// the version inside the configured BFB): a BlueField-3 already running
-	// the target version needs no flash and no reboot; a mismatch is the
-	// upgrade trigger. The comparison needs the flint-reported running
-	// version, which the MFT enrichment fills — an empty fwVer means
-	// classification has not landed yet (MFT still installing), not a match.
-	if fw.Version != "" {
-		var unknown, mismatch, match []string
+	// Firmware-version gate (profile firmware.bfb.minVersion — design §8.2,
+	// bash BFB_FW + vercomp): a BlueField-3 whose running firmware sorts at
+	// or above the floor needs no flash and no reboot; one below it is
+	// outdated and is the upgrade trigger. The comparison needs the
+	// flint-reported running version, which the MFT enrichment fills — an
+	// empty fwVer means classification has not landed yet (MFT still
+	// installing), not a match.
+	if fw.BFB.MinVersion != "" {
+		var unknown, outdated, current []string
 		for _, d := range a.mellanoxFns {
 			if !d.isBluefield3() {
 				continue
@@ -1033,26 +1034,26 @@ func stepBFBFlash(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 			switch {
 			case d.fwVer == "":
 				unknown = append(unknown, d.pci)
-			case d.fwVer != fw.Version:
-				mismatch = append(mismatch, fmt.Sprintf("%s running %s, target %s", d.pci, d.fwVer, fw.Version))
+			case fwVerComp(d.fwVer, fw.BFB.MinVersion) < 0:
+				outdated = append(outdated, fmt.Sprintf("%s running %s, floor %s", d.pci, d.fwVer, fw.BFB.MinVersion))
 			default:
-				match = append(match, d.pci)
+				current = append(current, d.pci)
 			}
 		}
 		if len(unknown) > 0 {
 			return v1alpha1.StepBlocked, fmt.Sprintf("firmware version not yet readable on %s (MFT classification pending); re-checks on a later refresh", strings.Join(unknown, ", "))
 		}
-		if len(mismatch) > 0 {
+		if len(outdated) > 0 {
 			// The upgrade path: BFB flash apply, then a reboot (or device
 			// reset — the reboot is the route taken here) to load the new
 			// image. The flash body itself lands in v0.2; until then the
 			// step stays Blocked naming the delta. A config apply (the
 			// Configuring mlxconfig step) always runs after the upgrade
 			// because the new image resets NV to its defaults.
-			return v1alpha1.StepBlocked, fmt.Sprintf("firmware upgrade required: %s (BFB flash apply lands in v0.2; a reboot loads the new image)", strings.Join(mismatch, "; "))
+			return v1alpha1.StepBlocked, fmt.Sprintf("firmware upgrade required: %s (BFB flash apply lands in v0.2; a reboot loads the new image)", strings.Join(outdated, "; "))
 		}
-		if len(match) > 0 {
-			return v1alpha1.StepDone, fmt.Sprintf("firmware version %s matches profile target on %s; no flash, no reboot", fw.Version, strings.Join(match, ", "))
+		if len(current) > 0 {
+			return v1alpha1.StepDone, fmt.Sprintf("firmware on %s already matches or supersedes version %s, skipping flash", strings.Join(current, ", "), fw.BFB.MinVersion)
 		}
 	}
 	if _, err := findHostTool("bfb-install"); err != nil {

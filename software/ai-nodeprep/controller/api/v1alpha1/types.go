@@ -181,18 +181,19 @@ type FirmwareSource struct {
 	BFB        BFBSource  `json:"bfb,omitempty"`
 	DOCA       DOCASource `json:"doca,omitempty"`
 	AptUpgrade bool       `json:"aptUpgrade,omitempty"`
-	// Version is the target Mellanox firmware version the profile demands —
-	// the version inside the configured BFB (e.g. "32.49.1014"). BlueField-3
-	// only: the agent compares it against the running firmware (flint) and
-	// the BFB flash gate skips when they match (no upgrade, no reboot) and
-	// blocks on a mismatch until the flash apply lands. ConnectX-class
-	// adapters take their firmware from the DOCA install, not the BFB, and
-	// are never version-compared.
-	Version string `json:"version,omitempty"`
 }
 
 type BFBSource struct {
-	Name       string `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// MinVersion is the firmware floor for the BFB flash gate (design §8.2,
+	// bash BFB_FW + vercomp): a BlueField-3 whose running firmware (flint q,
+	// the MFT enrichment's fwVer) sorts below this is outdated and is flashed
+	// with the configured BFB; one at or above it needs no flash and no
+	// reboot. Dot-separated numeric comparison with the bash vercomp's
+	// zero-padding (a missing field counts as 0, so "32.49" < "32.49.1014");
+	// ConnectX-class adapters take their firmware from the DOCA install, not
+	// the BFB, and are never version-compared. Empty = no version gate: the
+	// flash decision falls to the flash body alone.
 	MinVersion string `json:"minVersion,omitempty"`
 	SHA256     string `json:"sha256,omitempty"`
 }

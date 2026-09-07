@@ -21,6 +21,10 @@ spec:
     bfb:
       name: bf-fwbundle-3.4.0-92_26.04-prod.bfb
       sha256: cfad862925ad90618cb65dce0a025d2a408a756992df9a19e203d2d2445332a5
+      # minVersion: <FW version flint reports on a card running this BFB>
+      # Flash gate floor (BlueField-3 only): a card whose running firmware
+      # sorts below this is outdated and gets flashed; omit to gate on the
+      # flash body alone.
     doca:
       deb: doca-host_3.4.0-085000-26.04-ubuntu2404_amd64.deb
       sha256: f274db1c9445bb9362565981a226966c058e068a53207890449a83c6757004aa
