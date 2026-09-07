@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.65</span>
+    <span>nodeprep-v105.sh → controller v0.1.66</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.65</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.66</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1242,6 +1242,31 @@
       optional field) but it should be dropped there on the next sync. Both fixes unit-tested
       (<code>TestOpenibdRestartDecision</code>, <code>TestLosslessEcnTreeGate</code>,
       <code>TestControlPlanePrepGate</code>).</li>
+  <li><b>0.1.66 — pending reboots now gate the walk instead of riding it (Kevin's report, DSX Air).</b>
+      A recorded reboot request blocked nothing: the requests sat in the quiet-checkpoint queue while
+      the walk kept consuming steps. Found live twice on one walk — mlxconfig ran in the same pass
+      DOCA finished (the <code>RebootDocaInstalled</code> request still pending, so the firmware config
+      was staged against the pre-reboot driver stack), and its own <code>MlxConfigApplied</code>
+      request then rode the Configuring→Finalizing advance, so the Finalizing steps ran against
+      staged-but-unapplied firmware state (the tell: <code>sriov_totalvfs</code> still 16 against a
+      requested <code>NUM_OF_VFS</code> of 1 — the staged NV had never been loaded). Two-part fix,
+      both restoring bash semantics the checkpoint had quietly diverged from:
+      <b>(1)</b> a recorded request blocks the stage transition (<code>runStage</code> returns before
+      <code>nextStage</code> — v105 L938-943's <code>fn_update_state &lt;stage&gt; reboot</code>
+      re-enters the SAME stage after the boot instead of advancing); the Ready transition stays
+      exempt so a request only a natural boot can satisfy (a firmware ceiling above the wanted VF
+      count) cannot park a converged node. <b>(2)</b> the DOCA install request is halt-now
+      (<code>requestRebootHalt</code>): the pass breaks the moment it lands — v105 L353-354 reboots
+      immediately mid-stage ("Host reboot is needed after installing DOCA, rebooting now..."); the
+      grub/ib_core/mlxconfig requests keep riding to the boundary, matching the bash's NEEDREBOOT
+      batching. <code>runStage</code>-level tests with fake step defs cover both halts
+      (<code>TestRunStageAdvanceBlocksOnPendingReboot</code>, <code>TestRunStageHaltNowStopsPass</code>,
+      <code>TestRequestRebootHaltFlag</code>). <b>Also 0.1.66 — event messages are clamped to the API
+      server's 1024-byte ceiling</b> (<code>k8sutil.Emit</code>, rune-boundary truncation with a
+      marker): the eight-rail <code>SriovDownsizePending</code> advice blew the ceiling and the API
+      server discarded the whole event (live: <code>Event "nodeprep-bw89v" is invalid: message: ...
+      can have at most 1024 characters</code>). Both deployed to DSX Air in the same session (agent
+      digest <code>sha256:9a8fd057…</code>).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1432,7 +1457,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.65 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.66 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
