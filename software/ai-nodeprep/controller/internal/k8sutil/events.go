@@ -6,11 +6,32 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+// maxEventMessage is the API server's ceiling on Event.message (1024 bytes —
+// a longer Create is rejected wholesale and the event is lost). Multi-device
+// sweeps can produce messages well over it: SriovDownsizePending names all
+// eight rails with per-device advice (found live on DSX Air 0.1.65, where
+// the eight-rail event was discarded).
+const maxEventMessage = 1024
+
+// clampEventMessage truncates an over-long event message at a rune boundary,
+// reserving room for the marker.
+func clampEventMessage(message string) string {
+	if len(message) <= maxEventMessage {
+		return message
+	}
+	cut := maxEventMessage - len("…")
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return message[:cut] + "…"
+}
 
 // Emit records an Event for the given involved object. Every object nodeprep
 // emits for (NodePrep, NodePrepProfile, Node) is cluster-scoped, so the event
@@ -35,7 +56,7 @@ func Emit(ctx context.Context, c kubernetes.Interface, involvedKind, involvedNam
 		},
 		Reason:              reason,
 		Action:              reason,
-		Message:             message,
+		Message:             clampEventMessage(message),
 		Type:                eventType,
 		FirstTimestamp:      now,
 		LastTimestamp:       now,
