@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.64</span>
+    <span>nodeprep-v105.sh → controller v0.1.65</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.64</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.65</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1214,6 +1214,34 @@
       list. Unit-tested (<code>TestSystemctlUnitMissing</code>: the DSX Air enable wording, the
       start-failure "not found." form, four present-forms including a real restart failure that must
       still fail). Deployed to DSX Air in the same session it was found.</li>
+  <li><b>0.1.65 — losslessRoce recovers a failed openibd and stops treating a missing ECN tree as
+      fatal (first live DSX Air run).</b> The step's first real run (ConnectX-7 class, DSX Air) failed
+      on all 8 rails: <code>mlnx_qos</code> applied PFC/DSCP-trust fine, but every ECN write landed in
+      notes and all three readbacks failed — <code>/sys/class/net/&lt;dev&gt;/ecn/</code> did not
+      exist, and the walk burned the whole 5-attempt budget into a PhaseFailed NodePrep (three boots,
+      identical failure: <b>openibd.service had failed at boot</b>, so the RDMA/congestion-control
+      stack that creates the ECN tree never came up — a service failure, not flaky emulation). The
+      bash handles both halves (Kevin's diagnosis, <code>nodeprep-v105.sh</code>):
+      <code>fn_inventory_hw</code> restarts openibd on <code>Active: failed</code> immediately before
+      <code>fn_set_lossless_roce</code> (L192-193, called at L962), and the ECN writes themselves are
+      bare redirections with no <code>fn_process_result</code> — log-and-continue. Mirrored: the step
+      probes <code>systemctl status openibd --no-pager</code> and restarts it when failed
+      (<code>openibdRestartDecision</code> mirrors the bash grep: failed→restart,
+      could-not-be-found→absent note, active→healthy, inactive→left alone); the ECN write/verify block
+      is gated on <code>ecnTreePresent</code> — an absent tree is noted (PFC/DSCP trust still applied
+      and verified), a present-but-wrong tree still fails the step. <b>Also 0.1.65 —
+      <code>controlPlane.prep</code> is the sole CP gate (Kevin's report).</b> Setting
+      <code>spec.controlPlane.prep=false</code> had no effect: the Go build had grown a duplicate
+      (<code>policy.controlPlanePrep</code>, absent from the design's policy block) and wired the
+      adoption gate to it, leaving the design field dead — the mirror image of 0.1.63's
+      <code>firmware.version</code> (there the design field lived, here it was the dead one). Fixed:
+      <code>ControlPlaneSpec.Prep</code> is <code>*bool</code> (nil = prep CPs, the design default
+      posture) with <code>PrepOn()</code>; the gate reads it; <code>policy.controlPlanePrep</code> is
+      removed from the Go types and the repo CRD. <b>External-manifest note:</b> the management
+      system's CRD copy still carries <code>policy.controlPlanePrep</code> — harmless (ignored
+      optional field) but it should be dropped there on the next sync. Both fixes unit-tested
+      (<code>TestOpenibdRestartDecision</code>, <code>TestLosslessEcnTreeGate</code>,
+      <code>TestControlPlanePrepGate</code>).</li>
 </ul>
 
 <h3>On every node</h3>
@@ -1404,7 +1432,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.64 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.65 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
