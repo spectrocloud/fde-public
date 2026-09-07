@@ -159,6 +159,17 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	if _, err := findHostTool("mlxconfig"); err != nil {
 		return v1alpha1.StepBlocked, fmt.Sprintf("Mellanox hardware present but mlxconfig not found: %v", err)
 	}
+	if a.verifyOnly {
+		// boot-verify (Ready phase) must not rewrite firmware NV: detect and
+		// report only. A boot-verify pass runs within the first minute of a
+		// boot, and the emulated NV table reads pre-init DEVICE_DEFAULT
+		// values in that window (DSX Air 0.1.71 live: the same untouched NV
+		// parsed as 0/8 devices drifted at boot+60s and verified Done at
+		// boot+6min) — the walk-time apply on that read reset the firmware
+		// NV, re-wrote identical values and armed a reboot, a cycle repeated
+		// on every boot and each reset wiping non-profile NV config.
+		return stepMlxconfigVerify(a, profile)
+	}
 	if !a.mutationsAllowed(profile) {
 		return v1alpha1.StepBlocked, "adapter firmware config requires -host-mutations (detect-only run)"
 	}
@@ -182,23 +193,8 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	var nvChanged []string             // PFs whose set carried a NUM_OF_VFS change (0.1.59 firmware reset)
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, d := range a.mellanoxFns {
-		if d.isVF {
-			// VFs have no device NV of their own (mlxconfig query exits 3)
-			// — their SR-IOV/GUID config is driven through the PF.
-			a.logf("mlxconfig: %s is a virtual function; config is inherited from the PF, skipping", d.pci)
-			continue
-		}
-		if d.isDPU() && !profile.Spec.Policy.ControlDPU {
-			a.logf("mlxconfig: control of DPUs is not allowed by policy, skipping %s", d.pci)
-			continue
-		}
-		// East-west firmware config (link type, VF count) only belongs on the
-		// rail-mapped functions (spec.rails). The bash applied NUMVF_EW to
-		// every ConnectX-class function, which would also reconfigure e.g.
-		// the host's bond0 uplink card — not nodeprep's to touch (Kevin's
-		// correction, 2026-09-03).
-		if !d.isDPU() && d.rail == "" {
-			a.logf("mlxconfig: %s is not rail-mapped in spec.rails; east-west firmware config skipped", d.pci)
+		if ok, why := mlxconfigScope(d, profile); !ok {
+			a.logf("mlxconfig: %s %s, skipping", d.pci, why)
 			continue
 		}
 		// one full query per device gates the set build AND the drift check
@@ -261,6 +257,97 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 			msg += "; " + strings.Join(fwMsgs, "; ")
 		}
 		return v1alpha1.StepBlocked, msg
+	}
+	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched))
+}
+
+// mlxconfigScope reports whether firmware config addresses this function,
+// with the skip reason when it does not — shared by the walk and
+// boot-verify paths so their scope can never diverge. VFs have no device NV
+// of their own (mlxconfig query exits 3) — their SR-IOV/GUID config is
+// driven through the PF. East-west firmware config (link type, VF count)
+// only belongs on the rail-mapped functions (spec.rails): the bash applied
+// NUMVF_EW to every ConnectX-class function, which would also reconfigure
+// e.g. the host's bond0 uplink card — not nodeprep's to touch (Kevin's
+// correction, 2026-09-03).
+func mlxconfigScope(d pciDevice, profile *v1alpha1.NodePrepProfile) (bool, string) {
+	switch {
+	case d.isVF:
+		return false, "is a virtual function; config is inherited from the PF"
+	case d.isDPU() && !profile.Spec.Policy.ControlDPU:
+		return false, "control of DPUs is not allowed by policy"
+	case !d.isDPU() && d.rail == "":
+		return false, "is not rail-mapped in spec.rails"
+	}
+	return true, ""
+}
+
+// stepMlxconfigVerify is the firmware-config step's boot-verify body
+// (0.1.72): the same per-device flash set, compared against the device's
+// query — never reset, never set, never a reboot request. A boot-verify
+// pass runs on an already-Ready node within the first minute of a boot,
+// where the emulated NV table (DSX Air ConnectX-7) reads pre-init
+// DEVICE_DEFAULT values; the walk-time apply on that read reset the
+// firmware NV, re-wrote identical values and armed a reboot, and the paced
+// re-verify minutes later matched the untouched NV — a reboot loop fed
+// entirely by a transient read, each cycle's reset wiping non-profile NV
+// config. Drift here is reported per key so a divergent NV is at least
+// visible; the walk applies the config.
+func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	ew, ns := profile.Spec.EastWest, profile.Spec.NorthSouth
+	lt, ltNS := linkTypeNum(ew.LinkType), linkTypeNum(ns.LinkType)
+	roceCC := "0"
+	if ew.RoceCC {
+		roceCC = "1"
+	}
+	dpuOffload := "0"
+	switch strings.ToLower(strings.TrimSpace(ns.OffloadEngine)) {
+	case "sf":
+		dpuOffload = "1"
+	case "smf":
+		dpuOffload = "2"
+	}
+
+	var matched, drifted, failures []string
+	for _, d := range a.mellanoxFns {
+		if ok, why := mlxconfigScope(d, profile); !ok {
+			a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+			continue
+		}
+		vals, err := a.mlxconfigGetAll(d.pci)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: query: %v", d.pci, err))
+			continue
+		}
+		flash := buildFlashSet(a, d, vals, mlxconfigParams{lt: lt, ltNS: ltNS, roceCC: roceCC, dpuOffload: dpuOffload,
+			cnxVFs: fwVFCount(ew.NumVFs), dpuVFs: fwVFCount(ns.NumVFs)})
+		if len(flash) == 0 {
+			continue
+		}
+		var keys []string
+		for _, kv := range flash {
+			cur, ok := vals[kv.key]
+			if !ok {
+				keys = append(keys, fmt.Sprintf("%s absent from query (want %s)", kv.key, kv.val))
+				continue
+			}
+			if cur != kv.val {
+				keys = append(keys, fmt.Sprintf("%s=%s want %s", kv.key, cur, kv.val))
+			}
+		}
+		if len(keys) == 0 {
+			matched = append(matched, d.pci)
+			continue
+		}
+		drifted = append(drifted, fmt.Sprintf("%s (%s)", d.pci, strings.Join(keys, ", ")))
+	}
+	if len(failures) > 0 {
+		return v1alpha1.StepFailed, strings.Join(failures, "; ")
+	}
+	if len(drifted) > 0 {
+		return v1alpha1.StepBlocked, fmt.Sprintf(
+			"firmware NV diverges from the profile on %d device(s): %s; boot-verify reports only — the walk-time step applies the config, and an early-boot read can carry pre-init defaults that a re-verify matches",
+			len(drifted), strings.Join(drifted, "; "))
 	}
 	return v1alpha1.StepDone, fmt.Sprintf("adapter firmware config verified on %d device(s)", len(matched))
 }
@@ -371,6 +458,7 @@ func addP2(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, l
 // post-set verify re-fetches once).
 func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string) (bool, []string) {
 	var errs []string
+	var drifted []string
 	need := false
 	for _, kv := range flash {
 		cur, ok := vals[kv.key]
@@ -380,11 +468,17 @@ func applyMlxconfig(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]
 		}
 		if cur != kv.val {
 			need = true
+			drifted = append(drifted, fmt.Sprintf("%s=%s want %s", kv.key, cur, kv.val))
 		}
 	}
 	if !need {
 		return false, nil
 	}
+	// The step message only carries counts ("written to N device(s), M
+	// already matched"); this line is the per-key record of what drifted —
+	// without it a reset is unexplainable after the fact (DSX Air 0.1.71:
+	// "0 already matched" on an NV that verified Done six minutes later).
+	a.logf("mlxconfig: %s drift: %s", d.pci, strings.Join(drifted, ", "))
 	if out, err := a.hostExec(nil, 120*time.Second, "mlxconfig", "-d", d.pci, "-y", "reset"); err != nil {
 		return true, append(errs, fmt.Sprintf("%s: reset: %v", d.pci, mlxconfigErr(out, err)))
 	}

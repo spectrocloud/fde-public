@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -1187,5 +1189,125 @@ func TestWriteEcnAttrLandsWhereReadbackLooks(t *testing.T) {
 	}
 	if errs := ecnReadbackErrs("eth_r0"); len(errs) != 0 {
 		t.Fatalf("a fully-written tree must pass readback, got %v", errs)
+	}
+}
+
+// The flash set the DSX Air ConnectX-7 build actually applies (isCx79 CC
+// keys + Air ConnectX branch), in the steady-state full-query shape.
+func mlxconfigAirQuery(out map[string]string) string {
+	order := []string{"NUM_OF_VFS", "SRIOV_EN", "ROCE_CC_RTT_TIMESTAMP_FORMAT", "ROCE_RTT_RESP_DSCP_P1",
+		"ROCE_RTT_RESP_DSCP_MODE_P1", "ROCE_ADAPTIVE_ROUTING_EN", "USER_PROGRAMMABLE_CC",
+		"TX_SCHEDULER_LOCALITY_MODE", "ROCE_CC_STEERING_EXT", "LINK_TYPE_P1"}
+	form := map[string]string{
+		"SRIOV_EN":                     "True(%s)",
+		"ROCE_ADAPTIVE_ROUTING_EN":     "True(%s)",
+		"USER_PROGRAMMABLE_CC":         "True(%s)",
+		"ROCE_RTT_RESP_DSCP_MODE_P1":   "FIXED_VALUE(%s)",
+		"LINK_TYPE_P1":                 "ETH(%s)",
+		"ROCE_CC_RTT_TIMESTAMP_FORMAT": "DEVICE_DEFAULT(%s)",
+	}
+	b := &strings.Builder{}
+	b.WriteString("Device #0:\n----------\nDevice type: ConnectX7\n\n")
+	b.WriteString("Configurations:                                         Next Boot\n")
+	for _, k := range order {
+		v, ok := out[k]
+		if !ok {
+			continue
+		}
+		if f, ok := form[k]; ok {
+			v = fmt.Sprintf(f, v)
+		}
+		b.WriteString("        " + k + "  " + v + "\n")
+	}
+	return b.String()
+}
+
+// A boot-verify pass on a Ready node must detect-and-report only: no
+// mlxconfig reset, no set, no reboot request — even when the device reads
+// drifted. Found live on DSX Air (0.1.71): the emulated NV table reads
+// pre-init DEVICE_DEFAULT values in the first minute after boot, the
+// boot-verify apply on that read reset the NV, re-wrote identical values
+// and armed a warm reboot, and the paced re-verify six minutes later
+// matched the untouched NV — a reboot loop fed entirely by a transient
+// read, each cycle's reset wiping non-profile NV config.
+func TestMlxconfigBootVerifyDetectOnly(t *testing.T) {
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+	profile.Spec.EastWest.RoceCC = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	// The findHostTool gate needs a fake host tool (same seam as the OVS
+	// tests); the exec itself goes through the execFn stub.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	full := map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "ROCE_CC_RTT_TIMESTAMP_FORMAT": "0",
+		"ROCE_RTT_RESP_DSCP_P1": "48", "ROCE_RTT_RESP_DSCP_MODE_P1": "1",
+		"ROCE_ADAPTIVE_ROUTING_EN": "1", "USER_PROGRAMMABLE_CC": "1",
+		"TX_SCHEDULER_LOCALITY_MODE": "2", "ROCE_CC_STEERING_EXT": "2", "LINK_TYPE_P1": "2",
+	}
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", variant: "Air", rail: "r0"}}}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+
+	// Matched NV: detect-only reports Done from the query alone.
+	var cmds []string
+	a.execFn = func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
+		cmds = append(cmds, name+" "+strings.Join(args, " "))
+		if name == "mlxconfig" && len(args) == 3 && args[2] == "q" {
+			return mlxconfigAirQuery(full), nil
+		}
+		return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+	}
+	a.verifyOnly = true
+	st, msg := stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("matched NV must verify Done, got %s %q", st, msg)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("detect-only must exec only the query, got %v", cmds)
+	}
+
+	// Drifted NV: Blocked with the per-key detail — and still only queries.
+	full["LINK_TYPE_P1"] = "4"
+	cmds = nil
+	st, msg = stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepBlocked {
+		t.Fatalf("drifted NV must Block, got %s %q", st, msg)
+	}
+	if !strings.Contains(msg, "LINK_TYPE_P1=4 want 2") {
+		t.Fatalf("drift message must name the key, got %q", msg)
+	}
+	if strings.Contains(strings.ToLower(msg), "reboot") {
+		t.Fatalf("detect-only must never request a reboot, got %q", msg)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("drifted detect-only must exec only the query, got %v", cmds)
+	}
+	if len(a.pendingReboot) != 0 {
+		t.Fatalf("detect-only must not arm a reboot, got %v", a.pendingReboot)
+	}
+
+	// The walk path is untouched: with verifyOnly off and mutations on, the
+	// step reaches the apply (here: the stub rejects the reset — Failed, but
+	// proving the gate let it through).
+	a.verifyOnly = false
+	a.hostMutations = true
+	st, msg = stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepFailed || !strings.Contains(msg, "reset") {
+		t.Fatalf("walk path must attempt the apply (Failed on the stub's reset refusal), got %s %q", st, msg)
+	}
+	if !strings.Contains(strings.Join(cmds, "\n"), "-y reset") {
+		t.Fatalf("walk path must run the reset, got %v", cmds)
 	}
 }

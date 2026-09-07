@@ -39,6 +39,15 @@ type Agent struct {
 	hostMutations bool
 	rebootCommand string
 
+	// execFn, when set, replaces the nsenter host exec entirely (test seam —
+	// the unit environment has no /host; same pattern as hostToolRoot).
+	execFn func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error)
+
+	// verifyOnly marks a boot-verify pass: the firmware-config step runs
+	// detect-only (no reset/set, no reboot request) — a Ready node's
+	// verification must never rewrite firmware NV (0.1.72).
+	verifyOnly bool
+
 	// Host filesystem locations (mounted via hostPath in the DaemonSet).
 	hostKubeletDir string
 	hostEtcUdev    string
@@ -911,6 +920,12 @@ func (a *Agent) verifyReady(ctx context.Context, np *v1alpha1.NodePrep, profile 
 // provisioning-era message would otherwise keep describing state (e.g. a
 // superseded inventory classification) for the life of the boot.
 func (a *Agent) bootVerify(ctx context.Context, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) bool {
+	// 0.1.72: a boot-verify pass runs on an already-Ready node, within the
+	// first minute of a boot — where the emulated NV table reads pre-init
+	// defaults. The firmware-config step runs detect-only in this context:
+	// no reset, no set, no reboot request (stepMlxconfigVerify).
+	a.verifyOnly = true
+	defer func() { a.verifyOnly = false }()
 	changed := false
 	for _, def := range stepDefs {
 		if !def.critical {

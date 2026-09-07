@@ -41,6 +41,9 @@ func (a *Agent) hostExecQuiet(env []string, timeout time.Duration, name string, 
 }
 
 func (a *Agent) hostExecV(env []string, timeout time.Duration, name string, quiet bool, args ...string) (string, error) {
+	if a.execFn != nil {
+		return a.execFn(env, timeout, name, quiet, args)
+	}
 	quiet = quiet && !a.verbose // -verbose (troubleshooting) logs everything
 	cmdline := strings.Join(append([]string{name}, args...), " ")
 	if !quiet {
