@@ -41,5 +41,20 @@ manifests-install: ## Apply CRDs + RBAC + workloads
 sample: ## Apply the example profile
 	kubectl apply -f samples/profile-gpu-node.yaml
 
+CHART_DIR = chart/nodeprep
+
+chart-sync-crds: ## Refresh the chart's CRD copies from manifests/ (single source of truth)
+	cp manifests/crd-nodeprep.yaml manifests/crd-nodeprepprofile.yaml $(CHART_DIR)/crds/
+
+chart-lint: chart-sync-crds ## helm lint after re-syncing the CRD copies
+	helm lint $(CHART_DIR)
+
+chart-template: ## Render the chart (visual check / manifest diffing)
+	helm template nodeprep $(CHART_DIR)
+
+chart-package: ## Package the chart into dist/
+	mkdir -p dist
+	helm package $(CHART_DIR) --destination dist/
+
 clean:
 	rm -rf bin/

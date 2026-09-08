@@ -986,6 +986,23 @@
       untainted CPs symmetrically with workers: demote from worker pools before disruptive Finalizing
       work, restore at Ready. <code>TestWorkerLabelApplies</code> pins all four role×taint cells plus
       the NoSchedule-effect requirement.</li>
+  <li><b>Helm chart (<code>chart/nodeprep</code>) — the packaged deployment form.</b> The same
+      resources <code>manifests/</code> carries, rendered from values: controller Deployment, privileged
+      agent DaemonSet, both ClusterRoles/bindings (rule sets verified identical to
+      <code>manifests/rbac.yaml</code>), the namespace with its PSA <code>privileged</code> labels
+      (<code>namespace.create=false</code> when externally managed, kept on uninstall), and the CRDs in
+      the standard <code>crds/</code> directory — byte-identical copies of
+      <code>manifests/crd-*.yaml</code>, refreshed by <code>make chart-sync-crds</code> (manifests stay
+      the source of truth; Palette's enforced copies still own live-cluster CRD upgrades, matching the
+      known <code>crds/</code>-is-not-upgraded-by-helm limitation). Image tags derive from
+      <code>appVersion</code> (<code>&lt;appVersion&gt;-agent/-controller</code>), so one version bump
+      moves both. Safety posture is explicit: <code>agent.args.hostMutations</code>/
+      <code>allowReboot</code> default <b>false</b> in the chart (detect-only; the DSX Air values set
+      both true), and NOTES.txt states the posture at install time. Resource names are unchanged
+      (<code>nodeprep-controller</code>/<code>nodeprep-agent</code>), so a switch from
+      manifest-managed to chart-managed does not orphan the workloads. Validated:
+      <code>helm lint</code> clean; rendered output diffed against the manifests (label order and
+      comments only); <code>helm package</code> → <code>dist/nodeprep-0.1.0.tgz</code>.</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but runs on Bluefield SuperNIC devices only (0.1.75 narrowed the bash's
       SuperNIC-or-ConnectX-7..9 gate — on the emulated ConnectX-7 Air rails the CC stack is not

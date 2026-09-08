@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-agent
+  namespace: {{ include "nodeprep.namespace" . }}
+  labels:
+    {{- include "nodeprep.agentLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "nodeprep.fullname" . }}-agent
+  template:
+    metadata:
+      labels:
+        {{- include "nodeprep.agentLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nodeprep.fullname" . }}-agent
+      hostPID: true # nsenter into PID 1 for nodeprep-initiated reboots
+      # The agent must run on the very nodes the contract taints: the taint
+      # survives reboots in etcd and is only released after the agent's own
+      # boot-verify — without this toleration the agent could never come
+      # back after a reboot to release it. The DaemonSet controller already
+      # adds the standard not-ready/unreachable/unschedulable tolerations;
+      # custom taints are never auto-tolerated. Control-plane taints so the
+      # agent can prep control-plane nodes.
+      tolerations:
+        {{- toYaml .Values.agent.tolerations | nindent 8 }}
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "nodeprep.agentImage" . }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - -interval={{ .Values.agent.args.interval }}
+            {{- if .Values.agent.args.hostMutations }}
+            - -host-mutations
+            {{- end }}
+            {{- if .Values.agent.args.allowReboot }}
+            - -allow-reboot
+            {{- end }}
+            {{- if .Values.agent.args.verbose }}
+            - -verbose
+            {{- end }}
+            {{- with .Values.agent.args.rebootCommand }}
+            - -reboot-command={{ . }}
+            {{- end }}
+            {{- with .Values.agent.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: host
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: host
+          hostPath:
+            path: /
+        - name: dev
+          hostPath:
+            path: /dev
