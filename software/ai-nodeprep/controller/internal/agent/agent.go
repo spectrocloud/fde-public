@@ -100,6 +100,14 @@ type Agent struct {
 	// instead of one per poll cycle.
 	noPrepLogged bool
 
+	// skipLogged dedups the per-device mlxconfig skip lines (0.1.82,
+	// Kevin: the inventory-cycle repetition filled the logs with
+	// superfluous information): "not rail-mapped in spec.rails" and "does
+	// not expose <key>" are static facts of the hardware — they log once
+	// per process, keyed by the full message (a changed reason for the
+	// same device is a different line and logs again).
+	skipLogged map[string]bool
+
 	// backoffUntil paces re-running steps that just Failed (design §5.1
 	// retry budget): in-memory, doubling with each consecutive failure,
 	// cleared on success and on the resume annotation.
@@ -245,6 +253,21 @@ func (a *Agent) fetchProfile(ctx context.Context, np *v1alpha1.NodePrep) (*v1alp
 // so pod logs alone tell an operator what the agent did and why.
 func (a *Agent) logf(format string, args ...interface{}) {
 	fmt.Printf("[nodeprep-agent] "+format+"\n", args...)
+}
+
+// logOnce emits a line at most once per process — for skip messages that
+// would otherwise repeat on every walk and boot-verify pass. Only step
+// bodies call this (single walk goroutine).
+func (a *Agent) logOnce(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if a.skipLogged == nil {
+		a.skipLogged = map[string]bool{}
+	}
+	if a.skipLogged[msg] {
+		return
+	}
+	a.skipLogged[msg] = true
+	a.logf("%s", msg)
 }
 
 func (a *Agent) emit(ctx context.Context, eventType, reason, message string) {

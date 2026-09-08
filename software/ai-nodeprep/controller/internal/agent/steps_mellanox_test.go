@@ -1512,3 +1512,65 @@ func TestStepFabricNetplanApply(t *testing.T) {
 		t.Fatalf("verified files must not re-apply, calls: %v", (*calls)[n:])
 	}
 }
+
+// The per-device mlxconfig skip lines ("is not rail-mapped in spec.rails",
+// "does not expose <key>") are static facts of the hardware and used to
+// repeat on every inventory cycle (walk + boot-verify) — on the ai-nodeprep
+// cluster 8 of the first 15 log lines were skips (Kevin, 0.1.82: log once
+// per container lifetime). logOnce keys by the full message: a different
+// device or a changed reason logs again.
+func TestMlxconfigSkipLinesLogOnce(t *testing.T) {
+	yes := true
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		Policy: v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+
+	// stepMlxconfig gates on a findable mlxconfig before the device loop.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	// The rail-mapped mezz PF's query lacks LINK_TYPE_P1 (the live
+	// LINK_TYPE_P1-not-exposed case); the query is otherwise complete.
+	query := "Device type: ConnectX4Lx\nConfigurations:\n\tSRIOV_EN                     1\n\tNUM_OF_VFS                   1\n"
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	a := &Agent{
+		hostMutations: true,
+		mellanoxFns: []pciDevice{
+			{pci: "0000:16:00.0", devType: "ConnectX4Lx", variant: "Physical", rail: ""}, // unmapped
+			{pci: "0000:16:00.1", devType: "ConnectX4Lx", variant: "Physical", rail: ""}, // unmapped (2nd device)
+			{pci: "0000:49:00.0", devType: "ConnectX4Lx", variant: "Physical", rail: "r0"},
+		},
+		execFn: func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+			if name == "mlxconfig" {
+				return query, nil
+			}
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		},
+	}
+
+	out := captureStdout(t, func() { stepMlxconfig(a, np, profile) })
+	out += captureStdout(t, func() { stepMlxconfig(a, np, profile) }) // second inventory cycle
+
+	// Each static skip line exactly once across both cycles — despite the
+	// unmapped devices logging on every pass and the missing key being
+	// re-discovered per device per pass.
+	for _, line := range []string{
+		"mlxconfig: 0000:16:00.0 is not rail-mapped in spec.rails, skipping",
+		"mlxconfig: 0000:16:00.1 is not rail-mapped in spec.rails, skipping",
+		"mlxconfig: 0000:49:00.0 does not expose LINK_TYPE_P1, skipping key",
+	} {
+		if n := strings.Count(out, line); n != 1 {
+			t.Fatalf("%q logged %d times across two cycles, want exactly 1:\n%s", line, n, out)
+		}
+	}
+}

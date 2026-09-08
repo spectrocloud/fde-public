@@ -195,7 +195,7 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	for _, d := range a.mellanoxFns {
 		if ok, why := mlxconfigScope(d, profile); !ok {
 			if why != "" {
-				a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+				a.logOnce("mlxconfig: %s %s, skipping", d.pci, why)
 			}
 			continue
 		}
@@ -326,7 +326,7 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	for _, d := range a.mellanoxFns {
 		if ok, why := mlxconfigScope(d, profile); !ok {
 			if why != "" {
-				a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+				a.logOnce("mlxconfig: %s %s, skipping", d.pci, why)
 			}
 			continue
 		}
@@ -416,7 +416,7 @@ type mlxconfigParams struct {
 // first keeps the supported superset applied.
 func addKV(a *Agent, d pciDevice, flash []mlxconfigKV, vals map[string]string, key, val string) []mlxconfigKV {
 	if _, ok := vals[key]; !ok {
-		a.logf("mlxconfig: %s does not expose %s, skipping key", d.pci, key)
+		a.logOnce("mlxconfig: %s does not expose %s, skipping key", d.pci, key)
 		return flash
 	}
 	return append(flash, mlxconfigKV{key: key, val: val})
