@@ -355,9 +355,12 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 			labelsWant[v1alpha1.LegacyLabel] = v
 		}
 	}
-	// The worker-role label describes the WORKER role; control-plane nodes
-	// must never gain (or lose) it because of a prep cycle.
-	if !isCP {
+	// The worker-role label choreography (design §6.3) reaches workers
+	// always and control-plane nodes only when they carry no control-plane
+	// taint — an untainted CP node is expected to execute workloads, so a
+	// completed prep earns the label there too; a tainted CP node keeps its
+	// role identity untouched in both directions (WorkerLabelApplies).
+	if WorkerLabelApplies(node, isCP) {
 		switch WorkerLabelDecision(phase, pol) {
 		case WorkerLabelSet:
 			labelsWant[v1alpha1.WorkerRoleLabel] = ""

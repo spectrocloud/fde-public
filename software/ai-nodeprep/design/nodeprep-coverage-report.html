@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.79</span>
+    <span>nodeprep-v105.sh → controller v0.1.80</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.79</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.80</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -969,6 +969,23 @@
       log only non-empty reasons; the rare, informative skips (DPU control disallowed by policy, not
       rail-mapped in spec.rails) still log. No step behavior changed — scope, config application and
       drift detection are untouched.</li>
+  <li><b>0.1.80 — control-plane nodes without the CP taint earn the worker-role label (Kevin: "when the
+      CP node doesn't have the node-role.kubernetes.io/control-plane=:NoSchedule taint, it is expected
+      to execute workloads. In that case, if it has successfully completed a Nodeprep, it should gain
+      the node-role.kubernetes.io/worker label").</b> The §6.3 choreography (remove entering
+      Finalizing, restore at Ready) previously skipped control-plane nodes unconditionally — the label
+      described the WORKER role and a prep cycle must never touch a CP node's role identity. But a CP
+      node that carries no CP taint <em>is</em> a workload executor (live on DSX Air:
+      <code>hgx-pod00-su00-h00</code> carries the <code>control-plane</code> role <em>label</em> yet no
+      CP <em>taint</em> — Palette's CPs run workloads), and after its Ready it kept no worker label,
+      so worker-pool selectors missed it. <code>WorkerLabelApplies(node, isCP)</code> now gates the
+      choreography: workers always; CP nodes only when
+      <code>k8sutil.HasTaint(node, ControlPlaneTaintKey)</code> is false (key + NoSchedule, so a
+      NoExecute-only variant does not gate). A tainted CP node keeps the old carve-out — untouched in
+      both directions, never gained or lost because of a prep cycle. The Remove side applies to
+      untainted CPs symmetrically with workers: demote from worker pools before disruptive Finalizing
+      work, restore at Ready. <code>TestWorkerLabelApplies</code> pins all four role×taint cells plus
+      the NoSchedule-effect requirement.</li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
       implemented but runs on Bluefield SuperNIC devices only (0.1.75 narrowed the bash's
       SuperNIC-or-ConnectX-7..9 gate — on the emulated ConnectX-7 Air rails the CC stack is not
@@ -1716,7 +1733,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.79 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.80 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

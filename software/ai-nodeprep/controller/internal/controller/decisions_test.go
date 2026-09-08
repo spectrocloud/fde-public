@@ -235,3 +235,42 @@ func TestControlPlanePrepGate(t *testing.T) {
 		t.Fatalf("prep: false must keep CPs out of the walk")
 	}
 }
+
+// WorkerLabelApplies gates the §6.3 choreography by node role: workers
+// always; a CP node only when it carries no control-plane taint (an
+// untainted CP node is expected to execute workloads, so a completed prep
+// earns the worker label — Kevin, 2026-09-08, DSX Air h00 has the CP role
+// label but no CP taint). A tainted CP node is untouched in both
+// directions.
+func TestWorkerLabelApplies(t *testing.T) {
+	node := func(taints ...string) *corev1.Node {
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n"}}
+		for _, k := range taints {
+			n.Spec.Taints = append(n.Spec.Taints, corev1.Taint{Key: k, Effect: corev1.TaintEffectNoSchedule})
+		}
+		return n
+	}
+	cases := []struct {
+		name    string
+		node    *corev1.Node
+		isCP    bool
+		applies bool
+	}{
+		{"worker", node(), false, true},
+		{"worker carrying the CP taint is still a worker", node(v1alpha1.ControlPlaneTaintKey), false, true},
+		{"CP without the taint", node(), true, true},
+		{"CP tainted NoSchedule", node(v1alpha1.ControlPlaneTaintKey), true, false},
+	}
+	for _, c := range cases {
+		if got := WorkerLabelApplies(c.node, c.isCP); got != c.applies {
+			t.Errorf("%s: WorkerLabelApplies = %v, want %v", c.name, got, c.applies)
+		}
+	}
+	// The taint only counts with the NoSchedule effect — the key alone
+	// (e.g. a NoExecute variant) does not mark the CP workload-free.
+	noEffect := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n"}}
+	noEffect.Spec.Taints = append(noEffect.Spec.Taints, corev1.Taint{Key: v1alpha1.ControlPlaneTaintKey, Effect: corev1.TaintEffectNoExecute})
+	if !WorkerLabelApplies(noEffect, true) {
+		t.Error("CP taint without NoSchedule must not gate the label")
+	}
+}

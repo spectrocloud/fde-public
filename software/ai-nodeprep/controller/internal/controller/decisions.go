@@ -3,9 +3,11 @@ package controller
 import (
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"spectrocloud.com/nodeprep/api/v1alpha1"
+	"spectrocloud.com/nodeprep/internal/k8sutil"
 )
 
 // Pure admission/taint decision functions, unit-tested; the reconcile loop
@@ -111,4 +113,16 @@ func WorkerLabelDecision(phase v1alpha1.Phase, policy v1alpha1.PolicySpec) Worke
 	default:
 		return WorkerLabelNone
 	}
+}
+
+// WorkerLabelApplies gates the choreography by node role. Workers always
+// take it. A control-plane node takes it only when it carries no
+// node-role.kubernetes.io/control-plane taint: an untainted CP node is
+// expected to execute workloads, so a completed prep earns the worker
+// label there too (Kevin, 2026-09-08 — live on DSX Air: h00 has the CP
+// role label but no CP taint). A tainted CP node keeps its role identity
+// untouched in both directions — the label must never be gained or lost
+// because of a prep cycle there.
+func WorkerLabelApplies(node *corev1.Node, isCP bool) bool {
+	return !isCP || !k8sutil.HasTaint(node, v1alpha1.ControlPlaneTaintKey)
 }

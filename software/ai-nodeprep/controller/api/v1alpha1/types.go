@@ -25,6 +25,10 @@ const (
 	TaintKey = "spectrocloud.com/nodeprep"
 	// WorkerRoleLabel is demoted entering Finalizing, restored at Ready (design §6.3).
 	WorkerRoleLabel = "node-role.kubernetes.io/worker"
+	// ControlPlaneTaintKey is kubeadm's CP taint; its absence marks a CP
+	// node as expected to execute workloads, so the worker-role label
+	// choreography reaches it too (see WorkerLabelApplies).
+	ControlPlaneTaintKey = "node-role.kubernetes.io/control-plane"
 	// ResumeAnnotation restarts a Failed NodePrep (design §5.2).
 	ResumeAnnotation = "nodeprep.spectrocloud.com/resume"
 	// CAPAPauseAnnotation pauses the CAPI Machine owning a node (design §6.3).
