@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	clientfake "k8s.io/client-go/kubernetes/fake"
+
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 )
 
@@ -65,6 +67,7 @@ func TestStepAptPackagesGates(t *testing.T) {
 	// execFn absorbs the update-initramfs refresh (no nsenter off-host).
 	etcd := t.TempDir()
 	a3 := &Agent{hostMutations: true, hostEtcDir: func() string { return etcd },
+		client: clientfake.NewSimpleClientset(), // the reboot request emits an event
 		execFn: func(_ []string, _ time.Duration, _ string, _ bool, _ []string) (string, error) {
 			return "", nil
 		}}
@@ -82,6 +85,90 @@ func TestStepAptPackagesGates(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(etcd, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=0\n" {
 		t.Fatalf("profile-only staging wrote wrong content: %q", got)
+	}
+	// The staged mode must not wait for someone else's reboot: an ib_core-only
+	// staging requests its own (quiet-checkpoint) reboot — 0.1.75 dropped the
+	// standalone step's request here, and the module never reloaded.
+	if len(a3.pendingReboot) != 1 || a3.pendingReboot[0].reason != v1alpha1.RebootIbCoreNetns {
+		t.Fatalf("profile-only staging must request the ib_core reboot, got %+v", a3.pendingReboot)
+	}
+}
+
+// The folded grub staging (0.1.78): the dropin + update-grub run inside
+// aptPackages and the cmdline reboot rides the same decision as the DOCA
+// install — the standalone step ran after the DOCA halt and armed its own
+// extra boot.
+func TestStepAptPackagesGrubFold(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	etc := t.TempDir()
+	var calls []string
+	a := &Agent{hostMutations: true, hostEtcDir: func() string { return etc },
+		client: clientfake.NewSimpleClientset(),
+		execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+			calls = append(calls, name)
+			if name == "dpkg-query" {
+				return "install ok installed", nil
+			}
+			return "", nil
+		}}
+	yes := true
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		// Packages-only DOCA (no deb): all installed by the stub, so the
+		// pass has no package work — the grub change must still stage and
+		// request its reboot.
+		Firmware: v1alpha1.FirmwareSource{DOCA: v1alpha1.DOCASource{Packages: []string{"doca-all"}}},
+		HostBoot: v1alpha1.HostBootSpec{IOMMU: "intel", Hugepages: v1alpha1.HugepagesSpec{Pages2M: 5120}},
+		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	state, msg := stepAptPackages(a, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "grub 90-nodeprep.cfg written") {
+		t.Fatalf("grub fold: got %s %q, want Done with the grub note", state, msg)
+	}
+	if !strings.Contains(msg, "DOCA packages already installed") {
+		t.Fatalf("clean dpkg state must still be reported: %q", msg)
+	}
+	dropin, err := os.ReadFile(filepath.Join(etc, "default/grub.d/90-nodeprep.cfg"))
+	if err != nil || !strings.Contains(string(dropin), "intel_iommu=on") || !strings.Contains(string(dropin), "hugepages=5120") {
+		t.Fatalf("dropin wrong (err=%v): %q", err, dropin)
+	}
+	var updateGrub bool
+	for _, c := range calls {
+		if c == "update-grub" {
+			updateGrub = true
+		}
+	}
+	if !updateGrub {
+		t.Fatalf("update-grub must run: %v", calls)
+	}
+	// Packages clean → the grub reboot is the quiet-checkpoint form, not a
+	// DOCA halt.
+	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged || a.pendingReboot[0].haltNow {
+		t.Fatalf("grub-only change must request the quiet GrubChanged reboot, got %+v", a.pendingReboot)
+	}
+
+	// An agent restart loses the in-memory request: the dropin is already
+	// arranged but the kernel has not booted with the parameters — the next
+	// pass must re-request the reboot (without rewriting the dropin).
+	a2 := &Agent{hostMutations: true, hostEtcDir: func() string { return etc },
+		client: clientfake.NewSimpleClientset(),
+		execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+			calls = append(calls, "a2:"+name)
+			if name == "dpkg-query" {
+				return "install ok installed", nil
+			}
+			return "", nil
+		}}
+	state, msg = stepAptPackages(a2, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "already arranged") {
+		t.Fatalf("arranged-but-not-running: got %s %q, want Done reporting the arrangement", state, msg)
+	}
+	if len(a2.pendingReboot) != 1 || a2.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
+		t.Fatalf("arranged-but-not-running must re-request the reboot, got %+v", a2.pendingReboot)
+	}
+	for _, c := range calls {
+		if c == "a2:update-grub" {
+			t.Fatalf("an already-correct dropin must not be rewritten: %v", calls)
+		}
 	}
 }
 

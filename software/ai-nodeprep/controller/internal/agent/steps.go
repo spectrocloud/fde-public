@@ -49,7 +49,12 @@ var stepDefs = []stepDef{
 	{name: "aptUpgrade", stage: v1alpha1.PhaseProvisioning, run: stepAptUpgrade},
 	{name: "aptPackages", stage: v1alpha1.PhaseProvisioning, run: stepAptPackages},
 	{name: "lldpdConfig", stage: v1alpha1.PhaseProvisioning, run: stepLldpdConfig},
-	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
+	// grubParams is not a step since 0.1.78 either: the dropin write +
+	// update-grub live inside aptPackages (grubParamsStatus/stageGrubDropin),
+	// so the cmdline change rides the same reboot as the DOCA install. The
+	// standalone step ran after aptPackages — the DOCA halt stopped the pass
+	// before it could run, and it then armed its own reboot on the next
+	// boot: a whole extra boot per fresh node, same shape as ibCoreNetns.
 	{name: "rshimService", stage: v1alpha1.PhaseProvisioning, run: stepRshimService},
 	// ibCoreNetns is not a step since 0.1.75: the modprobe.d write + the
 	// initramfs refresh live inside aptPackages, so the change rides the
@@ -202,9 +207,10 @@ func fileSHA256(path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// stepGrubParams detects the desired cmdline parameters (iommu, hugepages)
-// in /proc/cmdline. Writing them is the boot path of v0.2.
-func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+// grubWantParams computes the managed cmdline parameters (iommu, hugepages)
+// from the profile (bash fn_init_sw_stage L379-402). Empty = nothing
+// managed.
+func grubWantParams(profile *v1alpha1.NodePrepProfile) []string {
 	hb := profile.Spec.HostBoot
 	var want []string
 	switch strings.ToLower(hb.IOMMU) {
@@ -229,45 +235,53 @@ func stepGrubParams(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	} else if hb.Hugepages.Pages2M > 0 {
 		want = append(want, "default_hugepagesz=2M", fmt.Sprintf("hugepagesz=2M"), fmt.Sprintf("hugepages=%d", hb.Hugepages.Pages2M))
 	}
-	if len(want) == 0 {
-		return v1alpha1.StepDone, "skipped: no hostBoot parameters configured"
-	}
-	// A parameter counts as present when the running kernel booted with it
-	// or the host grub config already arranges it for the next boot — the
-	// bash script checks the config file, not /proc/cmdline, for iommu=pt.
-	var missing []string
+	return want
+}
+
+// grubParamsStatus classifies each managed parameter against the host:
+// missingFromConfig = neither the running kernel booted with it nor the
+// grub config arranges it (staging required); notRunning = the config
+// already arranges it but the running kernel has not booted with it yet
+// (reboot required, no staging). The bash checks the config file, not
+// /proc/cmdline, for iommu=pt — this split keeps that semantics for
+// staging while still catching the reboot the arrangement still needs
+// (an agent restart loses the in-memory request; without this the walk
+// would advance to Ready with hugepages/IOMMU applying only at some
+// natural reboot).
+func grubParamsStatus(a *Agent, want []string) (missingFromConfig, notRunning []string) {
 	for _, w := range want {
-		if !grubParamPresent(a, w) {
-			missing = append(missing, w)
+		inConfig := grubParamArranged(a, w)
+		if grubParamInCmdline(w) {
+			continue
+		}
+		if inConfig {
+			notRunning = append(notRunning, w)
+		} else {
+			missingFromConfig = append(missingFromConfig, w)
 		}
 	}
-	if len(missing) == 0 {
-		return v1alpha1.StepDone, fmt.Sprintf("kernel cmdline has required parameters (%s)", strings.Join(want, " "))
-	}
-	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, fmt.Sprintf("cmdline missing %v; grub writes need -host-mutations and policy.hostMutations", missing)
-	}
+	return missingFromConfig, notRunning
+}
+
+// stageGrubDropin writes /etc/default/grub.d/90-nodeprep.cfg and regenerates
+// grub.cfg (the mutation half of the former stepGrubParams, folded into
+// aptPackages in 0.1.78).
+func (a *Agent) stageGrubDropin(want []string) error {
 	// The drop-in is idempotent by construction: every wanted key is sed-
 	// stripped from the inherited cmdline before being re-appended, so a
 	// re-run rewrites the same four lines (bash L418-432, verbatim shape).
 	dropin := renderGrubDropin(want)
 	path := filepath.Join(a.hostEtcDir(), "default/grub.d/90-nodeprep.cfg")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return v1alpha1.StepFailed, fmt.Sprintf("create grub.d: %v", err)
+		return fmt.Errorf("create grub.d: %v", err)
 	}
 	if err := os.WriteFile(path, []byte(dropin), 0o644); err != nil {
-		return v1alpha1.StepFailed, fmt.Sprintf("write 90-nodeprep.cfg: %v", err)
+		return fmt.Errorf("write 90-nodeprep.cfg: %v", err)
 	}
 	if _, err := a.hostExec(nil, 5*time.Minute, "update-grub"); err != nil {
-		return v1alpha1.StepFailed, fmt.Sprintf("update-grub: %v", err)
+		return fmt.Errorf("update-grub: %v", err)
 	}
-	// The new cmdline only applies at the next boot; nothing else in the
-	// walk is guaranteed to reboot (mlxconfig does when IT drifted, but a
-	// grub-only change must not wait on that), so request it here. The
-	// §5.2 hold pauses the walk until the boot_id changes.
-	a.requestRebootBg(v1alpha1.RebootGrubChanged,
-		fmt.Sprintf("grub cmdline updated (%s); reboot required to apply", strings.Join(missing, " ")), "")
-	return v1alpha1.StepDone, fmt.Sprintf("wrote 90-nodeprep.cfg (%s) and ran update-grub; reboot requested to apply", strings.Join(missing, " "))
+	return nil
 }
 
 // grubCPUVendor classifies the CPU from /proc/cpuinfo (bash lscpu greps
@@ -302,16 +316,20 @@ func appendUnique(list []string, p string) []string {
 	return append(list, p)
 }
 
-// grubParamPresent reports whether the host already boots, or is already
-// arranged to boot, with param: /proc/cmdline for the running kernel,
-// /etc/default/grub (GRUB_CMDLINE_LINUX*) and any grub.d drop-in for the
-// next one. Word-boundary match so "noiommu=pt" doesn't satisfy "iommu=pt".
-func grubParamPresent(a *Agent, param string) bool {
+// grubParamInCmdline reports whether the running kernel booted with param
+// (/proc/cmdline is the kernel's, visible from the pod).
+func grubParamInCmdline(param string) bool {
 	if b, err := os.ReadFile("/proc/cmdline"); err == nil {
-		if grubLineHasParam(string(b), param) {
-			return true
-		}
+		return grubLineHasParam(string(b), param)
 	}
+	return false
+}
+
+// grubParamArranged reports whether the host grub config already arranges
+// param for the next boot: /etc/default/grub (GRUB_CMDLINE_LINUX*) or the
+// nodeprep drop-in. Word-boundary match so "noiommu=pt" doesn't satisfy
+// "iommu=pt".
+func grubParamArranged(a *Agent, param string) bool {
 	for _, path := range []string{
 		filepath.Join(a.hostEtcDir(), "default/grub"),
 		filepath.Join(a.hostEtcDir(), "default/grub.d/90-nodeprep.cfg"),
@@ -477,32 +495,33 @@ func expandPkg(pkg, krel string) (string, error) {
 	return out, nil
 }
 
+// stepAptPackages is the compound software step: DOCA package installs, the
+// ib_core netns_mode staging (0.1.75) and the grub cmdline staging (0.1.78)
+// all run here and share ONE reboot — the standalone steps each ran after
+// aptPackages, where the DOCA halt stopped the pass before they could run,
+// and each then armed its own reboot on the next boot: a whole extra boot
+// per fresh node, twice (spcx live walks). Kevin: "all three need to have
+// had the chance to run without preempting the other."
 func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	fw := profile.Spec.Firmware
-	// The folded ib_core staging (0.1.75) needs the mutations gate too, and
-	// must run even when this step has no packages to install — the mode has
-	// to reach modprobe.d on a profile-only node (the standalone step used to
-	// cover that case).
+	hb := profile.Spec.HostBoot
 	hasPkgs := fw.DOCA.Deb != "" || len(fw.DOCA.Packages) > 0
-	if !hasPkgs && strings.TrimSpace(profile.Spec.HostBoot.RDMANetnsMode) == "" {
-		return v1alpha1.StepDone, "skipped: no DOCA deb or packages configured"
+	grubWant := grubWantParams(profile)
+	grubMissing, grubNotRunning := grubParamsStatus(a, grubWant)
+	if !hasPkgs && strings.TrimSpace(hb.RDMANetnsMode) == "" && len(grubWant) == 0 {
+		return v1alpha1.StepDone, "skipped: no DOCA deb or packages, rdmaNetnsMode or hostBoot parameters configured"
 	}
 	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, "package/modprobe changes require -host-mutations and policy.hostMutations"
+		blocked := "package/modprobe changes"
+		if len(grubMissing) > 0 {
+			blocked += " and grub cmdline (" + strings.Join(grubMissing, " ") + ")"
+		}
+		return v1alpha1.StepBlocked, blocked + " require -host-mutations and policy.hostMutations"
 	}
 	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	ibRefresh, err := a.stageIbCoreNetns(profile)
 	if err != nil {
 		return v1alpha1.StepFailed, "ib_core netns_mode: " + err.Error()
-	}
-	if !hasPkgs {
-		if ibRefresh {
-			if err := a.refreshIbCoreInitramfs(env); err != nil {
-				return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
-			}
-			return v1alpha1.StepDone, ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode) + "; no DOCA packages configured"
-		}
-		return v1alpha1.StepDone, "skipped: no DOCA deb or packages configured"
 	}
 
 	// The deb must already be on the host: the downloads step fetches it
@@ -547,98 +566,139 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 			missing = append(missing, p)
 		}
 	}
-	if !debNeeded && len(missing) == 0 {
-		if ibRefresh {
-			// Packages present but the staged netns_mode is not loaded yet
-			// (staged by a crashed pass, or first staging with DOCA
-			// preinstalled): refresh the initramfs here — the heavy work
-			// this step is already in — and let the mode apply at the next
-			// reboot the walk requests anyway.
-			if err := a.refreshIbCoreInitramfs(env); err != nil {
-				return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
-			}
-			return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean); " + ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode)
-		}
-		return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean)"
-	}
-
-	// An interrupted earlier install leaves packages "unpacked" and apt
-	// refusing to proceed ("E: dpkg was interrupted, you must manually run
-	// 'dpkg --configure -a'"). Our own reboot protocol can create that
-	// state — a pre-checkpoint reboot firing while dpkg ran (found live on
-	// bl-r1-c2-02, 0.1.38: doca-all left mid-configure, every retry exit
-	// 100). Finish the outstanding configuration first; idempotent and a
-	// fast no-op on a clean state.
-	if _, err := a.heavyHostExec(env, 30*time.Minute, "dpkg", "--configure", "-a"); err != nil {
-		return v1alpha1.StepFailed, fmt.Sprintf("dpkg --configure -a: %v", err)
-	}
-
-	if debNeeded {
-		if _, err := a.heavyHostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
-			return v1alpha1.StepFailed, fmt.Sprintf("dpkg --install %s: %v", fw.DOCA.Deb, err)
-		}
-	}
-	if len(missing) > 0 {
-		if fw.DOCA.Deb != "" {
-			// the bundle deb bootstrapped the NVIDIA apt repository; refresh
-			if _, err := a.heavyHostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
-				return v1alpha1.StepFailed, fmt.Sprintf("apt-get update: %v", err)
-			}
-		}
-		args := append([]string{"install", "--yes"}, missing...)
-		if _, err := a.heavyHostExec(env, 30*time.Minute, "apt-get", args...); err != nil {
-			return v1alpha1.StepFailed, fmt.Sprintf("apt-get install %v: %v", missing, err)
-		}
-	}
-
-	// Bash-faithful guard (v105 L325): hold the running kernel's versioned
-	// headers after install so later kernel churn or autoremove cannot
-	// remove them out from under the running kernel.
+	pkgWork := false
+	docaReboot := false
 	held := []string{}
-	for _, p := range missing {
-		if !strings.HasPrefix(p, "linux-headers-") {
-			continue
+	if debNeeded || len(missing) > 0 {
+		pkgWork = true
+		docaReboot = debNeeded || slices.Contains(missing, "doca-all")
+
+		// An interrupted earlier install leaves packages "unpacked" and apt
+		// refusing to proceed ("E: dpkg was interrupted, you must manually run
+		// 'dpkg --configure -a'"). Our own reboot protocol can create that
+		// state — a pre-checkpoint reboot firing while dpkg ran (found live on
+		// bl-r1-c2-02, 0.1.38: doca-all left mid-configure, every retry exit
+		// 100). Finish the outstanding configuration first; idempotent and a
+		// fast no-op on a clean state.
+		if _, err := a.heavyHostExec(env, 30*time.Minute, "dpkg", "--configure", "-a"); err != nil {
+			return v1alpha1.StepFailed, fmt.Sprintf("dpkg --configure -a: %v", err)
 		}
-		if _, err := a.hostExec(env, 2*time.Minute, "apt-mark", "hold", p); err != nil {
-			return v1alpha1.StepFailed, fmt.Sprintf("apt-mark hold %s: %v", p, err)
+
+		if debNeeded {
+			if _, err := a.heavyHostExec(env, 15*time.Minute, "dpkg", "--install", debHostPath); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("dpkg --install %s: %v", fw.DOCA.Deb, err)
+			}
 		}
-		held = append(held, p)
+		if len(missing) > 0 {
+			if fw.DOCA.Deb != "" {
+				// the bundle deb bootstrapped the NVIDIA apt repository; refresh
+				if _, err := a.heavyHostExec(env, 10*time.Minute, "apt-get", "update"); err != nil {
+					return v1alpha1.StepFailed, fmt.Sprintf("apt-get update: %v", err)
+				}
+			}
+			args := append([]string{"install", "--yes"}, missing...)
+			if _, err := a.heavyHostExec(env, 30*time.Minute, "apt-get", args...); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("apt-get install %v: %v", missing, err)
+			}
+		}
+
+		// Bash-faithful guard (v105 L325): hold the running kernel's versioned
+		// headers after install so later kernel churn or autoremove cannot
+		// remove them out from under the running kernel.
+		for _, p := range missing {
+			if !strings.HasPrefix(p, "linux-headers-") {
+				continue
+			}
+			if _, err := a.hostExec(env, 2*time.Minute, "apt-mark", "hold", p); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("apt-mark hold %s: %v", p, err)
+			}
+			held = append(held, p)
+		}
 	}
 
-	parts := []string{}
-	if debNeeded {
-		parts = append(parts, "deb "+fw.DOCA.Deb+" ("+debPkg+")")
-	}
-	if len(missing) > 0 {
-		parts = append(parts, "packages "+strings.Join(missing, ","))
-	}
-	if len(held) > 0 {
-		parts = append(parts, "held "+strings.Join(held, ","))
-	}
+	// --- the folded config tails, in Kevin's order: ib_core's initramfs
+	// refresh, then the grub dropin + update-grub. Both run even when the
+	// packages were already installed — a crashed pass (or an agent restart
+	// that lost the in-memory reboot request) still converges here.
 	if ibRefresh {
 		// The refresh runs after the installs so the snapshot also carries
 		// the new packages' modules; the module reload needs no reboot
-		// request of its own — the DOCA reboot below reloads it.
+		// request of its own — the reboot decision below covers it.
 		if err := a.refreshIbCoreInitramfs(env); err != nil {
 			return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
 		}
-		parts = append(parts, ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode))
 	}
-	// Bash-faithful (v105 L353 "Host reboot is needed after installing
-	// DOCA"): a fresh DOCA/driver install binds cleanly against a fresh
-	// boot — and covers a kernel aptUpgrade pulled in moments earlier.
-	// requestRebootHalt (0.1.66) stops the stage pass here, matching the
-	// bash's immediate mid-stage reboot; the grub request recorded earlier
-	// in the pass rides the same reboot (the folded ib_core staging needs
-	// no request at all — this reboot reloads it). Before 0.1.66 the
-	// request rode the quiet checkpoint, mlxconfig ran in the same pass
-	// against the pre-reboot driver stack, and both requests crossed the
-	// stage advance (DSX Air).
-	if debNeeded || slices.Contains(missing, "doca-all") {
-		a.requestRebootHalt(v1alpha1.RebootDocaInstalled,
-			"DOCA host software installed; reboot loads the OFED driver stack", "")
+	if len(grubMissing) > 0 {
+		if err := a.stageGrubDropin(grubWant); err != nil {
+			return v1alpha1.StepFailed, err.Error()
+		}
 	}
-	return v1alpha1.StepDone, "installed " + strings.Join(parts, " and ")
+
+	// --- ONE reboot decision for everything this step staged (Kevin: "any
+	// of them can stage a reboot at the end of that stage"). The DOCA
+	// install halts the pass now (bash v105 L353, requestRebootHalt 0.1.66);
+	// a config-only change (grub cmdline, ib_core netns) rides the quiet
+	// checkpoint, held at the stage boundary until the boot lands. The grub
+	// case also fires when the dropin was arranged earlier but the kernel
+	// has not booted with the parameters yet — an agent restart loses the
+	// in-memory request, and without this the walk would advance with
+	// hugepages/IOMMU applying only at some natural reboot.
+	switch {
+	case docaReboot:
+		riders := []string{}
+		if len(grubMissing) > 0 || len(grubNotRunning) > 0 {
+			riders = append(riders, "grub cmdline")
+		}
+		if ibRefresh {
+			riders = append(riders, "ib_core netns_mode")
+		}
+		msg := "DOCA host software installed; reboot loads the OFED driver stack"
+		if len(riders) > 0 {
+			msg += "; the same boot applies " + strings.Join(riders, " and ")
+		}
+		a.requestRebootHalt(v1alpha1.RebootDocaInstalled, msg, "")
+	case len(grubMissing) > 0 || len(grubNotRunning) > 0:
+		staged := append(append([]string{}, grubMissing...), grubNotRunning...)
+		msg := fmt.Sprintf("grub cmdline updated (%s); reboot required to apply", strings.Join(staged, " "))
+		if ibRefresh {
+			msg += "; ib_core netns_mode reloads at the same boot"
+		}
+		a.requestRebootBg(v1alpha1.RebootGrubChanged, msg, "")
+	case ibRefresh:
+		a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
+			fmt.Sprintf("ib_core netns_mode=%s staged; reboot required to reload ib_core", normNetnsMode(hb.RDMANetnsMode)), "")
+	}
+
+	// --- ledger message: what ran, what it rides ---
+	notes := []string{}
+	if pkgWork {
+		pkgParts := []string{}
+		if debNeeded {
+			pkgParts = append(pkgParts, "deb "+fw.DOCA.Deb+" ("+debPkg+")")
+		}
+		if len(missing) > 0 {
+			pkgParts = append(pkgParts, "packages "+strings.Join(missing, ","))
+		}
+		if len(held) > 0 {
+			pkgParts = append(pkgParts, "held "+strings.Join(held, ","))
+		}
+		notes = append(notes, "installed "+strings.Join(pkgParts, " and "))
+	} else if hasPkgs {
+		notes = append(notes, "DOCA packages already installed (dpkg state clean)")
+	} else {
+		notes = append(notes, "no DOCA packages configured")
+	}
+	if ibRefresh {
+		notes = append(notes, ibCoreNetnsNote(hb.RDMANetnsMode))
+	}
+	if len(grubMissing) > 0 {
+		notes = append(notes, fmt.Sprintf("grub 90-nodeprep.cfg written (%s), update-grub ran", strings.Join(grubMissing, " ")))
+	} else if len(grubNotRunning) > 0 {
+		notes = append(notes, fmt.Sprintf("grub 90-nodeprep.cfg already arranged (%s); reboot applies it", strings.Join(grubNotRunning, " ")))
+	} else if len(grubWant) > 0 {
+		notes = append(notes, fmt.Sprintf("kernel cmdline has required parameters (%s)", strings.Join(grubWant, " ")))
+	}
+	return v1alpha1.StepDone, strings.Join(notes, "; ")
 }
 
 // stepLldpdConfig implements bash v105 L363-368: write the rcp LLDPD config
