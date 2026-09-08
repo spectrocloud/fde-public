@@ -1022,8 +1022,15 @@
       GUIDs (<code>GetNetDevNodeGUID</code> errors). Desired states coincide regardless (1 VF/PF, switchdev,
       mtu 9166). The §6.1 maintenance window ran its designed cycle once (h00, 12:52: one
       <code>DriftDetected</code> → taint re-applied → GUIDs/MACs re-applied → BootVerified + released, no
-      recurrence; h01 zero events) — root cause of that one-off identity change unidentified, plausibly the
-      emulator re-generating VF identity as the operator first probed the devices. <b>Standing risks
+      recurrence; h01 zero events) — <b>root cause identified (Kevin): the operator's SR-IOV Network Config
+      Daemon processes the hardware, which unbinds and rebinds the driver; a drift check running during that
+      window sees one or more NICs with what seems a drifted config, and once the daemon completes, all NICs
+      are fully available again and checks pass. The temporary taint is exactly right — it keeps workloads
+      off the node while its NICs are in that transient state, until the next 5-min check window succeeds
+      and the node is untainted</b> (the immediate verify on a new boot will catch this window on every
+      future boot where the daemon processes devices; one DriftDetected event per boot is the expected,
+      benign sight — the <code>if verified</code> guard keeps it at one event per stretch, and the passing
+      window ≤5 min after the daemon finishes releases the taint). <b>Standing risks
       recorded:</b> an <code>externallyManaged: false</code> flip would start the two-owner fight (then
       <code>vfGuids</code> needs to stand down or scope its repair — <code>sriovNumVFs</code>/
       <code>udevRules</code> likewise); and the operator's policies select on
