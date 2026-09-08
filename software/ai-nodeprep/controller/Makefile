@@ -44,7 +44,7 @@ sample: ## Apply the example profile
 CHART_DIR = chart/nodeprep
 
 chart-sync-crds: ## Refresh the chart's CRD copies from manifests/ (single source of truth)
-	cp manifests/crd-nodeprep.yaml manifests/crd-nodeprepprofile.yaml $(CHART_DIR)/crds/
+	cp manifests/crd-nodeprep.yaml manifests/crd-nodeprepprofile.yaml $(CHART_DIR)/templates/
 
 chart-lint: chart-sync-crds ## helm lint after re-syncing the CRD copies
 	helm lint $(CHART_DIR)

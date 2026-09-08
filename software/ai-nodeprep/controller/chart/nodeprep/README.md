@@ -22,14 +22,33 @@ helm upgrade --install nodeprep chart/nodeprep \
   --set namespace.create=false \
   --set agent.args.hostMutations=true \
   --set agent.args.allowReboot=true
+
+# CRDs managed by an external system only — skip the chart's copies:
+helm upgrade --install nodeprep chart/nodeprep \
+  --set crds.create=false \
+  --set agent.args.hostMutations=true \
+  --set agent.args.allowReboot=true
 ```
+
+## CRDs: templates, not a crds/ directory
+
+The two CRDs live in `templates/` (wrapped in `{{- if .Values.crds.create }}`,
+default on) rather than the conventional `crds/` subdirectory. That is a
+deliberate choice: `crds/` contents are installed once at `helm install` and
+**never upgraded** by `helm upgrade` — Helm's documented limitation — so a
+schema evolution would silently keep the old CRD forever. As templates they
+ride every upgrade. The trade-off, accepted knowingly: `helm uninstall` deletes
+the CRDs (removing all NodePrep/NodePrepProfile objects and their ledgers), and
+Helm "owns" objects other tools may also manage. On clusters where an external
+system (e.g. Palette) enforces the CRDs, set `crds.create=false` to avoid two
+owners fighting.
 
 ## What it deploys
 
 | Template | Kind | Notes |
 |---|---|---|
 | `namespace.yaml` | Namespace | PSA `privileged` (agent needs it). Kept on uninstall. Skippable via `namespace.create=false`. |
-| `crds/` | 2 CRDs | Standard `crds/` directory: installed at `helm install`, **not** auto-upgraded by `helm upgrade` — bump CRDs through the manifests flow (Palette) or delete/reinstall. |
+| `crd-nodeprep*.yaml` | 2 CRDs | Rendered templates (`crds.create=false` to skip); upgraded on every `helm upgrade` — see the section above for the trade-offs. |
 | `serviceaccounts.yaml` | 2 SAs | controller + agent. |
 | `clusterroles.yaml` | 2 ClusterRoles + 2 bindings | Mirrors `manifests/rbac.yaml` (the agent's `pods list/delete` backs the 0.1.62 device-plugin bounce). |
 | `controller-deployment.yaml` | Deployment | Hardened (non-root, read-only fs, caps dropped), tolerates the nodeprep + control-plane taints. |
@@ -56,7 +75,7 @@ together with the manifests version bump.
 
 ## Sync helper
 
-The CRD copies under `crds/` must stay byte-identical to `manifests/crd-*.yaml`:
+The CRD templates must stay byte-identical to `manifests/crd-*.yaml`:
 
 ```sh
 make chart-sync-crds

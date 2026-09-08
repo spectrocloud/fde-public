@@ -990,11 +990,16 @@
       resources <code>manifests/</code> carries, rendered from values: controller Deployment, privileged
       agent DaemonSet, both ClusterRoles/bindings (rule sets verified identical to
       <code>manifests/rbac.yaml</code>), the namespace with its PSA <code>privileged</code> labels
-      (<code>namespace.create=false</code> when externally managed, kept on uninstall), and the CRDs in
-      the standard <code>crds/</code> directory — byte-identical copies of
-      <code>manifests/crd-*.yaml</code>, refreshed by <code>make chart-sync-crds</code> (manifests stay
-      the source of truth; Palette's enforced copies still own live-cluster CRD upgrades, matching the
-      known <code>crds/</code>-is-not-upgraded-by-helm limitation). Image tags derive from
+      (<code>namespace.create=false</code> when externally managed, kept on uninstall), and the CRDs as
+      <b>regular templates</b> (byte-identical copies of <code>manifests/crd-*.yaml</code> under
+      <code>templates/</code>, refreshed by <code>make chart-sync-crds</code>) — deliberately NOT the
+      conventional <code>crds/</code> subdirectory, which Helm installs once and never upgrades (Kevin:
+      "deploying CRDs via the /crds subdirectory of a chart is an anti-pattern … move the CRDs to the
+      /templates directory … which facilitates future CRD upgrades"). As templates they ride every
+      <code>helm upgrade</code>; the accepted trade-offs: <code>helm uninstall</code> removes the CRDs
+      (and with them every NodePrep/NodePrepProfile object), and the guard
+      <code>crds.create=false</code> exists for clusters where an external system (Palette) enforces
+      the CRDs — two owners would otherwise fight. Manifests stay the source of truth. Image tags derive from
       <code>appVersion</code> (<code>&lt;appVersion&gt;-agent/-controller</code>), so one version bump
       moves both. Safety posture is explicit: <code>agent.args.hostMutations</code>/
       <code>allowReboot</code> default <b>false</b> in the chart (detect-only; the DSX Air values set

@@ -8,6 +8,13 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# The NodePrepProfile/NodePrep CRDs render as regular templates so helm
+# upgrade carries schema changes (the conventional crds/ directory is
+# never upgraded). Set false when an external system (e.g. Palette)
+# enforces the CRDs — two owners would otherwise fight.
+crds:
+  create: true
+
 # All nodeprep resources live in one namespace. The agent DaemonSet runs
 # privileged with hostPID and hostPath mounts by design (host mutations,
 # nsenter reboots), so the namespace opts out of baseline/restricted PSA
