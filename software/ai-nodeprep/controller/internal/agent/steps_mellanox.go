@@ -194,7 +194,9 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, d := range a.mellanoxFns {
 		if ok, why := mlxconfigScope(d, profile); !ok {
-			a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+			if why != "" {
+				a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+			}
 			continue
 		}
 		// one full query per device gates the set build AND the drift check
@@ -276,10 +278,15 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 // NUMVF_EW to every ConnectX-class function, which would also reconfigure
 // e.g. the host's bond0 uplink card — not nodeprep's to touch (Kevin's
 // correction, 2026-09-03).
+//
+// The VF case returns an empty reason: skipping it is routine and silent
+// (one line per VF per pass on every walk and boot-verify — Kevin asked it
+// silenced). The other two reasons are rare and worth seeing; callers log
+// only non-empty reasons.
 func mlxconfigScope(d pciDevice, profile *v1alpha1.NodePrepProfile) (bool, string) {
 	switch {
 	case d.isVF:
-		return false, "is a virtual function; config is inherited from the PF"
+		return false, ""
 	case d.isDPU() && !profile.Spec.Policy.ControlDPU:
 		return false, "control of DPUs is not allowed by policy"
 	case !d.isDPU() && d.rail == "":
@@ -318,7 +325,9 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	var airReverted []string
 	for _, d := range a.mellanoxFns {
 		if ok, why := mlxconfigScope(d, profile); !ok {
-			a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+			if why != "" {
+				a.logf("mlxconfig: %s %s, skipping", d.pci, why)
+			}
 			continue
 		}
 		vals, err := a.mlxconfigGetAll(d.pci)
