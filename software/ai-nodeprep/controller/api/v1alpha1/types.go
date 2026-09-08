@@ -214,6 +214,34 @@ type EastWestSpec struct {
 	MTU         int    `json:"mtu,omitempty"`         // bash: MTU_EW, default 9216
 	EswitchMode string `json:"eswitchMode,omitempty"` // switchdev | legacy (bash: ESWITCH_MODE)
 	RoceCC      bool   `json:"roceCC,omitempty"`      // bash: ROCECC
+	// PlanesNum reserves the multi-plane east-west topology (1|2|4, default
+	// 1): each SuperNIC presents multiple ports, one per plane. Structure
+	// only since 0.1.76 — no step consumes it yet; the mlxconfig firmware
+	// keys land with the multi-plane work. The CRD schema carries the enum
+	// and the default; the OrOrDefault accessors make the default real in
+	// Go too (the Palette-enforced CRD copy can lag the repo).
+	PlanesNum int `json:"planes_num,omitempty"`
+	// NICBreakout reserves port breakout on ConnectX-8 and above (1|2|4,
+	// default 1): a single physical port broken out into multiple PFs.
+	// Same status as PlanesNum — structure only.
+	NICBreakout int `json:"nic_breakout,omitempty"`
+}
+
+// PlanesNumOrDefault applies the schema default (1) to an absent field, so
+// consumers never see the omitempty zero.
+func (e EastWestSpec) PlanesNumOrDefault() int {
+	if e.PlanesNum == 0 {
+		return 1
+	}
+	return e.PlanesNum
+}
+
+// NICBreakoutOrDefault is PlanesNumOrDefault's breakout twin.
+func (e EastWestSpec) NICBreakoutOrDefault() int {
+	if e.NICBreakout == 0 {
+		return 1
+	}
+	return e.NICBreakout
 }
 
 type NorthSouthSpec struct {

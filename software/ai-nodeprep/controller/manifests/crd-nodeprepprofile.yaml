@@ -137,6 +137,20 @@ spec:
                       enum: [switchdev, legacy, ""]
                     roceCC:
                       type: boolean
+                    planes_num:
+                      description: >
+                        Reserved 0.1.76, not yet applied by any step: multi-plane
+                        east-west topology — each SuperNIC presents one port per plane.
+                      type: integer
+                      enum: [1, 2, 4]
+                      default: 1
+                    nic_breakout:
+                      description: >
+                        Reserved 0.1.76, not yet applied by any step: port breakout on
+                        ConnectX-8 and above — one physical port broken out into multiple PFs.
+                      type: integer
+                      enum: [1, 2, 4]
+                      default: 1
                 northSouth:
                   description: North-south (DPU) settings.
                   type: object
