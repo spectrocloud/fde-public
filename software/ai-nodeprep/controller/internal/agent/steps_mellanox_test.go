@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -371,16 +372,26 @@ func profileForTest(mtu int, eswitch string, mutations bool) *v1alpha1.NodePrepP
 // detects an unchanged file as Done without rewriting.
 func TestStepFabricNetplan(t *testing.T) {
 	dir := t.TempDir()
+	var applied int
 	a := &Agent{hostMutations: true, hostEtcDir: func() string { return dir },
 		mellanoxFns: []pciDevice{
 			{pci: "0000:49:00.0", rail: "r0_p0"},
 			{pci: "0000:49:00.1", rail: "r0_p1"},
+		},
+		execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+			if name == "netplan" {
+				applied++
+			}
+			return "", nil
 		}}
 	profile := profileForTest(9000, "legacy", true)
 
 	state, msg := stepFabricNetplan(a, nil, profile)
 	if state != v1alpha1.StepDone || !strings.Contains(msg, "netplan written") {
 		t.Fatalf("first run: %s %s", state, msg)
+	}
+	if applied != 1 {
+		t.Fatalf("fresh write with no pending reboot must netplan apply once, got %d", applied)
 	}
 	for _, rail := range []string{"r0_p0", "r0_p1"} {
 		b, err := os.ReadFile(filepath.Join(dir, "netplan", "gpu_fabric_eth_"+rail+".yaml"))
@@ -400,6 +411,9 @@ func TestStepFabricNetplan(t *testing.T) {
 	state, msg = stepFabricNetplan(a, nil, profile)
 	if state != v1alpha1.StepDone || !strings.Contains(msg, "verified") {
 		t.Fatalf("second run should detect-verify, got %s %s", state, msg)
+	}
+	if applied != 1 {
+		t.Fatalf("verified files must not re-apply, got %d applies", applied)
 	}
 }
 
@@ -1430,5 +1444,71 @@ func TestMlxconfigAirAdaptiveRevertNotDrift(t *testing.T) {
 	}
 	if strings.Contains(msg, "ignored") {
 		t.Fatalf("the Air note must not appear for Physical hardware, got %q", msg)
+	}
+}
+
+// The no-pending-reboot apply (live defect on the ai-nodeprep cluster: a
+// re-prepped node whose mlxconfig verified clean never rebooted, so the
+// freshly written netplan files sat unapplied for the boot's lifetime).
+// Files written with no reboot in flight → netplan apply runs in-step; with
+// a pending reboot the files ride the boot ("applied at boot"); already-
+// correct files verify without any apply.
+func TestStepFabricNetplanApply(t *testing.T) {
+	yes := true
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		EastWest: v1alpha1.EastWestSpec{MTU: 9000},
+		Rails:    []v1alpha1.Rail{{Rail: "r0", PCIFunction: "49:00"}},
+		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	newAgent := func() (*Agent, *[]string) {
+		var calls []string
+		etc := t.TempDir() // one dir per agent: write/verify must see the same tree
+		a := &Agent{
+			client:        clientfake.NewSimpleClientset(),
+			hostMutations: true,
+			hostEtcDir:    func() string { return etc },
+			mellanoxFns:   []pciDevice{{pci: "0000:49:00.0", rail: "r0"}},
+			execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+				calls = append(calls, name)
+				return "", nil
+			},
+		}
+		return a, &calls
+	}
+	np := &v1alpha1.NodePrep{}
+
+	// Fresh write, no reboot pending: netplan apply must run.
+	a, calls := newAgent()
+	state, msg := stepFabricNetplan(a, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "netplan apply ran") {
+		t.Fatalf("no-reboot write: got %s %q, want Done with 'netplan apply ran'", state, msg)
+	}
+	if !slices.Contains(*calls, "netplan") {
+		t.Fatalf("no-reboot write must run netplan apply, calls: %v", *calls)
+	}
+
+	// Same write with a reboot pending (mlxconfig armed one moments ago in
+	// the same pass): ride the boot, do not apply mid-walk.
+	a, calls = newAgent()
+	a.requestRebootBg(v1alpha1.RebootMlxConfigApplied, "test", "")
+	state, msg = stepFabricNetplan(a, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "applied at boot") {
+		t.Fatalf("pending-reboot write: got %s %q, want Done with 'applied at boot'", state, msg)
+	}
+	for _, c := range *calls {
+		if c == "netplan" {
+			t.Fatalf("pending reboot must suppress the in-step apply, calls: %v", *calls)
+		}
+	}
+
+	// Already-correct files: verified, no apply (steady-state cost zero).
+	a, calls = newAgent()
+	_, _ = stepFabricNetplan(a, np, profile) // writes + applies once
+	n := len(*calls)
+	if _, msg = stepFabricNetplan(a, np, profile); !strings.Contains(msg, "netplan verified") {
+		t.Fatalf("second pass: got %q, want 'netplan verified'", msg)
+	}
+	if slices.Contains((*calls)[n:], "netplan") {
+		t.Fatalf("verified files must not re-apply, calls: %v", (*calls)[n:])
 	}
 }

@@ -588,9 +588,11 @@ func renderNetplan(rail string, mtu int, ignoreCarrier bool) string {
 
 // stepFabricNetplan writes the per-rail netplan stanza (bash fn_config_stage
 // tail): MTU for east-west rail interfaces, ignore-carrier only under
-// switchdev. netplan apply happens at boot (the boot hook / networkd), not
-// during the prep — as in the bash, where the file is written in the config
-// stage and consumed after the reboot.
+// switchdev. The bash relies on the flash/config reboot to consume the file;
+// when the walk has no reboot in flight (mlxconfig verified clean — the
+// firmware was already correct) nothing would ever apply it, so netplan
+// apply runs in-step in that case. With a pending reboot the files ride the
+// boot as before (the boot hook also re-runs netplan apply).
 func stepFabricNetplan(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
@@ -628,6 +630,19 @@ func stepFabricNetplan(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePr
 		written = append(written, filepath.Base(path))
 	}
 	if len(written) > 0 {
+		// A pending reboot applies the files at boot (networkd reads the
+		// stanzas; the boot hook re-runs netplan apply). Without one — the
+		// firmware-config step verified clean, so the walk may never reboot
+		// this boot — the write would sit unapplied for the boot's lifetime
+		// (live defect on the ai-nodeprep cluster: a re-prepped node whose
+		// mlxconfig was already correct never got its MTU). Apply now.
+		// (Kevin's direction, 2026-09-08.)
+		if len(a.pendingReboot) == 0 {
+			if _, err := a.hostExec(nil, 2*time.Minute, "netplan", "apply"); err != nil {
+				return v1alpha1.StepFailed, fmt.Sprintf("netplan written (%s) but apply failed: %v", strings.Join(written, ", "), err)
+			}
+			return v1alpha1.StepDone, fmt.Sprintf("netplan written: %s (mtu %d, ignore-carrier %t); netplan apply ran", strings.Join(written, ", "), mtu, ignoreCarrier)
+		}
 		return v1alpha1.StepDone, fmt.Sprintf("netplan written: %s (mtu %d, ignore-carrier %t); applied at boot", strings.Join(written, ", "), mtu, ignoreCarrier)
 	}
 	return v1alpha1.StepDone, fmt.Sprintf("netplan verified: %s", strings.Join(matched, ", "))

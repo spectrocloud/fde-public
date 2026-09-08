@@ -8,7 +8,7 @@ type: application
 version: 0.1.0
 # Bumping appVersion bumps both default image tags (see _helpers.tpl) — the
 # images are built one tag per version: <appVersion>-agent / -controller.
-appVersion: "0.1.80"
+appVersion: "0.1.81"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/spectrocloud/fde-public
 sources:

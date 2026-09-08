@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.80</span>
+    <span>nodeprep-v105.sh → controller v0.1.81</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.80</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.81</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -986,6 +986,27 @@
       untainted CPs symmetrically with workers: demote from worker pools before disruptive Finalizing
       work, restore at Ready. <code>TestWorkerLabelApplies</code> pins all four role×taint cells plus
       the NoSchedule-effect requirement.</li>
+  <li><b>0.1.81 — netplanMTU applies in-step when no reboot is pending (Kevin, live defect on the
+      new ai-nodeprep cluster: "if you check the logs of nodeprep-agent-q9qm9, you will see an edge
+      case where the mellanox firmware config is already correct and doesn't trigger a reboot. That
+      causes the netplanMTU step to write the files but not get applied … perform another netplan
+      apply in a case like this").</b> stepFabricNetplan writes per-rail netplan stanzas and has
+      always relied on the walk's reboot to apply them (networkd reads the files at boot; the boot
+      hook re-runs netplan apply). That holds for first provisioning — mlxconfig runs before
+      netplanMTU in the Configuring registry and arms a reboot when it changes firmware config — but
+      a re-prepped node whose mlxconfig verifies clean arms nothing, the walk never reboots, and the
+      freshly written MTU stanzas sit unapplied for the boot's lifetime (observed: "step mlxconfig
+      done: adapter firmware config verified on 2 device(s)" followed by "netplanMTU done: … applied
+      at boot" with no boot coming). The fix keys off the reboot ledger itself:
+      <code>len(a.pendingReboot) == 0</code> after the write → run <code>netplan apply</code> in-step
+      (2-minute host-exec budget; failure is StepFailed, visible and retried, not a silent unapplied
+      write); a pending reboot → ride the boot exactly as before, since a mid-walk apply against a
+      NIC set that is about to reboot is wasted work. The registry order makes pendingReboot the
+      exact signal: any reboot armed this pass was armed by mlxconfig or an earlier step, so "none
+      pending" ⇔ "no boot will apply these files this walk". <code>TestStepFabricNetplanApply</code>
+      pins all three paths (fresh write, no reboot → apply ran; write with a pending reboot →
+      suppressed, "applied at boot"; second pass over already-correct files → "netplan verified", no
+      apply); <code>TestStepFabricNetplan</code> gained the apply-once / no-reapply assertions.</li>
   <li><b>Helm chart (<code>chart/nodeprep</code>) — the packaged deployment form.</b> The same
       resources <code>manifests/</code> carries, rendered from values: controller Deployment, privileged
       agent DaemonSet, both ClusterRoles/bindings (rule sets verified identical to
@@ -1773,7 +1794,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.80 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.81 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
