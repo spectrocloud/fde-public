@@ -80,6 +80,9 @@ func (a *Agent) hostExecV(env []string, timeout time.Duration, name string, quie
 // instead of two apts racing the dpkg lock. On timeout the transient unit
 // keeps running on the host — dpkg state makes a later retry idempotent.
 func (a *Agent) heavyHostExec(env []string, timeout time.Duration, name string, args ...string) (string, error) {
+	if a.execFn != nil {
+		return a.execFn(env, timeout, name, false, args)
+	}
 	unit := heavyUnitName(name)
 	cmdline := strings.Join(append([]string{name}, args...), " ")
 	a.logf("host exec (unit %s): %s", unit, cmdline)

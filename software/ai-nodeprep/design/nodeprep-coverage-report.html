@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.74</span>
+    <span>nodeprep-v105.sh → controller v0.1.75</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.74</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.75</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -879,11 +879,56 @@
       (aggregated into the step message); timeouts always log; <code>NODEPREP_VERBOSE</code> restores
       the full per-exec trace for troubleshooting. <code>TestRunLoggedSuccessIsSilent</code> pins all
       six cells of the matrix against real <code>true</code>/<code>false</code> subprocesses.</li>
+  <li><b>0.1.75 — three walk-shape fixes from the first Palette/DSX-Air cluster walk (Kevin, worker
+      <code>hgx-pod00-su00-h01</code>: "mostly went well but there are some issues").</b>
+    <ul>
+      <li><b>ibCoreNetns folded into aptPackages — one reboot fewer.</b> The standalone step ran after
+          aptPackages and armed its own reboot for a one-line modprobe.d change
+          (<code>event RebootRequested: IbCoreNetns: ib_core netns_mode is "1", want "0"</code>) — on the
+          fresh walk it was a whole extra boot between Provisioning and Flashing. The modprobe.d write and
+          the initramfs refresh now live inside <code>aptPackages</code>, and the module reload rides the
+          reboot the DOCA install requests anyway. The refresh policy keeps the old loop-safety
+          (ib_core.ko can ship in the initramfs, whose modprobe.d copy predates the write) without the
+          steady-state cost: a fresh staging always refreshes; an already-staged file refreshes only while
+          the running module still holds the other value and this process has not refreshed for this
+          content — per-process dedup so the 10-minute <code>update-initramfs</code> stays off the poll,
+          a crashed pass still converges on the next boot. Profile-only nodes (rdmaNetnsMode set, no DOCA
+          configured) still stage + refresh here — the case the standalone step used to cover;
+          detect-only blocks as before. <code>TestStageIbCoreNetns</code> and the extended
+          <code>TestStepAptPackagesGates</code> pin the write/dedup/running-module and the profile-only
+          path; the write also <code>MkdirAll</code>s modprobe.d (a latent assumption the new test
+          caught).</li>
+      <li><b>kubeletState: the walk-time kubelet stop/rm/start is retired — the boot hook owns the reset
+          (Kevin: "we have a boot hook that clears the kubelet state on node boot; why does this step
+          exist?").</b> Answer: it predates the boot hook — a mid-walk guarded reset for nodes arriving
+          with stale CPU/memory-manager state and a crashlooped kubelet, added before every reboot carried
+          the hook. The hook is installed by <code>ensureBootHook</code> every agent cycle before any
+          stage can request a reboot and performs the identical guarded reset <code>Before=kubelet.service</code>,
+          so the walk-time duplicate only ever stop/started a healthy kubelet (live: the spcx walk's
+          ledger showed <code>"; cleared stale kubelet state [cpu_manager_state memory_manager_state]
+          (kubelet stopped and restarted)"</code> mid-Finalizing). The step keeps its remaining duties:
+          installing/verifying the hook and reporting stale files it finds
+          (<code>"… present; the boot hook clears it at the next boot"</code>; <code>readyCheck</code>/
+          <code>off</code> semantics unchanged). <code>TestStepKubeletStateGates</code> pins the
+          report-only contract.</li>
+      <li><b>losslessRoce class gate: SuperNIC only (Kevin: "not functional on DSX Air — gate to SuperNIC
+          devices").</b> The bash gate (fn_set_lossless_roce) passed SuperNIC <em>or</em>
+          ConnectX-7..9; on the emulated ConnectX-7 Air rails the congestion-control stack is not
+          functional, so the walk applied mlnx_qos/mlnxreg settings nothing enforces (all 8 rails
+          "applied" on the spcx worker). The runtime class narrows to Bluefield SuperNIC;
+          ConnectX-7..9 keep their mlxconfig CC keys (buildFlashSet unchanged). Off-class rails are
+          named in the skip message as before. <code>TestLosslessGate</code> re-pinned (ConnectX-7 Air is
+          off-class now, SuperNIC passes through to the mutations gate), and
+          <code>TestStepLosslessRoceOffClassSkip</code> covers CX-4 Lx, CX-7 Air and the SuperNIC
+          pass-through.</li>
+    </ul></li>
   <li><b>True lossless-RoCE application</b> — the step's body (mlnx_qos/mlnxreg, Spectrum-X CC daemon) is
-      implemented but only runs on SuperNIC/ConnectX-7..9 per the bash gate; the lab's CX-4 Lx correctly
-      skips it, so a real application run needs that hardware class. <i>[Parked 2026-09-04 (operator
-      decision): to be validated in the upcoming NVIDIA DSX Air environment, which should present
-      SuperNIC-class devices.]</i></li>
+      implemented but runs on Bluefield SuperNIC devices only (0.1.75 narrowed the bash's
+      SuperNIC-or-ConnectX-7..9 gate — on the emulated ConnectX-7 Air rails the CC stack is not
+      functional and the writes enforce nothing); the lab's CX-4 Lx correctly
+      skips it, so a real application run needs SuperNIC-class hardware. <i>[Parked 2026-09-04 (operator
+      decision): the DSX Air environment presented ConnectX-7/Air devices, not SuperNICs — validation
+      still awaits real Bluefield hardware.]</i></li>
   <li><b>SR-IOV device-plugin pod bounce</b> — <b>implemented in 0.1.62</b> (Kevin's direction, after the
       gap was hit live): at the walk's single Finalizing→Ready flip, the agent deletes this node's
       <code>network-operator-sriov-device-plugin</code> pod (namespace <code>nvidia-network-operator</code>,
@@ -1624,7 +1669,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.74 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.75 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

@@ -51,7 +51,11 @@ var stepDefs = []stepDef{
 	{name: "lldpdConfig", stage: v1alpha1.PhaseProvisioning, run: stepLldpdConfig},
 	{name: "grubParams", stage: v1alpha1.PhaseProvisioning, run: stepGrubParams},
 	{name: "rshimService", stage: v1alpha1.PhaseProvisioning, run: stepRshimService},
-	{name: "ibCoreNetns", stage: v1alpha1.PhaseProvisioning, run: stepIbCoreNetns},
+	// ibCoreNetns is not a step since 0.1.75: the modprobe.d write + the
+	// initramfs refresh live inside aptPackages, so the change rides the
+	// reboot the DOCA install requests anyway (spcx live walk: the standalone
+	// step armed its own reboot for a one-line modprobe.d change — a whole
+	// extra boot per fresh node).
 	// --- Flashing (bash fn_init_hw_stage) ---
 	{name: "bfbFlash", stage: v1alpha1.PhaseFlashing, run: stepBFBFlash},
 	// --- Configuring (bash fn_config_stage) ---
@@ -353,56 +357,74 @@ GRUB_CMDLINE_LINUX="$(echo "$GRUB_CMDLINE_LINUX" | xargs)"
 `, clean, pairs)
 }
 
-// stepIbCoreNetns mirrors 'options ib_core netns_mode=0' detection.
-// stepIbCoreNetns applies the profile's rdmaNetnsMode as
+// ibCoreNetnsSysfs is the running module's parameter file (seam for tests —
+// the unit environment has no /sys/module/ib_core).
+var ibCoreNetnsSysfs = "/sys/module/ib_core/parameters/netns_mode"
+
+// stageIbCoreNetns applies the profile's rdmaNetnsMode as
 // 'options ib_core netns_mode=<mode>' (bash writes the same file in its
-// SR-IOV block) and reboots when the running module still has the old
-// setting. Unlike the bash, the profile drives this directly — a profile
-// with rdmaNetnsMode set but zero VFs still gets the semantics it asked for.
-func stepIbCoreNetns(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+// SR-IOV block) and reports whether the initramfs snapshot still needs a
+// refresh for it. The work lives inside aptPackages since 0.1.75 (Kevin's
+// direction after the spcx live walk): as a standalone step it ran after
+// aptPackages and armed its own reboot for a one-line modprobe.d change —
+// a whole extra boot per fresh node. The module reload now rides the reboot
+// the DOCA install requests anyway.
+//
+// Refresh policy: a fresh staging always wants one — ib_core.ko can ship in
+// the initramfs, whose /etc/modprobe.d copy was baked at package-install
+// time, often minutes before this write; a module loaded from the initramfs
+// never sees this file, so a bare reboot would come back with the
+// compiled-in default and the intent would silently loop. A file already
+// staged wants one only while the running module still holds another value
+// and this process has not already run the refresh for this content: the
+// 10-minute heavy exec must stay off the steady-state poll, but a crashed
+// pass (file written, refresh never ran) must still converge — it retries
+// on the next process, not every cycle (the flag is set optimistically in
+// refreshIbCoreInitramfs).
+func (a *Agent) stageIbCoreNetns(profile *v1alpha1.NodePrepProfile) (bool, error) {
 	mode := strings.TrimSpace(profile.Spec.HostBoot.RDMANetnsMode)
 	if mode == "" {
-		if !a.hasMellanox() {
-			return v1alpha1.StepDone, "skipped: no rdmaNetnsMode set and no Mellanox hardware"
-		}
-		return v1alpha1.StepDone, "skipped: profile does not set rdmaNetnsMode"
-	}
-	got, err := os.ReadFile("/sys/module/ib_core/parameters/netns_mode")
-	if err != nil {
-		if !a.hasMellanox() {
-			return v1alpha1.StepDone, "skipped: ib_core not loaded and no Mellanox hardware"
-		}
-		return v1alpha1.StepBlocked, fmt.Sprintf("cannot read ib_core netns_mode: %v", err)
-	}
-	if normNetnsMode(string(got)) == normNetnsMode(mode) {
-		return v1alpha1.StepDone, fmt.Sprintf("ib_core netns_mode=%s matches profile", mode)
-	}
-	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, fmt.Sprintf("ib_core netns_mode is %q, want %q; modprobe writes need -host-mutations", strings.TrimSpace(string(got)), mode)
+		return false, nil
 	}
 	conf := "options ib_core netns_mode=" + mode + "\n"
-	path := filepath.Join(a.hostEtcDir(), "modprobe.d/ib_core.conf")
+	dir := filepath.Join(a.hostEtcDir(), "modprobe.d")
+	path := filepath.Join(dir, "ib_core.conf")
 	if cur, err := os.ReadFile(path); err != nil || string(cur) != conf {
-		if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
-			return v1alpha1.StepFailed, fmt.Sprintf("write %s: %v", path, err)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, fmt.Errorf("mkdir %s: %v", dir, err)
 		}
-		a.logf("ibCoreNetns: wrote %s (running module reports %q)", path, strings.TrimSpace(string(got)))
+		if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+			return false, fmt.Errorf("write %s: %v", path, err)
+		}
+		a.logf("aptPackages: staged %s (ib_core netns_mode=%s)", path, mode)
+		a.ibCoreInitramfs = conf // armed: the refresh runs once this process
+		return true, nil
 	}
-	// ib_core.ko can ship in the initramfs, whose copy of /etc/modprobe.d was
-	// baked at kernel/package install time — often minutes before this write
-	// (an aptUpgrade in the same stage rebuilds the initramfs first). A module
-	// loaded from the initramfs never sees this file, so a bare reboot comes
-	// back with the compiled-in default and the step would loop. Refresh the
-	// snapshot so the early-load path reads the option too, and only then
-	// request the reboot.
-	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	if a.ibCoreInitramfs == conf {
+		return false, nil // refreshed (or staged) this process lifetime
+	}
+	if got, err := os.ReadFile(ibCoreNetnsSysfs); err == nil && normNetnsMode(string(got)) == normNetnsMode(mode) {
+		a.ibCoreInitramfs = conf // already active in the running module
+		return false, nil
+	}
+	a.ibCoreInitramfs = conf // armed: retries next process, not every cycle
+	return true, nil         // staged but not loaded: refresh (retries a crashed pass)
+}
+
+// refreshIbCoreInitramfs rebuilds the host's initramfs snapshot so the
+// staged modprobe.d reaches the early-load path (see stageIbCoreNetns).
+func (a *Agent) refreshIbCoreInitramfs(env []string) error {
 	if out, err := a.heavyHostExec(env, 10*time.Minute, "update-initramfs", "-u"); err != nil {
-		return v1alpha1.StepBlocked, fmt.Sprintf("update-initramfs -u failed (%v); reboot deferred: %s",
-			err, strings.TrimSpace(out))
+		return fmt.Errorf("update-initramfs -u: %v: %s", err, strings.TrimSpace(out))
 	}
-	a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
-		fmt.Sprintf("ib_core netns_mode is %q, want %q; reboot required to reload ib_core", normNetnsMode(string(got)), normNetnsMode(mode)), "")
-	return v1alpha1.StepBlocked, "modprobe.d updated and initramfs refreshed; reboot requested to reload ib_core"
+	return nil
+}
+
+// ibCoreNetnsNote is the ledger note for a staged netns_mode: the running
+// module keeps its value until the reboot the DOCA install (or the walk's
+// mlxconfig work) requests anyway.
+func ibCoreNetnsNote(mode string) string {
+	return "ib_core netns_mode=" + normNetnsMode(mode) + " staged (modprobe.d + initramfs); module reloads at the next reboot"
 }
 
 // normNetnsMode folds the parameter spellings together: sysfs reports Y/N,
@@ -457,13 +479,31 @@ func expandPkg(pkg, krel string) (string, error) {
 
 func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	fw := profile.Spec.Firmware
-	if fw.DOCA.Deb == "" && len(fw.DOCA.Packages) == 0 {
+	// The folded ib_core staging (0.1.75) needs the mutations gate too, and
+	// must run even when this step has no packages to install — the mode has
+	// to reach modprobe.d on a profile-only node (the standalone step used to
+	// cover that case).
+	hasPkgs := fw.DOCA.Deb != "" || len(fw.DOCA.Packages) > 0
+	if !hasPkgs && strings.TrimSpace(profile.Spec.HostBoot.RDMANetnsMode) == "" {
 		return v1alpha1.StepDone, "skipped: no DOCA deb or packages configured"
 	}
 	if !a.mutationsAllowed(profile) {
-		return v1alpha1.StepBlocked, "package installation requires -host-mutations and policy.hostMutations"
+		return v1alpha1.StepBlocked, "package/modprobe changes require -host-mutations and policy.hostMutations"
 	}
 	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	ibRefresh, err := a.stageIbCoreNetns(profile)
+	if err != nil {
+		return v1alpha1.StepFailed, "ib_core netns_mode: " + err.Error()
+	}
+	if !hasPkgs {
+		if ibRefresh {
+			if err := a.refreshIbCoreInitramfs(env); err != nil {
+				return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
+			}
+			return v1alpha1.StepDone, ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode) + "; no DOCA packages configured"
+		}
+		return v1alpha1.StepDone, "skipped: no DOCA deb or packages configured"
+	}
 
 	// The deb must already be on the host: the downloads step fetches it
 	// into the spcx cache during the same stage (it runs first).
@@ -508,6 +548,17 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		}
 	}
 	if !debNeeded && len(missing) == 0 {
+		if ibRefresh {
+			// Packages present but the staged netns_mode is not loaded yet
+			// (staged by a crashed pass, or first staging with DOCA
+			// preinstalled): refresh the initramfs here — the heavy work
+			// this step is already in — and let the mode apply at the next
+			// reboot the walk requests anyway.
+			if err := a.refreshIbCoreInitramfs(env); err != nil {
+				return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
+			}
+			return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean); " + ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode)
+		}
 		return v1alpha1.StepDone, "DOCA packages already installed (dpkg state clean)"
 	}
 
@@ -564,12 +615,22 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	if len(held) > 0 {
 		parts = append(parts, "held "+strings.Join(held, ","))
 	}
+	if ibRefresh {
+		// The refresh runs after the installs so the snapshot also carries
+		// the new packages' modules; the module reload needs no reboot
+		// request of its own — the DOCA reboot below reloads it.
+		if err := a.refreshIbCoreInitramfs(env); err != nil {
+			return v1alpha1.StepFailed, "ib_core netns_mode staged but " + err.Error()
+		}
+		parts = append(parts, ibCoreNetnsNote(profile.Spec.HostBoot.RDMANetnsMode))
+	}
 	// Bash-faithful (v105 L353 "Host reboot is needed after installing
 	// DOCA"): a fresh DOCA/driver install binds cleanly against a fresh
 	// boot — and covers a kernel aptUpgrade pulled in moments earlier.
 	// requestRebootHalt (0.1.66) stops the stage pass here, matching the
-	// bash's immediate mid-stage reboot; any requests recorded earlier in
-	// the pass (grub, ib_core) ride the same reboot. Before 0.1.66 the
+	// bash's immediate mid-stage reboot; the grub request recorded earlier
+	// in the pass rides the same reboot (the folded ib_core staging needs
+	// no request at all — this reboot reloads it). Before 0.1.66 the
 	// request rode the quiet checkpoint, mlxconfig ran in the same pass
 	// against the pre-reboot driver stack, and both requests crossed the
 	// stage advance (DSX Air).
@@ -1704,61 +1765,45 @@ func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 		if len(stale) == 0 {
 			return v1alpha1.StepDone, "kubelet manager state files absent (detect-only: boot hook not installed)"
 		}
-		return v1alpha1.StepBlocked, fmt.Sprintf("stale kubelet state %v; guarded reset requires -host-mutations and policy.hostMutations", stale)
+		return v1alpha1.StepDone, fmt.Sprintf("stale kubelet state %v present (detect-only; the boot hook clears it at the next boot)", stale)
 	}
 	hookMsg, err := a.ensureBootHook(profile)
 	if err != nil {
 		return v1alpha1.StepFailed, "boot hook: " + err.Error()
 	}
-	if !resetWanted {
-		return v1alpha1.StepDone, hookMsg
+	// No walk-time reset since 0.1.75 (Kevin's direction after the spcx live
+	// walk): this step used to stop kubelet, remove the stale manager-state
+	// files and restart it mid-walk — a duplication of exactly what the boot
+	// hook does at every boot, Before=kubelet.service (and live, it
+	// stop/started a healthy kubelet and cost the Finalizing ledger its
+	// leading "; "). The hook is installed by ensureBootHook every agent
+	// cycle before any stage can reboot, so stale state never survives a
+	// reboot; this step keeps the duties it still owns: installing the hook
+	// and reporting stale files it finds.
+	switch {
+	case !resetWanted && len(stale) == 0:
+		return v1alpha1.StepDone, joinStepNotes(hookMsg, "kubelet manager state files absent")
+	case !resetWanted:
+		return v1alpha1.StepDone, joinStepNotes(hookMsg, fmt.Sprintf("stale kubelet manager state %v present; kubeletStateReset off: left in place", stale))
+	case len(stale) == 0:
+		return v1alpha1.StepDone, joinStepNotes(hookMsg, "kubelet manager state files absent")
+	default:
+		return v1alpha1.StepDone, joinStepNotes(hookMsg,
+			fmt.Sprintf("stale kubelet manager state %v present; the boot hook clears it at the next boot (Before=kubelet.service)", stale))
 	}
-	if len(stale) == 0 {
-		return v1alpha1.StepDone, hookMsg + "; kubelet manager state files absent"
-	}
+}
 
-	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-	out, _ := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "kubelet")
-	wasActive := strings.TrimSpace(out) == "active"
-	if wasActive {
-		a.logf("kubelet is active; stopping it for the guarded state reset")
-		if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "stop", "kubelet"); err != nil {
-			_, _ = a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet") // never leave it stopped
-			return v1alpha1.StepFailed, fmt.Sprintf("stopping kubelet: %v", err)
+// joinStepNotes composes the ledger message from independent notes without
+// the dangling separator the bare concatenation produced ("hook; ; tail"
+// when the hook note is empty).
+func joinStepNotes(notes ...string) string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
 		}
 	}
-	removed := []string{}
-	for _, f := range stale {
-		p := filepath.Join(a.hostKubeletDir, f)
-		a.logf("removing stale kubelet state file %s", p)
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			if wasActive {
-				_, _ = a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet")
-			}
-			return v1alpha1.StepFailed, fmt.Sprintf("removing %s: %v", f, err)
-		}
-		removed = append(removed, f)
-	}
-	restarted := "kubelet was not running"
-	if wasActive {
-		if _, err := a.hostExec(env, 2*time.Minute, "systemctl", "start", "kubelet"); err != nil {
-			return v1alpha1.StepFailed, fmt.Sprintf("starting kubelet: %v", err)
-		}
-		active := false
-		for i := 0; i < 30; i++ {
-			out, err := a.hostExec(env, 30*time.Second, "systemctl", "is-active", "kubelet")
-			if err == nil && strings.TrimSpace(out) == "active" {
-				active = true
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
-		if !active {
-			return v1alpha1.StepFailed, "kubelet did not return to active within 60s after the state reset"
-		}
-		restarted = "kubelet stopped and restarted"
-	}
-	return v1alpha1.StepDone, fmt.Sprintf("%s; cleared stale kubelet state %v (%s)", hookMsg, removed, restarted)
+	return strings.Join(out, "; ")
 }
 
 // stepNfsRdma implements the bash fn_setup_nfsrdma: ensure nfs-common,

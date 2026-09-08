@@ -114,8 +114,10 @@ func TestBootHookOn(t *testing.T) {
 	}
 }
 
-// stepKubeletState decision gates: off skips, detect-only blocks on stale
-// files, and a stale-file reset reports the hook plus what was removed.
+// stepKubeletState decision gates: off skips, detect-only reports stale
+// files without touching them (no walk-time reset since 0.1.75 — the boot
+// hook owns the guarded reset at every boot), and a mutations-enabled run
+// reports the hook plus what the next boot clears.
 func TestStepKubeletStateGates(t *testing.T) {
 	np := &v1alpha1.NodePrep{}
 
@@ -138,8 +140,10 @@ func TestStepKubeletStateGates(t *testing.T) {
 	state, msg = stepKubeletState(a, np, &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
 		HostBoot: v1alpha1.HostBootSpec{KubeletStateReset: "always"},
 	}})
-	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
-		t.Fatalf("detect-only, stale files: got %s %q, want Blocked", state, msg)
+	// No walk-time stop/rm/start since 0.1.75: report only — the boot hook
+	// (installed every cycle, Before=kubelet.service) clears at next boot.
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "detect-only") || !strings.Contains(msg, "cpu_manager_state") || strings.Contains(msg, "cleared") {
+		t.Fatalf("detect-only, stale files: got %s %q, want Done reporting the stale file", state, msg)
 	}
 }
 

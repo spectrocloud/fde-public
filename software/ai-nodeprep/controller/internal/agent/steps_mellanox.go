@@ -911,7 +911,7 @@ func stepLosslessRoce(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePre
 	}
 	lossless, offClass := losslessClass(rails)
 	if len(lossless) == 0 {
-		return v1alpha1.StepDone, "skipped: no lossless-RoCE class devices (ConnectX-7..9/SuperNIC only); rail inventory: " + strings.Join(offClass, ", ")
+		return v1alpha1.StepDone, "skipped: no lossless-RoCE class devices (SuperNIC only); rail inventory: " + strings.Join(offClass, ", ")
 	}
 	if !a.mutationsAllowed(profile) {
 		return v1alpha1.StepBlocked, "lossless RoCE settings require -host-mutations (detect-only run)"
@@ -1031,12 +1031,18 @@ func (a *Agent) applySpectrumXCC(d pciDevice, dev string) {
 	}
 }
 
-// losslessClass splits rail devices into the bash fn_set_lossless_roce gate
-// (SuperNIC or ConnectX-7..9) and the off-class remainder, labeled for
-// reporting.
+// losslessClass splits rail devices into the lossless-RoCE class
+// (SuperNIC only, 0.1.75 — Kevin's direction after the DSX Air live walks)
+// and the off-class remainder, labeled for reporting. The bash gate
+// (fn_set_lossless_roce) also passed ConnectX-7..9, but on the emulated
+// adapters the congestion-control stack is not functional — the walk
+// reported mlnx_qos/mlnxreg settings nothing enforces, and the CC engine
+// the step targets is Bluefield SuperNIC hardware. The mlxconfig CC keys
+// (buildFlashSet) still apply to the ConnectX-7..9 class; only this step's
+// runtime mlnx_qos/mlnxreg/sysfs writes narrow.
 func losslessClass(rails []pciDevice) (lossless []pciDevice, offClass []string) {
 	for _, d := range rails {
-		if d.devType == "SuperNIC" || matchesConnectX79(d.devType) {
+		if d.devType == "SuperNIC" {
 			lossless = append(lossless, d)
 		} else {
 			offClass = append(offClass, fmt.Sprintf("%s %s (%s/%s)", d.devType, d.pci, d.rawType, d.variant))

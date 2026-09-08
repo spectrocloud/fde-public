@@ -248,14 +248,23 @@ func TestMatchesConnectX79(t *testing.T) {
 	}
 }
 
-// The lossless-RoCE firmware gate: the bash applies the block only on
-// SuperNIC or ConnectX-7..9 — a ConnectX-4 Lx is out.
+// The lossless-RoCE class gate (0.1.75): SuperNIC only. The bash gate
+// (fn_set_lossless_roce) also passed ConnectX-7..9, but on the emulated
+// adapters the CC stack is not functional — the walk applied mlnx_qos/
+// mlxreg settings nothing enforces — so the runtime class narrows to the
+// Bluefield SuperNIC. matchesConnectX79 survives for the mlxconfig CC keys
+// (buildFlashSet), which still apply on the ConnectX-7..9 class.
 func TestLosslessGate(t *testing.T) {
-	if matchesConnectX79("ConnectX4Lx") {
-		t.Fatalf("ConnectX4Lx must not pass the lossless gate")
+	lossless, offClass := losslessClass([]pciDevice{
+		{pci: "0000:05:00.0", devType: "SuperNIC", rawType: "BlueField-3", variant: "Physical"},
+		{pci: "0000:49:00.0", devType: "ConnectX7", rawType: "ConnectX-7", variant: "Air", rail: "r0_p0"},
+		{pci: "0000:49:00.1", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Physical", rail: "r0_p1"},
+	})
+	if len(lossless) != 1 || lossless[0].pci != "0000:05:00.0" {
+		t.Fatalf("SuperNIC must be the only lossless-class device, got %+v", lossless)
 	}
-	if !matchesConnectX79("ConnectX7") {
-		t.Fatalf("ConnectX7 must pass the lossless gate")
+	if len(offClass) != 2 || !strings.Contains(offClass[0], "ConnectX7") || !strings.Contains(offClass[1], "ConnectX4LX") {
+		t.Fatalf("ConnectX-7 and ConnectX-4 Lx are off-class now: %v", offClass)
 	}
 }
 
@@ -304,21 +313,41 @@ func TestPfcEnabled(t *testing.T) {
 
 // On ConnectX-4 Lx the bash fn_set_lossless_roce gate excludes the whole
 // body — the step must skip honestly and name the inventory it saw (the
-// live lab hardware).
+// live lab hardware). The same skip now covers the emulated ConnectX-7 Air
+// rails (0.1.75: SuperNIC-only class), and a SuperNIC passes the class
+// gate.
 func TestStepLosslessRoceOffClassSkip(t *testing.T) {
-	a := &Agent{mellanoxFns: []pciDevice{
+	cx4lx := &Agent{mellanoxFns: []pciDevice{
 		{pci: "0000:49:00.0", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Physical", rail: "r0_p0"},
 		{pci: "0000:49:00.1", devType: "ConnectX4LX", rawType: "ConnectX4Lx", variant: "Physical", rail: "r0_p1"},
 	}}
+	cx7air := &Agent{mellanoxFns: []pciDevice{
+		{pci: "0000:05:00.0", devType: "ConnectX7", rawType: "ConnectX-7", variant: "Air", rail: "r0_p0"},
+		{pci: "0000:05:00.1", devType: "ConnectX7", rawType: "ConnectX-7", variant: "Air", rail: "r0_p1"},
+	}}
+	for name, a := range map[string]*Agent{"ConnectX4Lx": cx4lx, "ConnectX7 Air": cx7air} {
+		profile := profileForTest(9000, "legacy", true)
+		profile.Spec.EastWest.RoceCC = true
+
+		state, msg := stepLosslessRoce(a, nil, profile)
+		if state != v1alpha1.StepDone {
+			t.Fatalf("%s: off-class hardware must skip Done, got %s: %s", name, state, msg)
+		}
+		if !strings.Contains(msg, "no lossless-RoCE class devices") || !strings.Contains(msg, "SuperNIC only") {
+			t.Fatalf("%s: skip message should name the narrowed class: %s", name, msg)
+		}
+	}
+
+	// A SuperNIC passes the class gate; on a bare agent the next gate
+	// (mutations) is what stops it — proving the class gate let it through.
+	a := &Agent{mellanoxFns: []pciDevice{
+		{pci: "0000:08:00.0", devType: "SuperNIC", rawType: "BlueField-3", variant: "Physical", rail: "r0_p0"},
+	}}
 	profile := profileForTest(9000, "legacy", true)
 	profile.Spec.EastWest.RoceCC = true
-
 	state, msg := stepLosslessRoce(a, nil, profile)
-	if state != v1alpha1.StepDone {
-		t.Fatalf("off-class hardware must skip Done, got %s: %s", state, msg)
-	}
-	if !strings.Contains(msg, "no lossless-RoCE class devices") || !strings.Contains(msg, "ConnectX4LX 0000:49:00.0") {
-		t.Fatalf("skip message should name the off-class inventory: %s", msg)
+	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
+		t.Fatalf("SuperNIC must pass the class gate (blocked on mutations next), got %s: %s", state, msg)
 	}
 }
 

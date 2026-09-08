@@ -9,8 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	clientfake "k8s.io/client-go/kubernetes/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientfake "k8s.io/client-go/kubernetes/fake"
 
 	"spectrocloud.com/nodeprep/api/v1alpha1"
 	"spectrocloud.com/nodeprep/internal/k8sutil"

@@ -138,6 +138,12 @@ type Agent struct {
 	// process lifetime, so the steady-state cycle costs zero host execs.
 	hookDone string
 
+	// ibCoreInitramfs remembers the ib_core modprobe.d content whose
+	// initramfs refresh this process already ran or armed (see
+	// stageIbCoreNetns) — the 10-minute update-initramfs must stay off the
+	// steady-state poll.
+	ibCoreInitramfs string
+
 	// verbose (-verbose / NODEPREP_VERBOSE=true, troubleshooting) logs every
 	// host exec in full: quiet sweeps and tool dumps (mlxconfig/flint
 	// queries, the ACS lspci+setpci traffic) become visible again.
