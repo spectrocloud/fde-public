@@ -1011,12 +1011,23 @@
       on a node whose plugin is already running) is what 0.1.62 now covers. (The rshim
       <i>service</i> enable/restart itself landed in 0.1.30 as <code>rshimService</code> — what remains here
       is rshim discovery as part of a real BlueField flash.)</li>
-  <li><b><span class="no">[pending]</span> VF GUID/MAC ownership under the NVIDIA Network Operator</b> —
-      verify the moment the operator is installed on the test cluster. It may implement its own VF GUID/MAC
-      assignment (already observed in the switchdev path); nodeprep's <code>vfGuids</code> drift-repairs
-      identity on every boot-verify pass, so two owners would fight — drift → re-taint → repair → rewrite
-      → endless loop. If the operator does rewrite identity, <code>vfGuids</code> must stand down (or scope
-      its repair), and <code>sriovNumVFs</code>/<code>udevRules</code> need the same ownership check.</li>
+  <li><b><span class="no">[checked 2026-09-08, no conflict]</span> VF GUID/MAC ownership under the NVIDIA
+      Network Operator</b> — first live coexistence check on DSX Air with the <em>full</em> operator stack
+      (sriov-network-operator, config-daemon, nic-configuration-daemon, device plugin, multus, nv-ipam,
+      NFD, spectrum-x flowcontroller): every <code>SriovNetworkNodePolicy</code> (r0–r7) carries
+      <b><code>externallyManaged: true</code></b> — the operator never creates/destroys VFs and never
+      writes GUIDs/MACs; its config-daemon logs "Interfaces not changed" with Sync Idle/Succeeded on both
+      nodes, and its inventory reads back nodeprep's own udev renames (<code>nic_vf0_rep_r0</code>). The
+      emulated CX-7 exposes no RDMA device behind the VF netdevs, so the operator cannot even read the
+      GUIDs (<code>GetNetDevNodeGUID</code> errors). Desired states coincide regardless (1 VF/PF, switchdev,
+      mtu 9166). The §6.1 maintenance window ran its designed cycle once (h00, 12:52: one
+      <code>DriftDetected</code> → taint re-applied → GUIDs/MACs re-applied → BootVerified + released, no
+      recurrence; h01 zero events) — root cause of that one-off identity change unidentified, plausibly the
+      emulator re-generating VF identity as the operator first probed the devices. <b>Standing risks
+      recorded:</b> an <code>externallyManaged: false</code> flip would start the two-owner fight (then
+      <code>vfGuids</code> needs to stand down or scope its repair — <code>sriovNumVFs</code>/
+      <code>udevRules</code> likewise); and the operator's policies select on
+      <code>node-role.kubernetes.io/worker</code>, so 0.1.80's CP-worker label made h00 policy-eligible too.</li>
   <li><b>0.1.45 — <code>cordonDuringVFConfig</code> removed (operator decision).</b> The knob was never
       implemented — and discussion of it established why it is redundant: the nodeprep taint (default-on,
       <code>taintEnabled</code>) already holds the node unschedulable through the entire walk including VF
