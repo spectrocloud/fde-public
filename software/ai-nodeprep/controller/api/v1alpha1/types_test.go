@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// The eastWest multi-plane/breakout reserves (0.1.76): absent fields read
+// The eastWest multi-plane/breakout reserves (0.1.77): absent fields read
 // as the schema default 1, explicit values pass through, and the JSON names
-// are the snake_case forms the CRD schema carries.
+// are the camelCase forms the CRD schema carries.
 func TestEastWestPlanesAndBreakoutDefaults(t *testing.T) {
 	var e EastWestSpec
 	if e.PlanesNumOrDefault() != 1 || e.NICBreakoutOrDefault() != 1 {
@@ -25,7 +25,7 @@ func TestEastWestPlanesAndBreakoutDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"planes_num":2`, `"nic_breakout":4`} {
+	for _, want := range []string{`"planesNum":2`, `"nicBreakout":4`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("marshalled eastWest %s missing %s (JSON names must match the CRD schema)", b, want)
 		}

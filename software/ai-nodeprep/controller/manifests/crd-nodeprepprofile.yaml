@@ -137,16 +137,16 @@ spec:
                       enum: [switchdev, legacy, ""]
                     roceCC:
                       type: boolean
-                    planes_num:
+                    planesNum:
                       description: >
-                        Reserved 0.1.76, not yet applied by any step: multi-plane
+                        Reserved 0.1.77, not yet applied by any step: multi-plane
                         east-west topology — each SuperNIC presents one port per plane.
                       type: integer
                       enum: [1, 2, 4]
                       default: 1
-                    nic_breakout:
+                    nicBreakout:
                       description: >
-                        Reserved 0.1.76, not yet applied by any step: port breakout on
+                        Reserved 0.1.77, not yet applied by any step: port breakout on
                         ConnectX-8 and above — one physical port broken out into multiple PFs.
                       type: integer
                       enum: [1, 2, 4]

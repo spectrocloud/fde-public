@@ -327,8 +327,8 @@ spec:
     mtu: <span class="s">9216</span>                        <span class="c"># MTU_EW; bridges/VFs derive mtu-50</span>
     eswitchMode: <span class="s">switchdev</span>           <span class="c"># switchdev | legacy  (ESWITCH_MODE)</span>
     roceCC: <span class="s">true</span>                     <span class="c"># ROCECC: adaptive routing + user CC</span>
-    planes_num: <span class="s">1</span>                   <span class="c"># 1|2|4 (default 1) — multi-plane EW: one port per plane per SuperNIC (reserved 0.1.76: structure only, mlxconfig keys pending)</span>
-    nic_breakout: <span class="s">1</span>                 <span class="c"># 1|2|4 (default 1) — CX-8+: one physical port broken out into multiple PFs (reserved 0.1.76: structure only, mlxconfig keys pending)</span>
+    planesNum: <span class="s">1</span>                    <span class="c"># 1|2|4 (default 1) — multi-plane EW: one port per plane per SuperNIC (reserved 0.1.77: structure only, mlxconfig keys pending)</span>
+    nicBreakout: <span class="s">1</span>                  <span class="c"># 1|2|4 (default 1) — CX-8+: one physical port broken out into multiple PFs (reserved 0.1.77: structure only, mlxconfig keys pending)</span>
   northSouth:
     linkType: <span class="s">Ethernet</span>               <span class="c"># LINKTYPE_NS</span>
     numVFs: <span class="s">0</span>                        <span class="c"># NUMVF_NS</span>
