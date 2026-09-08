@@ -17,17 +17,18 @@ spec:
       node.spectrocloud.com/ai-worker: "true"
 
   firmware:
-    source: http://maas.internal:8069/rcp # base URL for artifacts (MAAS mirror)
+    #source: http://maas.internal:8069/rcp # base URL for artifacts (MAAS mirror)
+    source: https://kevin-s3-public.s3.eu-west-1.amazonaws.com/rcp
     bfb:
-      name: bf-fwbundle-3.4.0-92_26.04-prod.bfb
-      sha256: cfad862925ad90618cb65dce0a025d2a408a756992df9a19e203d2d2445332a5
+      name: bf-fwbundle-3.5.0-89_26.07-prod.bfb
+      sha256: 2d02f198b952b3e6a652beccbd7740ed4ab78ded3d00c3939acd1d707c93391d
       # minVersion: <FW version flint reports on a card running this BFB>
       # Flash gate floor (BlueField-3 only): a card whose running firmware
       # sorts below this is outdated and gets flashed; omit to gate on the
       # flash body alone.
     doca:
-      deb: doca-host_3.4.0-085000-26.04-ubuntu2404_amd64.deb
-      sha256: f274db1c9445bb9362565981a226966c058e068a53207890449a83c6757004aa
+      deb: doca-host_3.5.0-082000-26.07-ubuntu2404_amd64.deb
+      sha256: a2312bb04b980fae370fb5de483fda8cc6bc590553bf3c8dc77f980e3840740a
       # fn_init_sw_stage's exact install set: the DOCA bundle plus the
       # companion packages (mft is a hard prerequisite of the Mellanox-gated
       # steps — mlxconfig/bfb-install/mlnx_qos).
@@ -45,7 +46,7 @@ spec:
 
   eastWest: # LINKTYPE_EW=2, NUMVF_EW=8, MTU_EW=9216, ESWITCH_MODE=switchdev
     linkType: Ethernet
-    numVFs: 8
+    numVFs: 1
     mtu: 9216
     eswitchMode: switchdev
     roceCC: true
@@ -60,26 +61,39 @@ spec:
       pciFunction: "05:00"
     - rail: r1
       pciFunction: "06:00"
+    - rail: r2
+      pciFunction: "07:00"
+    - rail: r3
+      pciFunction: "08:00"
+    - rail: r4
+      pciFunction: "09:00"
+    - rail: r5
+      pciFunction: "0a:00"
+    - rail: r6
+      pciFunction: "0b:00"
+    - rail: r7
+      pciFunction: "0c:00"
 
   hostBoot:
-    iommu: intel # intel_iommu=on
+    iommu: auto
     rdmaNetnsMode: "0" # options ib_core netns_mode=0
     hugepages:
-      defaultSize: 1G
-      pages1G: 32
+      defaultSize: 2M
+      pages1G: 0
+      pages2M: 5120
     bootHook: true # nodeprep-boot.service rendered Before=kubelet.service (nil = on)
     kubeletStateReset: always # guarded stop -> rm -> start at boot
     mlnxInterfaceMgr: wait # two-condition gate (script + hardware)
 
   policy:
-    capiPause: true # pause the CAPI Machine while prepping
+    capiPause: false # pause the CAPI Machine while prepping
     workerRoleLabel: manage # demote at Finalizing, restore at Ready
     labelCompat: v1 # mirror the legacy spectrocloud.com/nodeprep label
     maxConcurrentFlashes: 1 # fleet flash window
-    disableACS: true
+    disableACS: false
     taintEnabled: true # default; shown for clarity
-    rebootEnabled: false # flip with the agent's -allow-reboot
-    hostMutations: false # flip with the agent's -host-mutations
+    rebootEnabled: true # flip with the agent's -allow-reboot
+    hostMutations: true # flip with the agent's -host-mutations
 
   nfsRdma:
-    enabled: true
+    enabled: false
