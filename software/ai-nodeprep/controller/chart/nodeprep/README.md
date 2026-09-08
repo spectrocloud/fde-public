@@ -69,9 +69,11 @@ owners fighting.
 
 ## Versioning
 
-`Chart.yaml` `appVersion` tracks the release (e.g. `0.1.80`); both image tags
-derive from it. Bump `appVersion` (and, for chart-shape changes, `version`)
-together with the manifests version bump.
+`Chart.yaml` `version` and `appVersion` both track the release (e.g. `0.1.81`).
+`appVersion` drives both default image tags (`<appVersion>-agent` /
+`-controller`); `version` names the packaged tarball
+(`nodeprep-<version>.tgz`), which the Palette pack's `charts` array points at.
+Bump both together with the manifests `VERSION` bump.
 
 ## Sync helper
 
