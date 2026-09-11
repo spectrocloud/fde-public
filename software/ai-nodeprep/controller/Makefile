@@ -10,7 +10,15 @@ PLATFORMS ?= linux/amd64,linux/arm64
 TAG_CONTROLLER = $(IMG):$(VERSION)-controller
 TAG_AGENT      = $(IMG):$(VERSION)-agent
 
-.PHONY: build test vet fmt manifests-install sample clean image-controller image-agent image-multi
+.PHONY: build test vet fmt manifests-install sample clean image-controller image-agent image-multi crd-apply
+
+# Helm ownership markers for manually applied CRDs. Defaults match the
+# Palette pack (release "nodeprep", resources in nodeprep-system); if the
+# live CRDs carry different values, read them before overwriting:
+#   kubectl get crd nodeprepprofiles.nodeprep.spectrocloud.com \
+#     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}'
+HELM_RELEASE ?= nodeprep
+HELM_NAMESPACE ?= nodeprep-system
 
 build: ## Compile both binaries
 	$(GO) build $(GOFLAGS) -o bin/controller ./cmd/controller
@@ -42,6 +50,15 @@ sample: ## Apply the example profile
 	kubectl apply -f samples/profile-gpu-node.yaml
 
 CHART_DIR = chart/nodeprep
+
+crd-apply: ## Apply both CRDs and re-stamp Helm's ownership markers
+	kubectl apply -f manifests/crd-nodeprep.yaml
+	kubectl apply -f manifests/crd-nodeprepprofile.yaml
+	@for crd in nodepreps.nodeprep.spectrocloud.com nodeprepprofiles.nodeprep.spectrocloud.com; do \
+		kubectl annotate crd $$crd meta.helm.sh/release-name=$(HELM_RELEASE) \
+			meta.helm.sh/release-namespace=$(HELM_NAMESPACE) --overwrite && \
+		kubectl label crd $$crd app.kubernetes.io/managed-by=Helm --overwrite || exit 1; \
+	done
 
 chart-sync-crds: ## Refresh the chart's CRD copies from manifests/ (single source of truth)
 	cp manifests/crd-nodeprep.yaml manifests/crd-nodeprepprofile.yaml $(CHART_DIR)/templates/

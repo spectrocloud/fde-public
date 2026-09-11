@@ -43,6 +43,12 @@ Helm "owns" objects other tools may also manage. On clusters where an external
 system (e.g. Palette) enforces the CRDs, set `crds.create=false` to avoid two
 owners fighting.
 
+Manual `kubectl apply` of the raw CRD manifests on a chart-managed cluster
+re-stamps Helm's ownership markers afterwards (`make crd-apply` does it) —
+without `meta.helm.sh/release-*` and `app.kubernetes.io/managed-by: Helm` the
+next `helm upgrade` that must create or adopt the CRD fails the ownership
+validation.
+
 ## What it deploys
 
 | Template | Kind | Notes |
