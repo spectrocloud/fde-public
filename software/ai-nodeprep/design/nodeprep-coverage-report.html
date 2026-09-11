@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.82</span>
+    <span>nodeprep-v105.sh → controller v0.1.83</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.82</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.83</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,29 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.83 — numeric strings in the profile spec decode as integers (Kevin: "when deploying
+      the NodePrepProfile through Palette, some fields are set through a mechanism that causes
+      integers to become strings … spec.eastWest.numVFs: "0" … results in an error as the CRD does
+      not allow a string input").</b> Two-part fix. (1) <b>Decode normalization</b>
+      (<code>api/v1alpha1/flexint.go</code>): the five spec structs carrying numeric fields
+      (EastWest, NorthSouth, Hugepages, Policy, ControlPlane) gained <code>UnmarshalJSON</code>
+      methods that rewrite numeric strings (<code>"16"</code>, whitespace-tolerant) back into JSON
+      numbers before the typed decode — every profile read (controller adoption via
+      <code>decodeInto</code>, agent via <code>fetchProfile</code>) goes through
+      <code>encoding/json</code>, so these methods are the single choke point and Go code never sees
+      a string. Marshaling still emits integers; <code>null</code> decodes as the zero value; a
+      non-numeric string fails at decode naming the field. (2) <b>CRD schema</b> (9 fields:
+      eastWest.numVFs/mtu/planesNum/nicBreakout, northSouth.numVFs, hugepages.pages1G/pages2M,
+      policy.maxConcurrentFlashes, controlPlane.expectedCount): <code>type: integer</code> became
+      <code>anyOf: [integer, string]</code> + <code>x-kubernetes-int-or-string: true</code>, with
+      CEL rules preserving the old constraints (<code>int(self) &gt;= 0</code> for the
+      minimum-0 fields — the conversion also rejects non-numeric strings at the API;
+      <code>string(self) in ["1","2","4"]</code> for the plane/breakout enums). Status fields are
+      controller-authored and stay plain ints. Validated offline with the real
+      apiextensions-apiserver validator (structural + CEL compile; negative test proved the checker
+      catches broken rules) while the test cluster was unreachable;
+      <code>TestFlexIntStringFieldsDecode</code>/<code>TestFlexIntWhitespaceTolerated</code> pin the
+      decode behavior.</li>
   <li><b>Helm chart (<code>chart/nodeprep</code>) — the packaged deployment form.</b> The same
       resources <code>manifests/</code> carries, rendered from values: controller Deployment, privileged
       agent DaemonSet, both ClusterRoles/bindings (rule sets verified identical to
@@ -1807,7 +1830,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.82 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.83 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
