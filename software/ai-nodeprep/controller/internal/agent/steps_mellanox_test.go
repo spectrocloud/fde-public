@@ -110,7 +110,8 @@ func TestBFBFlashMinVersionGate(t *testing.T) {
 		return pciDevice{devType: "BlueField3", rawType: "BlueField3", pci: "0000:05:00.0", rshim: "/dev/rshim0", fwVer: fw}
 	}
 	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
-		Firmware: v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf.bfb", MinVersion: "32.49.1014"}},
+		NorthSouth: v1alpha1.NorthSouthSpec{OffloadEngine: true}, // DPUs managed: the flash gates are reachable
+		Firmware:   v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf.bfb", MinVersion: "32.49.1014"}},
 	}}
 	run := func(d pciDevice) (v1alpha1.StepState, string) {
 		a := &Agent{mellanoxFns: []pciDevice{d}}
@@ -439,6 +440,7 @@ func TestStepBFBFlashNoBluefield(t *testing.T) {
 		{pci: "0000:16:00.1", devType: "ConnectX4Lx", rawType: "ConnectX4Lx", variant: "Physical"},
 	}}
 	profile := profileForTest(9000, "legacy", true)
+	profile.Spec.NorthSouth.OffloadEngine = true
 	profile.Spec.Firmware = v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf-fwbundle-3.4.0-92_26.04-prod.bfb"}}
 
 	state, msg := stepBFBFlash(a, nil, profile)
@@ -457,10 +459,42 @@ func TestStepBFBFlashBluefieldNeedsBFB(t *testing.T) {
 		{pci: "0000:05:00.0", devType: "DPU", rawType: "BlueField3", variant: "Physical", rshim: "/dev/rshim0"},
 	}}
 	profile := profileForTest(9000, "legacy", true) // no firmware configured
+	profile.Spec.NorthSouth.OffloadEngine = true
 
 	state, msg := stepBFBFlash(a, nil, profile)
 	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "no firmware.bfb") {
 		t.Fatalf("bluefield-3 without BFB config: %s %s", state, msg)
+	}
+}
+
+// offloadEngine=false is the DPU management gate (0.1.84): the flash step
+// is skipped with the gate named, even with flashable BlueField-3 hardware
+// and a configured BFB.
+func TestStepBFBFlashOffloadOffGate(t *testing.T) {
+	a := &Agent{mellanoxFns: []pciDevice{
+		{pci: "0000:05:00.0", devType: "DPU", rawType: "BlueField3", variant: "Physical", rshim: "/dev/rshim0"},
+	}}
+	profile := profileForTest(9000, "legacy", true)
+	profile.Spec.Firmware = v1alpha1.FirmwareSource{BFB: v1alpha1.BFBSource{Name: "bf.bfb"}}
+
+	state, msg := stepBFBFlash(a, nil, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "offloadEngine is false") {
+		t.Fatalf("offloadEngine=false must skip BFB flash naming the gate: %s %s", state, msg)
+	}
+}
+
+// A stale northSouth.numVFs with offloadEngine=false is no VF demand: the
+// VF GUID step must not wake for DPUs the profile leaves alone.
+func TestStepVfGuidsOffloadOffGate(t *testing.T) {
+	a := &Agent{mellanoxFns: []pciDevice{
+		{pci: "0000:0d:00.0", devType: "DPU", rawType: "BlueField3", rail: "dpu"},
+	}}
+	profile := profileForTest(9000, "legacy", true)
+	profile.Spec.NorthSouth.NumVFs = 1
+
+	state, msg := stepVfGuids(a, nil, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "no VFs requested") {
+		t.Fatalf("northSouth.numVFs with offloadEngine=false must not count as demand: %s %s", state, msg)
 	}
 }
 
@@ -489,7 +523,9 @@ func TestStepDisableACSPolicySkip(t *testing.T) {
 
 // SR-IOV VFs and ACS-disable are mutually exclusive: a requested VF count on
 // either fabric side (east-west or north-south) makes the step ignore
-// disableACS, even when it is true.
+// disableACS, even when it is true. The north-south count only represents a
+// VF request when the profile manages DPUs (offloadEngine, 0.1.84) — a stale
+// count with offloadEngine=false leaves the ACS path open.
 func TestStepDisableACSVFExclusivity(t *testing.T) {
 	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:49:00.0"}}}
 	for _, side := range []string{"eastWest", "northSouth"} {
@@ -499,6 +535,7 @@ func TestStepDisableACSVFExclusivity(t *testing.T) {
 			profile.Spec.EastWest.NumVFs = 1
 		} else {
 			profile.Spec.NorthSouth.NumVFs = 1
+			profile.Spec.NorthSouth.OffloadEngine = true
 		}
 
 		state, msg := stepDisableACS(a, nil, profile)

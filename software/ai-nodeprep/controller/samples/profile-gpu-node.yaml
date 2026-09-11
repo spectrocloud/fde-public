@@ -51,10 +51,10 @@ spec:
     eswitchMode: switchdev
     roceCC: true
 
-  northSouth: # LINKTYPE_NS=2, NUMVF_NS=16, DPUOFFLOAD=0
+  northSouth: # LINKTYPE_NS=2, NUMVF_NS=16; offloadEngine=false leaves DPUs alone
     linkType: Ethernet
     numVFs: 16
-    offloadEngine: none
+    offloadEngine: false # true = flash + configure DPUs (VFs when numVFs > 0)
 
   rails: # rails_pciaddr in the bash script
     - rail: r0

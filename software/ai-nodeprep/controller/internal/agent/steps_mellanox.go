@@ -179,12 +179,12 @@ func stepMlxconfig(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	if ew.RoceCC {
 		roceCC = "1"
 	}
+	// offloadEngine is the DPU management gate (0.1.84); DPUs only reach
+	// buildFlashSet when it is true, and the sf model ("1") is the engine
+	// value the old none|sf|smf string collapsed into.
 	dpuOffload := "0"
-	switch strings.ToLower(strings.TrimSpace(ns.OffloadEngine)) {
-	case "sf":
+	if ns.OffloadEngine {
 		dpuOffload = "1"
-	case "smf":
-		dpuOffload = "2"
 	}
 
 	var configured, matched []string
@@ -287,6 +287,8 @@ func mlxconfigScope(d pciDevice, profile *v1alpha1.NodePrepProfile) (bool, strin
 	switch {
 	case d.isVF:
 		return false, ""
+	case d.isDPU() && !profile.Spec.NorthSouth.OffloadEngine:
+		return false, "northSouth.offloadEngine is false (DPUs are left alone)"
 	case d.isDPU() && !profile.Spec.Policy.ControlDPU:
 		return false, "control of DPUs is not allowed by policy"
 	case !d.isDPU() && d.rail == "":
@@ -314,11 +316,8 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 		roceCC = "1"
 	}
 	dpuOffload := "0"
-	switch strings.ToLower(strings.TrimSpace(ns.OffloadEngine)) {
-	case "sf":
+	if ns.OffloadEngine {
 		dpuOffload = "1"
-	case "smf":
-		dpuOffload = "2"
 	}
 
 	var matched, drifted, failures []string
@@ -1197,7 +1196,7 @@ func stepDisableACS(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepP
 	// SR-IOV VFs and ACS-disable are mutually exclusive (operator-directed,
 	// 2026-09-04): when the profile requests VFs on either fabric side the
 	// VF request wins and disableACS is ignored, however it is set.
-	if profile.Spec.EastWest.NumVFs > 0 || profile.Spec.NorthSouth.NumVFs > 0 {
+	if profile.Spec.EastWest.NumVFs > 0 || dpuNSVFs(profile) > 0 {
 		return v1alpha1.StepDone, "skipped: profile requests SR-IOV VFs (eastWest/northSouth.numVFs); ACS-disable is mutually exclusive with VFs"
 	}
 	if !a.mutationsAllowed(profile) {
@@ -1264,6 +1263,9 @@ func acsSummary(disabled, already, noACS []string) string {
 func stepBFBFlash(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !a.hasMellanox() {
 		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
+	}
+	if !profile.Spec.NorthSouth.OffloadEngine {
+		return v1alpha1.StepDone, "skipped: northSouth.offloadEngine is false (DPUs are left alone)"
 	}
 	var bf3, others []string
 	for _, d := range a.mellanoxFns {
@@ -1360,7 +1362,7 @@ func vfClassGUID(d pciDevice) bool {
 // without touching anything. Writes go through an unbind → write → bind
 // window (applyVfGuids for why).
 func stepVfGuids(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	if profile.Spec.EastWest.NumVFs+profile.Spec.NorthSouth.NumVFs == 0 {
+	if profile.Spec.EastWest.NumVFs+dpuNSVFs(profile) == 0 {
 		return v1alpha1.StepDone, "skipped: no VFs requested"
 	}
 	if !a.hasMellanox() {

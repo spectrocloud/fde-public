@@ -187,7 +187,15 @@ spec:
                         - rule: 'int(self) >= 0'
                           message: must be a non-negative integer or a numeric string
                     offloadEngine:
-                      type: string
+                      description: >-
+                        Gates all DPU management (0.1.84, replaces the bash DPUOFFLOAD string):
+                        true flashes and configures BlueField DPUs — BFB, mlxconfig firmware
+                        config, and their VFs when northSouth.numVFs is set; false leaves
+                        DPUs alone entirely. Defaults to false. Profiles written before the
+                        boolean may still carry the legacy string ("none"/"sf"/"smf" —
+                        sf/smf normalize to true, none to false) in stored objects or
+                        pack-templated form; the controller normalizes those on decode.
+                      type: boolean
                 rails:
                   description: Rail assignment by PCI function ("05:00").
                   type: array

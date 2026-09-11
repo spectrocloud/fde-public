@@ -249,9 +249,13 @@ func (e EastWestSpec) NICBreakoutOrDefault() int {
 }
 
 type NorthSouthSpec struct {
-	LinkType      string `json:"linkType,omitempty"`      // bash: LINKTYPE_NS
-	NumVFs        int    `json:"numVFs,omitempty"`        // per DPU function; bash: NUMVF_NS
-	OffloadEngine string `json:"offloadEngine,omitempty"` // bash: DPUOFFLOAD
+	LinkType string `json:"linkType,omitempty"` // bash: LINKTYPE_NS
+	NumVFs   int    `json:"numVFs,omitempty"`   // per DPU function; bash: NUMVF_NS
+	// OffloadEngine is the DPU management gate (0.1.84 — replaces the bash
+	// DPUOFFLOAD string none|sf|smf): true = flash and configure DPUs (BFB,
+	// mlxconfig, and their VFs when NumVFs > 0), false = leave DPUs alone
+	// entirely. Defaults to false, so a profile must ask for DPU management.
+	OffloadEngine bool `json:"offloadEngine,omitempty"`
 }
 
 type Rail struct {

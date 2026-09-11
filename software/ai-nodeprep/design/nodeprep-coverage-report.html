@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.83</span>
+    <span>nodeprep-v105.sh → controller v0.1.84</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.83</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.84</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,40 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.84 — northSouth.offloadEngine became the DPU management boolean (Kevin: "adjust the
+      spec.northSouth.offloadEngine parameter to use a true/false boolean. This boolean determines
+      whether we flash and configure DPUs (including setting VFs if specified), or if we leave them
+      alone").</b> The old string (<code>none|sf|smf</code>, the bash DPUOFFLOAD — which only chose
+      the INTERNAL_CPU_OFFLOAD_ENGINE value while DPUs were configured regardless) collapsed into a
+      gate: <code>false</code> (the default) leaves DPUs alone <i>entirely</i>; <code>true</code>
+      flashes and configures them — BFB flash, the mlxconfig DPU set (LINK_TYPE_P1, NUM_OF_VFS,
+      MULTIPATH_DSCP, INTERNAL_CPU_OFFLOAD_ENGINE at the sf model <code>1</code>, P2 block), and
+      their VFs when <code>northSouth.numVFs</code> is set. The gate is applied at every DPU touch
+      point: <code>mlxconfigScope</code> skips DPU devices naming the gate (before the
+      <code>policy.controlDPU</code> guard, which stays as the second layer),
+      <code>stepBFBFlash</code> returns early with the same reason, <code>vfCountFor</code> routes
+      the DPU rail through the new <code>dpuNSVFs</code> (zero demand when gated), and the raw
+      <code>NorthSouth.NumVFs</code> consumers (grub IOMMU, OVS fn_set_vfs gate, vfGuids, ACS
+      VF-exclusivity) read <code>dpuNSVFs</code> so a stale count cannot wake DPU work — notably
+      <code>stepSriovNumVFs</code> skips DPUs outright, because a zeroed <i>want</i> would tear
+      down VFs a previous profile created, the opposite of leaving them alone. Type:
+      <code>OffloadEngine bool</code>, decoded through a boolean twin of the 0.1.83 FlexInt
+      normalization (<code>flexNormalizeBoolFields</code>): native booleans pass through, the
+      pack-templated strings ("true"/"false"/"1"/"0") and the legacy enum normalize
+      (sf/smf→true, none→false — the live pre-flip profiles carry <code>"none"</code>, which under
+      the old code still configured DPUs with engine 0; with no DPU hardware in any current
+      environment the mapping is unobservable there), anything else fails naming the field. The CRD
+      field is <code>type: boolean</code> — a bool-or-string <code>anyOf</code> is not expressible
+      in a structural schema (the API server rejects <code>type</code> inside
+      <code>anyOf</code> branches; only the int-or-string marker carves out a union), so unlike the
+      integer fields there is no schema-level leniency: profiles still carrying the legacy string
+      are rejected on their next write until updated to the boolean, while the stored object keeps
+      reading (and decoding) fine in the window. CRD validated with a server-side dry-run against
+      the live API server (the offline structural validator does not compile CEL at all — every
+      deliberately-broken rule passed it, so it cannot vouch for rules).
+      <code>TestFlexOffloadEngineDecodes</code>, <code>TestVfCountFor</code> (gated DPU),
+      <code>TestStepBFBFlashOffloadOffGate</code>, <code>TestStepVfGuidsOffloadOffGate</code>,
+      <code>TestStepDisableACSVFExclusivity</code> (NS branch now manages DPUs) pin the behavior.</li>
   <li><b>0.1.83 — numeric strings in the profile spec decode as integers (Kevin: "when deploying
       the NodePrepProfile through Palette, some fields are set through a mechanism that causes
       integers to become strings … spec.eastWest.numVFs: "0" … results in an error as the CRD does
@@ -1830,7 +1864,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.83 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.84 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

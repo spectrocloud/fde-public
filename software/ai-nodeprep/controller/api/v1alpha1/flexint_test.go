@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -72,6 +73,54 @@ func TestFlexIntStringFieldsDecode(t *testing.T) {
 	err = json.Unmarshal([]byte(`{"spec": {"eastWest": {"numVFs": "sixteen"}}}`), p4)
 	if err == nil || !strings.Contains(err.Error(), `field "numVFs"`) {
 		t.Fatalf("bad string must fail naming the field, got %v", err)
+	}
+}
+
+// offloadEngine became a boolean in 0.1.84, but the same pack-templating
+// mechanism that stringifies integers renders it as a string, and profiles
+// written before the flip still carry the legacy enum in stored objects.
+// The decode must normalize all of it (sf/smf → true, none → false) and
+// marshal real booleans.
+func TestFlexOffloadEngineDecodes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{`true`, true}, {`false`, false}, // native booleans pass through
+		{`"true"`, true}, {`"True"`, true}, {`"1"`, true}, // templated strings
+		{`"sf"`, true}, {`"smf"`, true}, // legacy: active offload engine
+		{`"false"`, false}, {`"0"`, false}, // templated strings
+		{`"none"`, false}, {`""`, false}, // legacy: no offload engine
+	}
+	for _, c := range cases {
+		p := &NodePrepProfile{}
+		in := fmt.Sprintf(`{"spec": {"northSouth": {"offloadEngine": %s}}}`, c.in)
+		if err := json.Unmarshal([]byte(in), p); err != nil {
+			t.Fatalf("offloadEngine %s must decode: %v", c.in, err)
+		}
+		if p.Spec.NorthSouth.OffloadEngine != c.want {
+			t.Errorf("offloadEngine %s: got %v, want %v", c.in, p.Spec.NorthSouth.OffloadEngine, c.want)
+		}
+	}
+
+	// true marshals as a real boolean; false is omitempty-dropped.
+	p := &NodePrepProfile{}
+	if err := json.Unmarshal([]byte(`{"spec": {"northSouth": {"offloadEngine": "sf"}}}`), p); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"offloadEngine":true`) || strings.Contains(string(out), `"offloadEngine":"`) {
+		t.Fatalf("marshal must emit a boolean, got %s", out)
+	}
+
+	// Anything outside the known domain is an error naming the field.
+	p2 := &NodePrepProfile{}
+	err = json.Unmarshal([]byte(`{"spec": {"northSouth": {"offloadEngine": "maybe"}}}`), p2)
+	if err == nil || !strings.Contains(err.Error(), `field "offloadEngine"`) {
+		t.Fatalf("unknown string must fail naming the field, got %v", err)
 	}
 }
 

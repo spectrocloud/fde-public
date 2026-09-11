@@ -109,6 +109,7 @@ func TestVfCountFor(t *testing.T) {
 	prof := &v1alpha1.NodePrepProfile{}
 	prof.Spec.EastWest.NumVFs = 4
 	prof.Spec.NorthSouth.NumVFs = 2
+	prof.Spec.NorthSouth.OffloadEngine = true // DPUs managed: the NS count is a real demand
 	cases := []struct {
 		rail string
 		want int
@@ -122,6 +123,22 @@ func TestVfCountFor(t *testing.T) {
 		if got := vfCountFor(prof, pciDevice{rail: c.rail}); got != c.want {
 			t.Errorf("rail %q: got %d, want %d", c.rail, got, c.want)
 		}
+	}
+
+	// offloadEngine=false leaves DPUs alone (0.1.84): no north-south demand
+	// anywhere — vfCountFor, and every any-VF-demand gate through dpuNSVFs.
+	off := &v1alpha1.NodePrepProfile{}
+	off.Spec.EastWest.NumVFs = 4
+	off.Spec.NorthSouth.NumVFs = 2
+	if got := vfCountFor(off, pciDevice{rail: "dpu"}); got != 0 {
+		t.Errorf("dpu rail with offloadEngine=false: got %d, want 0", got)
+	}
+	if got := dpuNSVFs(off); got != 0 {
+		t.Errorf("dpuNSVFs with offloadEngine=false: got %d, want 0", got)
+	}
+	prof.Spec.NorthSouth.NumVFs = 0
+	if got := dpuNSVFs(prof); got != 0 {
+		t.Errorf("dpuNSVFs with zero numVFs: got %d, want 0", got)
 	}
 }
 

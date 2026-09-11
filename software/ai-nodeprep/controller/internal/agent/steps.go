@@ -221,7 +221,7 @@ func grubWantParams(profile *v1alpha1.NodePrepProfile) []string {
 	}
 	// VFs requested: SRIOV needs the vendor IOMMU on and passthrough on the
 	// next boot (bash fn_init_sw_stage L379-402), regardless of hostBoot.
-	if profile.Spec.EastWest.NumVFs > 0 || profile.Spec.NorthSouth.NumVFs > 0 {
+	if profile.Spec.EastWest.NumVFs > 0 || dpuNSVFs(profile) > 0 {
 		switch grubCPUVendor() {
 		case "intel":
 			want = appendUnique(want, "intel_iommu=on")
@@ -1297,6 +1297,11 @@ func stepSriovNumVFs(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	needsApplyAny := false
 	a.fwResetChips = map[string]bool{} // the per-pass chip dedup of fwResetOncePerChip
 	for _, nic := range a.mellanoxFns {
+		if nic.rail == "dpu" && !profile.Spec.NorthSouth.OffloadEngine {
+			// offloadEngine=false leaves DPUs alone — a mere zero count
+			// would tear down VFs a previous profile created.
+			continue
+		}
 		want := vfCountFor(profile, nic)
 		base := "/sys/bus/pci/devices/" + nic.pci
 		got, err := readSysfsInt(base + "/sriov_numvfs")
@@ -1587,7 +1592,7 @@ func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
 		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
 	}
-	if profile.Spec.EastWest.NumVFs+profile.Spec.NorthSouth.NumVFs == 0 {
+	if profile.Spec.EastWest.NumVFs+dpuNSVFs(profile) == 0 {
 		// The OVS block lives inside fn_set_vfs's any-VF-demand gate.
 		return v1alpha1.StepDone, "skipped: no VFs requested (fn_set_vfs gate)"
 	}
@@ -1994,19 +1999,31 @@ func readSysfsInt(path string) (int, error) {
 	return v, nil
 }
 
+// dpuNSVFs is the north-south VF demand: the profile count when the profile
+// manages DPUs (northSouth.offloadEngine, 0.1.84), else zero — a false
+// boolean leaves DPUs alone, VFs included, so the demand must not leak into
+// any-VF-demand gates (grub IOMMU, OVS, vfGuids, ACS exclusivity).
+func dpuNSVFs(profile *v1alpha1.NodePrepProfile) int {
+	if !profile.Spec.NorthSouth.OffloadEngine {
+		return 0
+	}
+	return profile.Spec.NorthSouth.NumVFs
+}
+
 // vfCountFor is the OS-level sriov_numvfs target: east-west count for rail
 // NICs, north-south for DPUs, the profile value verbatim (0 = none).
 // vfCountFor maps a function to its VF target. East-west VFs land ONLY on
 // the rail-mapped functions (spec.rails; the bash applied NUMVF_EW to every
 // ConnectX-class function, which would touch e.g. the bond0 uplink card —
 // Kevin's correction, 2026-09-03); unmapped functions and DPUs without
-// north-south VFs get none. DPUs take the north-south count.
+// north-south VFs get none. DPUs take the north-south count, gated by
+// northSouth.offloadEngine (dpuNSVFs).
 func vfCountFor(profile *v1alpha1.NodePrepProfile, nic pciDevice) int {
 	if nic.isVF {
 		return 0 // VFs do not get VFs; the PF's sriov_numvfs covers them
 	}
 	if nic.rail == "dpu" {
-		return profile.Spec.NorthSouth.NumVFs
+		return dpuNSVFs(profile)
 	}
 	if nic.rail == "" {
 		return 0
