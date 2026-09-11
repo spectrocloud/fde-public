@@ -127,11 +127,21 @@ spec:
                     linkType:
                       type: string
                       enum: [InfiniBand, Ethernet, ""]
+                    # Palette templating delivers integers as strings; both shapes
+                    # are accepted and normalized at decode (api/v1alpha1/flexint.go).
                     numVFs:
-                      type: integer
-                      minimum: 0
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'int(self) >= 0'
+                          message: must be a non-negative integer or a numeric string
                     mtu:
-                      type: integer
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
                     eswitchMode:
                       type: string
                       enum: [switchdev, legacy, ""]
@@ -141,15 +151,25 @@ spec:
                       description: >
                         Reserved 0.1.77, not yet applied by any step: multi-plane
                         east-west topology — each SuperNIC presents one port per plane.
-                      type: integer
-                      enum: [1, 2, 4]
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'string(self) in ["1", "2", "4"]'
+                          message: must be 1, 2, or 4 (integer or numeric string)
                       default: 1
                     nicBreakout:
                       description: >
                         Reserved 0.1.77, not yet applied by any step: port breakout on
                         ConnectX-8 and above — one physical port broken out into multiple PFs.
-                      type: integer
-                      enum: [1, 2, 4]
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'string(self) in ["1", "2", "4"]'
+                          message: must be 1, 2, or 4 (integer or numeric string)
                       default: 1
                 northSouth:
                   description: North-south (DPU) settings.
@@ -159,10 +179,23 @@ spec:
                       type: string
                       enum: [InfiniBand, Ethernet, ""]
                     numVFs:
-                      type: integer
-                      minimum: 0
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'int(self) >= 0'
+                          message: must be a non-negative integer or a numeric string
                     offloadEngine:
-                      type: string
+                      description: >-
+                        Gates all DPU management (0.1.84, replaces the bash DPUOFFLOAD string):
+                        true flashes and configures BlueField DPUs — BFB, mlxconfig firmware
+                        config, and their VFs when northSouth.numVFs is set; false leaves
+                        DPUs alone entirely. Defaults to false. Profiles written before the
+                        boolean may still carry the legacy string ("none"/"sf"/"smf" —
+                        sf/smf normalize to true, none to false) in stored objects or
+                        pack-templated form; the controller normalizes those on decode.
+                      type: boolean
                 rails:
                   description: Rail assignment by PCI function ("05:00").
                   type: array
@@ -189,9 +222,15 @@ spec:
                         defaultSize:
                           type: string
                         pages1G:
-                          type: integer
+                          x-kubernetes-int-or-string: true
+                          anyOf:
+                            - type: integer
+                            - type: string
                         pages2M:
-                          type: integer
+                          x-kubernetes-int-or-string: true
+                          anyOf:
+                            - type: integer
+                            - type: string
                     bootHook:
                       description: Render the nodeprep-boot.service oneshot (design §6.2). Unset means true.
                       type: boolean
@@ -212,8 +251,13 @@ spec:
                       type: boolean
                     maxConcurrentFlashes:
                       description: Fleet flash window; 0 = unlimited.
-                      type: integer
-                      minimum: 0
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'int(self) >= 0'
+                          message: must be a non-negative integer or a numeric string
                     capiPause:
                       type: boolean
                     workerRoleLabel:
@@ -263,8 +307,13 @@ spec:
                       type: boolean
                     expectedCount:
                       description: 0 = auto from KubeadmControlPlane replicas.
-                      type: integer
-                      minimum: 0
+                      x-kubernetes-int-or-string: true
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-validations:
+                        - rule: 'int(self) >= 0'
+                          message: must be a non-negative integer or a numeric string
                     strategy:
                       type: string
                       enum: [serial, background, ""]

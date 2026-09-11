@@ -5,10 +5,10 @@ description: >-
   walks them through Pending→Provisioning→Flashing→Configuring→Finalizing→Ready
   under the spectrocloud.com/nodeprep taint, and boot-verifies before release.
 type: application
-version: 0.1.82
+version: 0.1.84
 # Bumping appVersion bumps both default image tags (see _helpers.tpl) — the
 # images are built one tag per version: <appVersion>-agent / -controller.
-appVersion: "0.1.82"
+appVersion: "0.1.84"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/spectrocloud/fde-public
 sources:

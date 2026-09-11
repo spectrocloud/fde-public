@@ -7,8 +7,8 @@ pack:
     "nodeprep-system": "pod-security.kubernetes.io/enforce=privileged,pod-security.kubernetes.io/enforce-version=latest"
   content:
     images:
-      - image: docker.io/kreeuwijk/ai-nodeprep:0.1.82-agent
-      - image: docker.io/kreeuwijk/ai-nodeprep:0.1.82-controller
+      - image: docker.io/kreeuwijk/ai-nodeprep:0.1.84-agent
+      - image: docker.io/kreeuwijk/ai-nodeprep:0.1.84-controller
 
 charts:
   nodeprep:
