@@ -44,6 +44,11 @@ type Controller struct {
 	// noProfileLogged remembers nodes already reported as matching no
 	// profile, so the 30s informer resync does not repeat the line forever.
 	noProfileLogged map[string]bool
+	// decodeFailLogged remembers profiles already reported as undecodable:
+	// matchProfile skips such objects silently otherwise, and a stale
+	// stored value (a schema type change landing before the stored objects
+	// follow) would read as "no profile" with no hint why.
+	decodeFailLogged map[string]bool
 	// lastCRDProbe throttles the periodic Machine-CRD re-probe: the CRD is
 	// detected once at startup, but a Machine CRD installed after the
 	// controller started (fresh-cluster bootstrap ordering) would never be
@@ -52,7 +57,7 @@ type Controller struct {
 }
 
 func New(client kubernetes.Interface, dyn dynamic.Interface, ns string) *Controller {
-	return &Controller{client: client, dyn: dyn, ns: ns, noProfileLogged: map[string]bool{}}
+	return &Controller{client: client, dyn: dyn, ns: ns, noProfileLogged: map[string]bool{}, decodeFailLogged: map[string]bool{}}
 }
 
 // Run starts the node informer and reconciles on every add/update/resync.
@@ -140,6 +145,16 @@ func (c *Controller) matchProfile(ctx context.Context, node *corev1.Node) (*v1al
 	for i := range list.Items {
 		p := &v1alpha1.NodePrepProfile{}
 		if err := decodeInto(&list.Items[i], p); err != nil {
+			// An undecodable profile is skipped, not an error — but a
+			// silent skip is indistinguishable from "no profile" for the
+			// nodes it used to match (the 0.1.91 rollout: a stored
+			// string-valued labelCompat after the boolean CRD change
+			// logged "no longer matches any profile" every resync with
+			// no hint why). Report it once per profile name.
+			if !c.decodeFailLogged[list.Items[i].GetName()] {
+				c.decodeFailLogged[list.Items[i].GetName()] = true
+				fmt.Printf("[nodeprep] profile %s failed to decode and is ignored: %v (fix the stored object or its CRD schema)\n", list.Items[i].GetName(), err)
+			}
 			continue
 		}
 		names = append(names, p.Name)

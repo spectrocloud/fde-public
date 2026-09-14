@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.91</span>
+    <span>nodeprep-v105.sh → controller v0.1.92</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.91</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.92</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,20 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.92 — an undecodable stored profile is reported, not silently skipped (found in
+      the 0.1.91 rollout itself).</b> <code>matchProfile</code> skipped a profile whose
+      stored object failed struct decode with a bare <code>continue</code> — so when the
+      stored <code>basic-profile</code> still carried <code>labelCompat: "v1"</code> after
+      the boolean CRD landed, the controller treated it as <em>no profile</em> and both
+      nodes logged <code>no longer matches any profile; NodePrep retained</code> every 30s
+      resync with no hint that a profile existed but was unreadable. Now the skip logs
+      <code>profile &lt;name&gt; failed to decode and is ignored: … (fix the stored object
+      or its CRD schema)</code> — once per profile name (<code>decodeFailLogged</code>, the
+      <code>noProfileLogged</code> log-once pattern), never per resync, and never for
+      decodable profiles. <code>TestMatchProfileDecodeFailureLoggedOnce</code> drives the
+      real shape: a stale <code>"v1"</code>-string profile plus a healthy one in the dynamic
+      fake, two match rounds (the resync) — exactly one warning, the healthy profile still
+      matches.</li>
   <li><b>0.1.91 — the legacy state label becomes a clean boolean shim, default off, with active
       cleanup (Kevin: "Adjust the NodePrepProfile to use a clean true/false boolean for
       labelCompat … remove the legacy node label from the nodes when labelCompat: false").</b>
@@ -2060,7 +2074,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.91 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.92 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
