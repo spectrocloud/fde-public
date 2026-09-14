@@ -88,7 +88,7 @@ spec:
   policy:
     capiPause: false # pause the CAPI Machine while prepping
     workerRoleLabel: manage # demote at Finalizing, restore at Ready
-    labelCompat: v1 # mirror the legacy spectrocloud.com/nodeprep label
+    labelCompat: off # set to "v1" to migrate a cluster using the legacy spectrocloud.com/nodeprep label
     maxConcurrentFlashes: 1 # fleet flash window
     disableACS: false
     taintEnabled: true # default; shown for clarity
