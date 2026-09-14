@@ -166,7 +166,7 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	} {
 		wantSets = append(wantSets, "ovs-vsctl --no-wait other_config:"+kv[0]+"="+kv[1])
 	}
-	const wantOwned = `ovs-vsctl --no-wait external_ids:sriov-operator-owned-keys="hw-offload doca-init hw-offload-ct-size max-idle"`
+	const wantOwned = `ovs-vsctl --no-wait external_ids:sriov-operator-owned-keys="doca-init hw-offload hw-offload-ct-size max-idle"`
 
 	// run drives applyOvsSetup against a scripted host: every command is
 	// recorded in order. db scripts ovsRunning's probe — "up" (a live

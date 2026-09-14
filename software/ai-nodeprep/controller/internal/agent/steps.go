@@ -1882,7 +1882,7 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 	// (the union of this cluster's two hook lines). The config-daemon keys
 	// its own cleanup cycles off that record; --no-wait, for the same reason
 	// as the sets.
-	owned := "hw-offload doca-init hw-offload-ct-size max-idle"
+	owned := "doca-init hw-offload hw-offload-ct-size max-idle"
 	if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".",
 		"external_ids:sriov-operator-owned-keys=\""+owned+"\""); err != nil {
 		return fmt.Errorf("set external_ids:sriov-operator-owned-keys: %v", err)
