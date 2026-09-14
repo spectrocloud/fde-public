@@ -1039,7 +1039,15 @@
       all three cells: default false removes the label in exactly one update; a clean node
       issues zero updates; <code>true</code> mirrors Ready → <code>complete</code>. The CRD
       schema drops the string enum for <code>type: boolean</code>; the sample profile reads
-      <code>labelCompat: false</code> with the <code>true</code> opt-in commented.</li>
+      <code>labelCompat: false</code> with the <code>true</code> opt-in commented. Verified
+      live on dsx-nwo-267 — with one rollout gotcha: the stored profile still carried the
+      string <code>"v1"</code> until Kevin's tooling recreated it (12:51:27Z), and a stored
+      value that fails struct decode is skipped <em>silently</em> by <code>matchProfile</code>'s
+      <code>continue</code>, so both nodes logged <code>no longer matches any profile;
+      NodePrep retained</code> every 30s resync until the boolean landed. After recreation:
+      labels stripped from both nodes in the next reconcile pass, spam ended, taints stayed
+      released, worker labels present (h00 as untainted CP carries control-plane + worker),
+      both NodePreps Ready/BootVerified with the controller log fully quiet.</li>
   <li><b>0.1.90 — a staged ib_core netns_mode is mirrored onto the kernel cmdline (Kevin found
       the dsx-nwo-267 reboot loop's root cause: the SR-IOV Network Operator, not nodeprep).</b>
       The operator (26.7.0) checks ONLY whether the <code>ib_core.netns_mode=0</code> kernel
