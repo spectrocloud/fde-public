@@ -1574,10 +1574,39 @@ func (a *Agent) ovsRunning() bool {
 	return err == nil && ovsValue(out) != ""
 }
 
+// ovsdbPoll backs waitOvsdb's retry sleep, ovsdbWait the total budget
+// applyOvsSetup gives ovsdb-server to start answering — vars so tests can
+// shrink both.
+var (
+	ovsdbPoll = 2 * time.Second
+	ovsdbWait = 30 * time.Second
+)
+
+// waitOvsdb polls until ovs-vsctl gets an answer out of ovsdb-server: the
+// unit reports active as soon as systemd forks the daemon, but the socket —
+// and a freshly created conf.db's Open_vSwitch row — can lag a few seconds,
+// and a set issued into that gap fails. Each probe carries its own 2s
+// ovs-vsctl timeout so a not-yet-listening server costs the poll interval,
+// not the exec timeout.
+func (a *Agent) waitOvsdb(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "-t", "2", "get", "Open_vSwitch", ".", "_uuid")
+		if err == nil && ovsValue(out) != "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ovsdb-server did not answer ovs-vsctl within %s", timeout)
+		}
+		time.Sleep(ovsdbPoll)
+	}
+}
+
 // stepOvsSetup implements the DOCA OVS block that closes fn_set_vfs (bash
 // L775-793, switchdev only): stop openvswitch-switch, reset the OVS
-// database, start, apply the hw-offload/doc other_config, restart, and
-// create one br-rail-rN bridge per rail (fail-mode=secure,
+// database, start ovsdb-server alone, apply the hw-offload/doc other_config
+// to the pristine database, start openvswitch-switch, re-assert the config
+// and restart, and create one br-rail-rN bridge per rail (fail-mode=secure,
 // datapath_type=netdev) brought up at the switchdev MTU. It runs between
 // vfGuids and udevRules — the bash's position: the tail of fn_set_vfs,
 // before the rename/VF bring-up; the PF ports are attached later by
@@ -1671,7 +1700,19 @@ func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciD
 	return "", fmt.Sprintf("OVS rail bridges verified: %s (hw-offload, doca-eswitch-max %d)", strings.Join(bridges, ", "), numRails)
 }
 
-// applyOvsSetup runs the bash L775-793 sequence verbatim.
+// applyOvsSetup runs the bash L775-793 sequence, re-ordered (0.1.85) so the
+// five other_config settings land on the OVS database BEFORE
+// openvswitch-switch is started. Live on dsx-nwo-267, ovs-vswitchd's first
+// start failed whenever ovsdb-server had to materialize a fresh conf.db
+// (the reset below removes it): vswitchd's control process — the SR-IOV
+// operator hook — runs `ovs-vsctl -t 5 set Open_vSwitch .
+// external_ids:sriov-operator-owned-keys=…` before ovsdb-server was
+// answering, died on its 5-second alarm (signal 14, exit 142) and took
+// ovs-vswitchd — and with it openvswitch-switch — down; the start failed,
+// ovsSetup diverged again at the next boot, and the node reboot-looped.
+// Starting ovsdb-server alone and applying the settings to the pristine
+// database before the service start gives vswitchd a warm ovsdb-server that
+// already answers, and carries the profile's config into its first read.
 func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
 		return fmt.Errorf("stop openvswitch-switch: %v", err)
@@ -1682,8 +1723,14 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 	if err := os.Remove("/host/var/lib/openvswitch/conf.db"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reset /var/lib/openvswitch/conf.db: %v", err)
 	}
-	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
-		return fmt.Errorf("start openvswitch-switch: %v", err)
+	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "ovsdb-server"); err != nil {
+		return fmt.Errorf("start ovsdb-server: %v", err)
+	}
+	// ovsdb-server is active as soon as systemd forks it, but its socket (and
+	// a freshly created conf.db's Open_vSwitch row) can lag; poll until
+	// ovs-vsctl answers so the sets land on the database, not the void.
+	if err := a.waitOvsdb(ovsdbWait); err != nil {
+		return err
 	}
 	sets := [][2]string{
 		{"doca-init", "true"},
@@ -1692,10 +1739,29 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		{"max-idle", "300000"},
 		{"doca-eswitch-max", strconv.Itoa(len(rails))},
 	}
-	for _, kv := range sets {
-		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
-			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
+	// The profile's other_config, on the database before the service starts —
+	// the 0.1.85 boot-recovery fix (function comment).
+	applyOC := func(stage string) error {
+		for _, kv := range sets {
+			if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
+				return fmt.Errorf("%s: set other_config:%s: %v", stage, kv[0], err)
+			}
 		}
+		return nil
+	}
+	if err := applyOC("pre-start"); err != nil {
+		return err
+	}
+	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
+		return fmt.Errorf("start openvswitch-switch: %v", err)
+	}
+	// The bash applied its sets after the start (vswitchd was already up in
+	// the bash's world); kept as an idempotent re-assertion — the SR-IOV
+	// operator's control hook removes other_config:hw-offload at vswitchd
+	// start before re-setting it — with the restart below re-reading whatever
+	// finally landed.
+	if err := applyOC("post-start"); err != nil {
+		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "restart", "openvswitch-switch"); err != nil {
 		return fmt.Errorf("restart openvswitch-switch: %v", err)

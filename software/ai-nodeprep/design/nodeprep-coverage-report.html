@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.84</span>
+    <span>nodeprep-v105.sh → controller v0.1.85</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.84</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.85</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,34 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.85 — the OVS other_config lands before openvswitch-switch starts (Kevin: "I found
+      that the openvswitch-switch service would fail to start after a node reboot, caused by the
+      configuration wipe and not re-apply at least the settings … adjust the logic to reapply
+      those 5 settings to the ovs config before attempting to start the service").</b> Live
+      reboot-loop on dsx-nwo-267 (rebootCount 14/6, "Dependency failed for
+      openvswitch-switch.service" at every boot): the walk's ovsSetup re-opens at boot (agent.go
+      re-open list), finds the five other_config settings gone — the SR-IOV Network Operator
+      reduces other_config to <code>{hw-offload: "true"}</code> around vswitchd's start — and runs
+      the destructive bash reset (stop → rm conf.db → start), whose <i>start</i> now fails: with
+      the db wiped, ovs-vswitchd's first start races its own control process — the operator hook's
+      <code>ovs-vsctl -t 5 set Open_vSwitch . external_ids:sriov-operator-owned-keys=…</code> runs
+      before ovsdb-server is answering the freshly created database, dies on its 5-second alarm
+      (signal 14, exit 142) and takes ovs-vswitchd — and with it openvswitch-switch — down; the
+      start fails, ovsSetup and ovsBridges both Fail, the reboot arms, and the next boot repeats
+      from an even deader db. <code>applyOvsSetup</code> (steps.go) now starts ovsdb-server
+      <i>alone</i> after the reset, polls it to answering (<code>waitOvsdb</code>: 2s
+      <code>ovs-vsctl -t 2</code> probes against a 30s budget), applies the five settings
+      (doca-init/hw-offload/hw-offload-ct-size/max-idle/doca-eswitch-max=numRails) to the pristine
+      database, and only then starts openvswitch-switch — vswitchd's control hook now lands on a
+      warm server, and the settings ride into vswitchd's first read. The bash's post-start sets
+      stay as an idempotent re-assertion (the operator hook removes
+      <code>other_config:hw-offload</code> at vswitchd start before re-setting it) with the restart
+      re-reading whatever finally landed; when the start still fails the settings are already on
+      the db for the next boot, breaking the loop's amnesia.
+      <code>TestApplyOvsSetupOtherConfigBeforeStart</code> pins the order (all five sets precede
+      the start; ovsdb-server starts before the sets), the failed-start shape (settings survive),
+      and the silent-ovsdb-server path (no start against an unverified db);
+      <code>TestWaitOvsdb</code> pins the retry/timeout semantics.</li>
   <li><b>0.1.84 — northSouth.offloadEngine became the DPU management boolean (Kevin: "adjust the
       spec.northSouth.offloadEngine parameter to use a true/false boolean. This boolean determines
       whether we flash and configure DPUs (including setting VFs if specified), or if we leave them
@@ -1864,7 +1892,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.84 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.85 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

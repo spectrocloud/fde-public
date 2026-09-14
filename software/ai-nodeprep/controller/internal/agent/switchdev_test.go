@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -128,6 +130,183 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 	profile.Spec.Policy.HostMutations = &yes
 	if st, msg := stepOvsSetup(a, np, profile); st == v1alpha1.StepDone {
 		t.Fatalf("a failed apply must not read Done, got Done %q", msg)
+	}
+}
+
+// The 0.1.85 boot-recovery fix: applyOvsSetup must land the five
+// other_config settings on the OVS database BEFORE openvswitch-switch is
+// started. Live on dsx-nwo-267, ovs-vswitchd's first start raced its SR-IOV
+// operator control hook against a freshly created conf.db — the hook timed
+// out (signal 14) and took the unit down, ovsSetup Failed, and the node
+// reboot-looped. Starting ovsdb-server alone first gives the settings a
+// landing zone and vswitchd a warm server. Also pinned: the settings are on
+// the database even when the start still fails (the incident's exact shape —
+// the next boot must find them), and a silent ovsdb-server stops the start
+// attempt entirely.
+func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
+	oldPoll, oldWait := ovsdbPoll, ovsdbWait
+	ovsdbPoll, ovsdbWait = time.Millisecond, 5*time.Millisecond
+	defer func() { ovsdbPoll, ovsdbWait = oldPoll, oldWait }()
+
+	rails := []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}
+	profile := &v1alpha1.NodePrepProfile{}
+
+	var wantSets []string
+	for _, kv := range [][2]string{
+		{"doca-init", "true"}, {"hw-offload", "true"}, {"hw-offload-ct-size", "0"},
+		{"max-idle", "300000"}, {"doca-eswitch-max", "1"}, // one rail
+	} {
+		wantSets = append(wantSets, "ovs-vsctl other_config:"+kv[0]+"="+kv[1])
+	}
+
+	// run drives applyOvsSetup against a scripted host: every command is
+	// recorded in order; the ovs-vsctl poll answers per `answer`, and the
+	// openvswitch-switch start fails per `startFails`.
+	run := func(t *testing.T, startFails bool, answer func() (string, error)) ([]string, error) {
+		t.Helper()
+		var calls []string
+		a := &Agent{
+			mellanoxFns: rails,
+			execFn: func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+				switch name {
+				case "systemctl":
+					calls = append(calls, "systemctl "+strings.Join(args, " "))
+					if startFails && args[0] == "start" && args[1] == "openvswitch-switch" {
+						return "", fmt.Errorf("exit status 1")
+					}
+					return "", nil
+				case "ovs-vsctl":
+					switch {
+					case args[0] == "-t": // waitOvsdb's readiness probe
+						return answer()
+					case args[0] == "set" && strings.HasPrefix(args[3], "other_config:"):
+						calls = append(calls, "ovs-vsctl "+args[3])
+						return "", nil
+					case args[0] == "--may-exist":
+						calls = append(calls, "ovs-vsctl add-br "+args[2])
+						return "", nil
+					}
+					return "", fmt.Errorf("unexpected ovs-vsctl: %v", args)
+				case "ip":
+					return "", nil
+				}
+				return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+			},
+		}
+		return calls, a.applyOvsSetup(profile, rails)
+	}
+
+	preStartSets := func(t *testing.T, calls []string, start int) int {
+		t.Helper()
+		n := 0
+		for _, c := range calls[:start] {
+			if strings.HasPrefix(c, "ovs-vsctl other_config:") {
+				if c != wantSets[n] {
+					t.Fatalf("pre-start set %d = %q, want %q", n, c, wantSets[n])
+				}
+				n++
+			}
+		}
+		return n
+	}
+	startIndex := func(t *testing.T, calls []string) int {
+		t.Helper()
+		for i, c := range calls {
+			if c == "systemctl start openvswitch-switch" {
+				return i
+			}
+		}
+		t.Fatalf("openvswitch-switch was never started: %v", calls)
+		return -1
+	}
+
+	t.Run("settings land before the start", func(t *testing.T) {
+		calls, err := run(t, false, func() (string, error) { return "uuid\n", nil })
+		if err != nil {
+			t.Fatalf("applyOvsSetup: %v", err)
+		}
+		firstSet := -1
+		for i, c := range calls {
+			if strings.HasPrefix(c, "ovs-vsctl other_config:") {
+				firstSet = i
+				break
+			}
+		}
+		start := startIndex(t, calls)
+		if firstSet < 0 || firstSet > start {
+			t.Fatalf("the five other_config settings must precede start openvswitch-switch: %v", calls)
+		}
+		ovsdbStart := -1
+		for i, c := range calls {
+			if c == "systemctl start ovsdb-server" {
+				ovsdbStart = i
+			}
+		}
+		if ovsdbStart < 0 || ovsdbStart > firstSet {
+			t.Fatalf("ovsdb-server must start before the sets: %v", calls)
+		}
+		if n := preStartSets(t, calls, start); n != len(wantSets) {
+			t.Fatalf("want all %d settings pre-start, got %d: %v", len(wantSets), n, calls)
+		}
+	})
+
+	t.Run("settings survive a failed start", func(t *testing.T) {
+		calls, err := run(t, true, func() (string, error) { return "uuid\n", nil })
+		if err == nil || !strings.Contains(err.Error(), "start openvswitch-switch") {
+			t.Fatalf("a failed start must fail the step, got %v", err)
+		}
+		start := -1
+		for i, c := range calls {
+			if c == "systemctl start openvswitch-switch" {
+				start = i
+			}
+		}
+		if n := preStartSets(t, calls, start); n != len(wantSets) {
+			t.Fatalf("all %d settings must be on the db before a failing start, got %d: %v", len(wantSets), n, calls)
+		}
+	})
+
+	t.Run("a silent ovsdb-server stops the start", func(t *testing.T) {
+		calls, err := run(t, false, func() (string, error) { return "", fmt.Errorf("no answer") })
+		if err == nil || !strings.Contains(err.Error(), "did not answer") {
+			t.Fatalf("a never-answering ovsdb-server must fail the wait, got %v", err)
+		}
+		for _, c := range calls {
+			if c == "systemctl start openvswitch-switch" {
+				t.Fatalf("the wrapper must not be started against an unverified db: %v", calls)
+			}
+		}
+	})
+}
+
+// waitOvsdb retries until ovsdb-server answers — the unit reports active as
+// soon as systemd forks the daemon, but the socket and a freshly created
+// conf.db can lag — and gives up with a bounded error when it never does.
+func TestWaitOvsdb(t *testing.T) {
+	oldPoll := ovsdbPoll
+	ovsdbPoll = time.Millisecond
+	defer func() { ovsdbPoll = oldPoll }()
+
+	a := &Agent{}
+	answer := ""
+	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+		if name != "ovs-vsctl" || args[0] != "-t" {
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		}
+		if answer == "" {
+			return "", fmt.Errorf("no answer yet")
+		}
+		return answer, nil
+	}
+
+	answer = "uuid\n"
+	if err := a.waitOvsdb(5 * time.Second); err != nil {
+		t.Fatalf("waitOvsdb with an answering server: %v", err)
+	}
+
+	answer = ""
+	if err := a.waitOvsdb(5 * time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("a silent ovsdb-server must time out naming the budget, got %v", err)
 	}
 }
 
