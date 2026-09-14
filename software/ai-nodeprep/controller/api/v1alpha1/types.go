@@ -17,9 +17,11 @@ const (
 	NodePrepProfileKind = "NodePrepProfile"
 	NodePrepKind        = "NodePrep"
 
-	// LegacyLabel is the state label the bash script used. The controller
-	// keeps mirroring it (policy.labelCompat: v1) so existing tooling keeps
-	// working during migration.
+	// LegacyLabel is the state label the bash script used. Mirroring it is
+	// the policy.labelCompat migration shim (default false: the label is
+	// never written and is removed from the node when present; labelCompat:
+	// true restores the v1-era mirror for clusters still reading the bash
+	// state channel).
 	LegacyLabel = "spectrocloud.com/nodeprep"
 	// TaintKey is held while nodeprep owns the node (design §6.1).
 	TaintKey = "spectrocloud.com/nodeprep"
@@ -292,7 +294,7 @@ type PolicySpec struct {
 	MaxConcurrentFlashes int    `json:"maxConcurrentFlashes,omitempty"` // fleet flash window (design §9.1)
 	CAPause              bool   `json:"capiPause,omitempty"`            // pause CAPI Machines while prepping
 	WorkerRoleLabel      string `json:"workerRoleLabel,omitempty"`      // manage | ignore
-	LabelCompat          string `json:"labelCompat,omitempty"`          // v1: mirror legacy state label
+	LabelCompat          bool   `json:"labelCompat,omitempty"`          // true mirrors the legacy state label (bash migration shim); default false removes it
 
 	// TaintEnabled defaults to true: the nodeprep taint is applied at adoption
 	// and released only after boot-verify (design §6.1). Pointer so the zero

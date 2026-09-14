@@ -350,10 +350,18 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 
 	// --- Node object: taint + labels (single update with retry) ---
 	labelsWant := map[string]string{}
-	if pol.LabelCompat != "off" {
+	// The legacy state label is the bash-migration shim: labelCompat: true
+	// keeps mirroring the phase onto it; the default (false) removes it —
+	// nothing outside the controller reads the label anymore, so a node
+	// still carrying a bash-era or v1-mirrored value gets cleaned up. The
+	// delete marker is a no-op when the label is absent, so the 30s resync
+	// never churns the node.
+	if pol.LabelCompat {
 		if v, err := phases.LegacyFor(phase); err == nil {
 			labelsWant[v1alpha1.LegacyLabel] = v
 		}
+	} else {
+		labelsWant[v1alpha1.LegacyLabel] = "\x00delete"
 	}
 	// The worker-role label choreography (design §6.3) reaches workers
 	// always and control-plane nodes only when they carry no control-plane

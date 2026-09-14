@@ -264,9 +264,8 @@ spec:
                       type: string
                       enum: [manage, ignore, ""]
                     labelCompat:
-                      description: v1 mirrors the legacy spectrocloud.com/nodeprep label.
-                      type: string
-                      enum: [v1, off, ""]
+                      description: Legacy migration shim. true mirrors the legacy spectrocloud.com/nodeprep label; the default (false) never writes it and removes it from the node when present.
+                      type: boolean
                     taintEnabled:
                       description: Default true. Held from adoption until boot-verify passes.
                       type: boolean

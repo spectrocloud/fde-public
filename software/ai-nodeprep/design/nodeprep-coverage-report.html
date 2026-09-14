@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.90</span>
+    <span>nodeprep-v105.sh → controller v0.1.91</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.90</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.91</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,26 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.91 — the legacy state label becomes a clean boolean shim, default off, with active
+      cleanup (Kevin: "Adjust the NodePrepProfile to use a clean true/false boolean for
+      labelCompat … remove the legacy node label from the nodes when labelCompat: false").</b>
+      With nothing outside the repo reading <code>spectrocloud.com/nodeprep</code>, the
+      string-valued migration knob (<code>v1</code>/<code>off</code>, empty = mirror) became
+      <code>policy.labelCompat: boolean</code> — Kevin's commit message sets the semantics:
+      <em>default to no longer using the legacy label</em>. <code>labelCompat: true</code>
+      restores the v1-era mirror (<code>phases.LegacyFor</code> maps the phase onto
+      init/inithw/config/precomplete/complete); the default <code>false</code> never writes the
+      label and actively removes it — the lifecycle now emits the label-sync delete marker
+      (<code>"\x00delete"</code>), which <code>applyNodeChanges</code>/<code>ApplyNodeChanges</code>
+      apply idempotently: a node without the label is not rewritten, so the 30s informer resync
+      never churns the Node object. The bash-migration machinery itself stays
+      (<code>LegacyFor</code>/<code>FromLegacy</code>, the adoption-time import read) for a later
+      removal pass. <code>TestLifecycleLegacyLabel</code> (new lifecycle_test.go, fake
+      clientset + dynamic fake, Ready/boot-verified worker so only the label logic runs) pins
+      all three cells: default false removes the label in exactly one update; a clean node
+      issues zero updates; <code>true</code> mirrors Ready → <code>complete</code>. The CRD
+      schema drops the string enum for <code>type: boolean</code>; the sample profile reads
+      <code>labelCompat: false</code> with the <code>true</code> opt-in commented.</li>
   <li><b>0.1.90 — a staged ib_core netns_mode is mirrored onto the kernel cmdline (Kevin found
       the dsx-nwo-267 reboot loop's root cause: the SR-IOV Network Operator, not nodeprep).</b>
       The operator (26.7.0) checks ONLY whether the <code>ib_core.netns_mode=0</code> kernel
@@ -2032,7 +2052,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.90 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.91 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
