@@ -1574,12 +1574,14 @@ func (a *Agent) ovsRunning() bool {
 	return err == nil && ovsValue(out) != ""
 }
 
-// ovsdbPoll backs waitOvsdb's retry sleep, ovsdbWait the total budget
-// applyOvsSetup gives ovsdb-server to start answering — vars so tests can
-// shrink both.
+// ovsdbPoll backs waitOvsdb's and waitVswitchdActive's retry sleep,
+// ovsdbWait / vswitchWait the total budgets applyOvsSetup gives
+// ovsdb-server and ovs-vswitchd to become ready — vars so tests can
+// shrink them.
 var (
-	ovsdbPoll = 2 * time.Second
-	ovsdbWait = 30 * time.Second
+	ovsdbPoll   = 2 * time.Second
+	ovsdbWait   = 30 * time.Second
+	vswitchWait = 60 * time.Second
 )
 
 // waitOvsdb polls until ovs-vsctl gets an answer out of ovsdb-server: the
@@ -1597,6 +1599,24 @@ func (a *Agent) waitOvsdb(timeout time.Duration) error {
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("ovsdb-server did not answer ovs-vsctl within %s", timeout)
+		}
+		time.Sleep(ovsdbPoll)
+	}
+}
+
+// waitVswitchdActive polls systemctl until ovs-vswitchd reports active:
+// after a failed start the unit is Restart=on-failure, and its automatic
+// second start is the one that succeeds (the first loses the SR-IOV
+// operator hook's 5s race against cold DPDK init — see applyOvsSetup).
+func (a *Agent) waitVswitchdActive(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := a.hostExec(nil, 15*time.Second, "systemctl", "is-active", "ovs-vswitchd")
+		if err == nil && strings.TrimSpace(out) == "active" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ovs-vswitchd not active within %s", timeout)
 		}
 		time.Sleep(ovsdbPoll)
 	}
@@ -1717,7 +1737,10 @@ func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciD
 // write blocks until ovs-vswitchd processes the change, and vswitchd is
 // down in that window by construction; measured live, every pre-start set
 // hung to its timeout while the transaction still committed. See the
-// applyOC call below.)
+// applyOC call below. 0.1.87: the start itself is expected to fail once —
+// vswitchd's cold start loses the operator hook's 5s race — and the step
+// waits out vswitchd's Restart=on-failure second start instead of
+// failing; see the start call below.)
 func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
 		return fmt.Errorf("stop openvswitch-switch: %v", err)
@@ -1771,7 +1794,20 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
-		return fmt.Errorf("start openvswitch-switch: %v", err)
+		// vswitchd's FIRST start after our reset loses a fixed race on this
+		// cluster: its SR-IOV-operator control hook (`ovs-vsctl -t 5 set …
+		// external_ids:sriov-operator-owned-keys`) waits for vswitchd to
+		// process the change, vswitchd's cold DPDK init beats the 5s alarm,
+		// and the hook takes the unit down — the boot journal, 0.1.86's
+		// "start openvswitch-switch: exit status 1", and 0.1.84's identical
+		// failure are all this one race. vswitchd is Restart=on-failure and
+		// its automatic second start succeeds (measured live: NRestarts=1,
+		// active one second later) — wait for it instead of failing the
+		// step; only a vswitchd that never activates is a real failure.
+		if werr := a.waitVswitchdActive(vswitchWait); werr != nil {
+			return fmt.Errorf("start openvswitch-switch: %v (vswitchd did not recover: %v)", err, werr)
+		}
+		a.logf("start openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
 	}
 	// The bash applied its sets after the start (vswitchd was already up in
 	// the bash's world); kept as an idempotent re-assertion — the SR-IOV
@@ -1783,7 +1819,12 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "restart", "openvswitch-switch"); err != nil {
-		return fmt.Errorf("restart openvswitch-switch: %v", err)
+		// The restart's start can lose the same hook race (a vswitchd start
+		// is a vswitchd start); same recovery.
+		if werr := a.waitVswitchdActive(vswitchWait); werr != nil {
+			return fmt.Errorf("restart openvswitch-switch: %v (vswitchd did not recover: %v)", err, werr)
+		}
+		a.logf("restart openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
 	}
 	mtu := ovsRailsMTU(profile)
 	for _, d := range sortedByPci(rails) {

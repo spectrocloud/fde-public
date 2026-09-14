@@ -144,14 +144,17 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 // until ovs-vswitchd processes the change and vswitchd is down in that
 // window by construction (measured: the transaction still committed, reads
 // stayed instant, fsync 2ms — only the wait was broken). --no-wait is the
-// mode ovs-ctl uses for its own startup config. Also pinned: the settings
-// are on the database even when the start still fails (the incident's exact
-// shape — the next boot must find them), and a silent ovsdb-server stops the
-// start attempt entirely.
+// mode ovs-ctl uses for its own startup config. And the start itself is
+// expected to fail once (0.1.87): vswitchd's cold start loses the operator
+// hook's 5s race and its Restart=on-failure second start succeeds — the
+// step waits that recovery out, and only a vswitchd that never activates
+// is a real failure. Also pinned: the settings are on the database even
+// when the start never recovers (the next boot must find them), and a
+// silent ovsdb-server stops the start attempt entirely.
 func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
-	oldPoll, oldWait := ovsdbPoll, ovsdbWait
-	ovsdbPoll, ovsdbWait = time.Millisecond, 5*time.Millisecond
-	defer func() { ovsdbPoll, ovsdbWait = oldPoll, oldWait }()
+	oldPoll, oldWait, oldVsw := ovsdbPoll, ovsdbWait, vswitchWait
+	ovsdbPoll, ovsdbWait, vswitchWait = time.Millisecond, 5*time.Millisecond, 5*time.Millisecond
+	defer func() { ovsdbPoll, ovsdbWait, vswitchWait = oldPoll, oldWait, oldVsw }()
 
 	rails := []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}
 	profile := &v1alpha1.NodePrepProfile{}
@@ -165,9 +168,11 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	}
 
 	// run drives applyOvsSetup against a scripted host: every command is
-	// recorded in order; the ovs-vsctl poll answers per `answer`, and the
-	// openvswitch-switch start fails per `startFails`.
-	run := func(t *testing.T, startFails bool, answer func() (string, error)) ([]string, error) {
+	// recorded in order; the ovs-vsctl poll answers per `answer`,
+	// openvswitch-switch starts fail per `startFails`, and
+	// `systemctl is-active ovs-vswitchd` reports "active" per `vsActive`
+	// ("" — the empty string — means the unit never activates).
+	run := func(t *testing.T, startFails bool, vsActive string, answer func() (string, error)) ([]string, error) {
 		t.Helper()
 		var calls []string
 		a := &Agent{
@@ -176,8 +181,14 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 				switch name {
 				case "systemctl":
 					calls = append(calls, "systemctl "+strings.Join(args, " "))
-					if startFails && args[0] == "start" && args[1] == "openvswitch-switch" {
-						return "", fmt.Errorf("exit status 1")
+					switch {
+					case (args[0] == "start" || args[0] == "restart") && args[1] == "openvswitch-switch" && startFails:
+						return "", fmt.Errorf("A dependency job for openvswitch-switch.service failed")
+					case args[0] == "is-active" && args[1] == "ovs-vswitchd":
+						if vsActive == "active" {
+							return "active\n", nil
+						}
+						return "", fmt.Errorf("failed")
 					}
 					return "", nil
 				case "ovs-vsctl":
@@ -236,7 +247,7 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	}
 
 	t.Run("settings land before the start", func(t *testing.T) {
-		calls, err := run(t, false, func() (string, error) { return "uuid\n", nil })
+		calls, err := run(t, false, "active", func() (string, error) { return "uuid\n", nil })
 		if err != nil {
 			t.Fatalf("applyOvsSetup: %v", err)
 		}
@@ -272,10 +283,30 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		}
 	})
 
-	t.Run("settings survive a failed start", func(t *testing.T) {
-		calls, err := run(t, true, func() (string, error) { return "uuid\n", nil })
-		if err == nil || !strings.Contains(err.Error(), "start openvswitch-switch") {
-			t.Fatalf("a failed start must fail the step, got %v", err)
+	t.Run("start failure recovers when vswitchd restarts", func(t *testing.T) {
+		// The measured shape (dsx-nwo-267, 0.1.86): the first start fails at
+		// the operator hook's 5s alarm, vswitchd's Restart=on-failure second
+		// start succeeds — the step must ride that recovery to Done, not
+		// fail.
+		calls, err := run(t, true, "active", func() (string, error) { return "uuid\n", nil })
+		if err != nil {
+			t.Fatalf("a vswitchd auto-restart must recover the failed start, got %v", err)
+		}
+		addBr := -1
+		for i, c := range calls {
+			if strings.HasPrefix(c, "ovs-vsctl add-br") {
+				addBr = i
+			}
+		}
+		if addBr < 0 {
+			t.Fatalf("the flow must continue past the recovered start: %v", calls)
+		}
+	})
+
+	t.Run("settings survive an unrecovered start", func(t *testing.T) {
+		calls, err := run(t, true, "", func() (string, error) { return "uuid\n", nil })
+		if err == nil || !strings.Contains(err.Error(), "did not recover") {
+			t.Fatalf("a start with a vswitchd that never activates must fail the step, got %v", err)
 		}
 		start := -1
 		for i, c := range calls {
@@ -289,7 +320,7 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	})
 
 	t.Run("a silent ovsdb-server stops the start", func(t *testing.T) {
-		calls, err := run(t, false, func() (string, error) { return "", fmt.Errorf("no answer") })
+		calls, err := run(t, false, "active", func() (string, error) { return "", fmt.Errorf("no answer") })
 		if err == nil || !strings.Contains(err.Error(), "did not answer") {
 			t.Fatalf("a never-answering ovsdb-server must fail the wait, got %v", err)
 		}

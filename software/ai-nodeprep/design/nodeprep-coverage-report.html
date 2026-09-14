@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.86</span>
+    <span>nodeprep-v105.sh → controller v0.1.87</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.86</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.87</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,28 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.87 — the failed start waits out vswitchd's on-failure restart (follow-on to 0.1.86,
+      measured live on dsx-nwo-267 during the 0.1.86 Tier-1 deploy).</b> The 0.1.86 pre-start sets
+      went through clean (<code>--no-wait</code>, all five settings committed — read back on the
+      host: <code>{doca-eswitch-max="8", doca-init="true", hw-offload="true",
+      hw-offload-ct-size="0", max-idle="300000"}</code>), and the step then failed at
+      <code>start openvswitch-switch: exit status 1</code> after 5.037s — the same failure 0.1.84
+      looped on. Host evidence settled the mechanism: <code>ovs-vswitchd</code> was
+      <b>active</b> with <code>NRestarts=1</code> one second after the failed start — the unit is
+      <code>Restart=on-failure</code>, its FIRST start always loses a fixed race (the
+      SR-IOV-operator control hook <code>ovs-vsctl -t 5 set … external_ids:sriov-operator-owned-keys</code>
+      waits for vswitchd to process the change; vswitchd's cold DPDK init over 8 emulated CX-7s
+      beats the 5s alarm), and the automatic second start always succeeds. So
+      <code>applyOvsSetup</code> now treats the failed start as expected: on error it polls
+      <code>systemctl is-active ovs-vswitchd</code> (<code>waitVswitchdActive</code>, 2s probes,
+      60s budget) and continues once vswitchd's own restart lands it, logging the recovery; the
+      <code>restart</code> is wrapped the same way (a vswitchd start is a vswitchd start). Only a
+      vswitchd that never activates fails the step. The one-second-old state this leaves —
+      wrapper inactive, ovsdb-server + vswitchd active, full other_config on disk — is
+      functionally converged, and the next pass's convergence read agrees.
+      <code>TestApplyOvsSetupOtherConfigBeforeStart</code> gained the recovery subtest (failed
+      start, vswitchd activates → step completes through add-br) and pins that a never-activating
+      vswitchd still fails the step with the settings already on the db.</li>
   <li><b>0.1.86 — the pre-start other_config sets need --no-wait (follow-on to 0.1.85, measured
       live on dsx-nwo-267 during the 0.1.85 Tier-1 deploy).</b> The 0.1.85 re-order (settings
       before the service start) hung on its own first set: <code>ovs-vsctl set Open_vSwitch .
@@ -1913,7 +1935,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.86 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.87 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
