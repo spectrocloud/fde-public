@@ -1713,6 +1713,11 @@ func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciD
 // Starting ovsdb-server alone and applying the settings to the pristine
 // database before the service start gives vswitchd a warm ovsdb-server that
 // already answers, and carries the profile's config into its first read.
+// (0.1.86: the pre-start sets also need --no-wait — a waiting ovs-vsctl
+// write blocks until ovs-vswitchd processes the change, and vswitchd is
+// down in that window by construction; measured live, every pre-start set
+// hung to its timeout while the transaction still committed. See the
+// applyOC call below.)
 func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
 		return fmt.Errorf("stop openvswitch-switch: %v", err)
@@ -1740,16 +1745,29 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		{"doca-eswitch-max", strconv.Itoa(len(rails))},
 	}
 	// The profile's other_config, on the database before the service starts —
-	// the 0.1.85 boot-recovery fix (function comment).
-	applyOC := func(stage string) error {
+	// the 0.1.85 boot-recovery fix (function comment). The pre-start sets
+	// carry --no-wait (measured live on dsx-nwo-267, 0.1.85): a waiting
+	// ovs-vsctl write blocks until ovs-vswitchd processes the change, and
+	// vswitchd is DOWN in this window by construction — every set hung to
+	// its timeout while the transaction still committed. --no-wait is the
+	// mode ovs-ctl itself uses for its startup config (`ovs-vsctl --no-wait
+	// -- init -- set Open_vSwitch . db-version=…` in the ovsdb-server unit's
+	// own journal); the commit lands immediately and vswitchd reads the
+	// settings from the database at its first start.
+	applyOC := func(stage string, noWait bool) error {
 		for _, kv := range sets {
-			if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
+			args := []string{}
+			if noWait {
+				args = append(args, "--no-wait")
+			}
+			args = append(args, "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1])
+			if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", args...); err != nil {
 				return fmt.Errorf("%s: set other_config:%s: %v", stage, kv[0], err)
 			}
 		}
 		return nil
 	}
-	if err := applyOC("pre-start"); err != nil {
+	if err := applyOC("pre-start", true); err != nil {
 		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
@@ -1759,8 +1777,9 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 	// the bash's world); kept as an idempotent re-assertion — the SR-IOV
 	// operator's control hook removes other_config:hw-offload at vswitchd
 	// start before re-setting it — with the restart below re-reading whatever
-	// finally landed.
-	if err := applyOC("post-start"); err != nil {
+	// finally landed. Waiting mode here: vswitchd is up past the start, so
+	// the sets double as proof it processed the config.
+	if err := applyOC("post-start", false); err != nil {
 		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "restart", "openvswitch-switch"); err != nil {

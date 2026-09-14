@@ -133,16 +133,21 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 	}
 }
 
-// The 0.1.85 boot-recovery fix: applyOvsSetup must land the five
+// The 0.1.85/0.1.86 boot-recovery fix: applyOvsSetup must land the five
 // other_config settings on the OVS database BEFORE openvswitch-switch is
-// started. Live on dsx-nwo-267, ovs-vswitchd's first start raced its SR-IOV
-// operator control hook against a freshly created conf.db — the hook timed
-// out (signal 14) and took the unit down, ovsSetup Failed, and the node
-// reboot-looped. Starting ovsdb-server alone first gives the settings a
-// landing zone and vswitchd a warm server. Also pinned: the settings are on
-// the database even when the start still fails (the incident's exact shape —
-// the next boot must find them), and a silent ovsdb-server stops the start
-// attempt entirely.
+// started, and those pre-start sets must carry --no-wait. Live on
+// dsx-nwo-267: ovs-vswitchd's first start raced its SR-IOV operator control
+// hook against a freshly created conf.db — the hook timed out (signal 14)
+// and took the unit down, ovsSetup Failed, and the node reboot-looped
+// (0.1.85's fix starts ovsdb-server alone first); then 0.1.85's own pre-start
+// sets hung to their 30s timeouts because a waiting ovs-vsctl write blocks
+// until ovs-vswitchd processes the change and vswitchd is down in that
+// window by construction (measured: the transaction still committed, reads
+// stayed instant, fsync 2ms — only the wait was broken). --no-wait is the
+// mode ovs-ctl uses for its own startup config. Also pinned: the settings
+// are on the database even when the start still fails (the incident's exact
+// shape — the next boot must find them), and a silent ovsdb-server stops the
+// start attempt entirely.
 func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	oldPoll, oldWait := ovsdbPoll, ovsdbWait
 	ovsdbPoll, ovsdbWait = time.Millisecond, 5*time.Millisecond
@@ -182,6 +187,9 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 					case args[0] == "set" && strings.HasPrefix(args[3], "other_config:"):
 						calls = append(calls, "ovs-vsctl "+args[3])
 						return "", nil
+					case args[0] == "--no-wait" && args[1] == "set" && strings.HasPrefix(args[4], "other_config:"):
+						calls = append(calls, "ovs-vsctl --no-wait "+args[4])
+						return "", nil
 					case args[0] == "--may-exist":
 						calls = append(calls, "ovs-vsctl add-br "+args[2])
 						return "", nil
@@ -196,12 +204,19 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		return calls, a.applyOvsSetup(profile, rails)
 	}
 
+	// preStartSets checks the sets recorded before the start attempt: all
+	// five, in order, each carrying --no-wait (a waiting ovs-vsctl write
+	// blocks until vswitchd processes the change — vswitchd is down in this
+	// window, measured live on dsx-nwo-267 in 0.1.85).
 	preStartSets := func(t *testing.T, calls []string, start int) int {
 		t.Helper()
 		n := 0
 		for _, c := range calls[:start] {
-			if strings.HasPrefix(c, "ovs-vsctl other_config:") {
-				if c != wantSets[n] {
+			if strings.HasPrefix(c, "ovs-vsctl ") && strings.Contains(c, "other_config:") {
+				if !strings.Contains(c, "--no-wait") {
+					t.Fatalf("pre-start set %q must carry --no-wait (vswitchd is down in this window)", c)
+				}
+				if c != "ovs-vsctl --no-wait "+strings.TrimPrefix(wantSets[n], "ovs-vsctl ") {
 					t.Fatalf("pre-start set %d = %q, want %q", n, c, wantSets[n])
 				}
 				n++
@@ -227,7 +242,7 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		}
 		firstSet := -1
 		for i, c := range calls {
-			if strings.HasPrefix(c, "ovs-vsctl other_config:") {
+			if strings.HasPrefix(c, "ovs-vsctl ") && strings.Contains(c, "other_config:") {
 				firstSet = i
 				break
 			}
@@ -247,6 +262,13 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		}
 		if n := preStartSets(t, calls, start); n != len(wantSets) {
 			t.Fatalf("want all %d settings pre-start, got %d: %v", len(wantSets), n, calls)
+		}
+		// Post-start re-assertion runs waiting-mode: vswitchd is up, and the
+		// sets double as proof it processed the config.
+		for _, c := range calls[start:] {
+			if strings.Contains(c, "other_config:") && strings.Contains(c, "--no-wait") {
+				t.Fatalf("post-start set %q must not carry --no-wait", c)
+			}
 		}
 	})
 
