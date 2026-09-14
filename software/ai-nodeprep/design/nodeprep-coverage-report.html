@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.88</span>
+    <span>nodeprep-v105.sh → controller v0.1.89</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.88</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.89</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,54 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.89 — the SR-IOV operator's ExecStartPre hooks are defused before any ovs-vswitchd
+      start, and a live OVS is never touched (the real root cause of the 0.1.85-0.1.88 series,
+      measured live on dsx-nwo-267 boots #27-29).</b> 0.1.88 deployed and the step failed worse:
+      <code>ovsSetup Failed — start openvswitch-switch: exit status 1 (vswitchd did not recover:
+      ovs-vswitchd not active within 1m0s)</code>, <code>ovsBridges</code> cascading
+      (<code>no bridge named br-rail-r0</code>). The host told the whole story: h01's
+      <code>/usr/lib/systemd/system/ovs-vswitchd.service</code> carries <b>two
+      <code>ExecStartPre</code> lines patched in by the NVIDIA SR-IOV Network Operator's
+      config-daemon</b>, each opening with a WAITING <code>ovs-vsctl -t 5 set Open_vSwitch .
+      external_ids:sriov-operator-owned-keys=…</code> — a write that blocks until ovs-vswitchd
+      processes it, running in a systemd phase where ovs-vswitchd does not exist yet. Every start
+      attempt burned the hook's 5s alarm (signal 14, exit 142) <em>before ExecStart ever ran</em>:
+      <code>NRestarts=70</code>, the daemon never once activated, <code>ovsdb-server</code>
+      meanwhile healthy the whole time (the database carried all five settings — the
+      <code>--no-wait</code> sets had landed). h00's unit has no hooks (the operator never patched
+      it) and its vswitchd ran fine — the h00/h01 unit comparison isolated the mechanism
+      conclusively. This also re-frames the whole series: the operator's hooks
+      (<code>set external_ids:sriov-operator-owned-keys</code> then
+      <code>remove other_config</code> of the keys it owns, per hook) are the original boot-wipe
+      the first incident saw, <em>and</em> they are what keeps every later
+      <code>systemctl start</code> dead. Kevin confirmed the node reboots #27-29 themselves came
+      from the NVIDIA Network Operator, not nodeprep (the agent's boot-verify failure path only
+      re-taints; reboots fire only from mlxconfig/grub/doca step bodies). The fix is layered, per
+      the evidence: (1) <code>applyOvsSetup</code> runs the destructive reset — now
+      <code>systemctl stop ovsdb-server</code> too, since a wedged-but-running server would keep
+      serving the removed <code>conf.db</code>'s deleted inode — <em>only</em> when
+      <code>ovsRunning()</code> says ovsdb-server is not answering at all; a live database is never
+      stopped or recreated (h00's shape). (2) The five settings plus the operator's own ownership
+      record — <code>external_ids:sriov-operator-owned-keys="hw-offload doca-init
+      hw-offload-ct-size max-idle"</code>, the union of the two hooks' writes, so the
+      config-daemon's cleanup cycles keep keying off it — land with <code>--no-wait</code> in both
+      paths. (3) Whenever vswitchd is not active, <code>defuseVswitchdStartHooks</code>
+      (steps.go) writes <code>/etc/systemd/system/ovs-vswitchd.service.d/99-nodeprep-start.conf</code>
+      — an empty <code>ExecStartPre=</code> reset, with the reasoning in comments — and
+      <code>daemon-reload</code>s BEFORE <code>systemctl start openvswitch-switch</code>; the
+      hooks' work is preserved by the sets above (the database is the state carrier, and vswitchd
+      reads it at start), and the drop-in is idempotent: /etc drop-ins shadow the /usr/lib unit,
+      so an operator re-patch is cleared at the next reload. (4) The failed start still waits out
+      vswitchd's <code>Restart=on-failure</code> recovery and the add-br stays
+      <code>--no-wait</code> behind <code>waitBridge</code>. New helpers
+      <code>vswitchdActive</code>, <code>waitBridge</code>,
+      <code>defuseVswitchdStartHooks</code>. <code>TestApplyOvsSetupOtherConfigBeforeStart</code>
+      rewritten to the layered shape — six subtests pin that a converged OVS is never touched (no
+      stop, no reset, no restart, no drop-in), that a live db with vswitchd down gets drop-in +
+      daemon-reload before the start with all settings and the ownership record pre-start, that a
+      dead db gets stop-switch → stop-server → reset → start-server → waitOvsdb → sets, and the
+      recovery / unrecovered / silent-server paths; the fake distinguishes
+      <code>ovsRunning</code>'s probe from <code>waitOvsdb</code>'s <code>-t 2</code> probe.</li>
   <li><b>0.1.88 — the post-start restart and its waiting writes are gone (final layer of the
       0.1.85 boot-recovery series, measured live on dsx-nwo-267 during the 0.1.87 Tier-1
       deploy).</b> 0.1.87's recovery path worked exactly as designed — the agent logged
@@ -1956,7 +2004,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.88 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.89 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

@@ -1605,6 +1605,12 @@ func (a *Agent) waitOvsdb(timeout time.Duration) error {
 	}
 }
 
+// vswitchdActive reports whether ovs-vswitchd is active right now.
+func (a *Agent) vswitchdActive() bool {
+	out, err := a.hostExec(nil, 15*time.Second, "systemctl", "is-active", "ovs-vswitchd")
+	return err == nil && strings.TrimSpace(out) == "active"
+}
+
 // waitVswitchdActive polls systemctl until ovs-vswitchd reports active:
 // after a failed start the unit is Restart=on-failure, and its automatic
 // second start is the one that succeeds (the first loses the SR-IOV
@@ -1612,8 +1618,7 @@ func (a *Agent) waitOvsdb(timeout time.Duration) error {
 func (a *Agent) waitVswitchdActive(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := a.hostExec(nil, 15*time.Second, "systemctl", "is-active", "ovs-vswitchd")
-		if err == nil && strings.TrimSpace(out) == "active" {
+		if a.vswitchdActive() {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -1621,6 +1626,43 @@ func (a *Agent) waitVswitchdActive(timeout time.Duration) error {
 		}
 		time.Sleep(ovsdbPoll)
 	}
+}
+
+// ovsStartHookDropIn is the systemd drop-in that defuses the SR-IOV Network
+// Operator's ExecStartPre hooks on ovs-vswitchd (see defuseVswitchdStartHooks).
+const ovsStartHookDropIn = `[Service]
+# nodeprep: the SR-IOV Network Operator patches ExecStartPre hooks into this
+# unit whose first command is a WAITING ovs-vsctl write (-t 5). A waiting
+# write blocks until ovs-vswitchd processes it, and ExecStartPre runs before
+# ovs-vswitchd exists — every start attempt burns the 5s alarm and fails
+# before the daemon is ever exec'd, crash-looping the unit indefinitely
+# (measured live: NRestarts=70, vswitchd never once started). An empty
+# ExecStartPre= resets the list so the daemon starts unhooked; the settings
+# the hooks re-applied live in the OVS database, which vswitchd reads at
+# start (maintained by the nodeprep controller).
+ExecStartPre=
+`
+
+// defuseVswitchdStartHooks writes a systemd drop-in that resets the
+// ovs-vswitchd unit's ExecStartPre list and reloads the daemon config. The
+// operator's hooks (live on dsx-nwo-267) open with a waiting ovs-vsctl write
+// that cannot succeed before vswitchd exists — without this, every
+// `systemctl start openvswitch-switch` keeps the crash loop alive. The
+// drop-in is idempotent: /etc drop-ins shadow the /usr/lib unit file, so an
+// operator re-patch of the unit is still cleared at the next daemon-reload.
+func (a *Agent) defuseVswitchdStartHooks() error {
+	dir := filepath.Join(hostToolRoot, "etc/systemd/system/ovs-vswitchd.service.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create ovs-vswitchd drop-in dir: %v", err)
+	}
+	path := filepath.Join(dir, "99-nodeprep-start.conf")
+	if err := os.WriteFile(path, []byte(ovsStartHookDropIn), 0o644); err != nil {
+		return fmt.Errorf("write ovs-vswitchd drop-in: %v", err)
+	}
+	if _, err := a.hostExec(nil, 30*time.Second, "systemctl", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %v", err)
+	}
+	return nil
 }
 
 // waitBridge polls until vswitchd has materialized the bridge's kernel
@@ -1741,52 +1783,88 @@ func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciD
 	return "", fmt.Sprintf("OVS rail bridges verified: %s (hw-offload, doca-eswitch-max %d)", strings.Join(bridges, ", "), numRails)
 }
 
-// applyOvsSetup runs the bash L775-793 sequence, re-ordered (0.1.85) so the
-// five other_config settings land on the OVS database BEFORE
-// openvswitch-switch is started. Live on dsx-nwo-267, ovs-vswitchd's first
-// start failed whenever ovsdb-server had to materialize a fresh conf.db
-// (the reset below removes it): vswitchd's control process — the SR-IOV
-// operator hook — runs `ovs-vsctl -t 5 set Open_vSwitch .
-// external_ids:sriov-operator-owned-keys=…` before ovsdb-server was
-// answering, died on its 5-second alarm (signal 14, exit 142) and took
-// ovs-vswitchd — and with it openvswitch-switch — down; the start failed,
-// ovsSetup diverged again at the next boot, and the node reboot-looped.
-// Starting ovsdb-server alone and applying the settings to the pristine
-// database before the service start gives vswitchd a warm ovsdb-server that
-// already answers, and carries the profile's config into its first read.
-// (0.1.86: the pre-start sets also need --no-wait — a waiting ovs-vsctl
-// write blocks until ovs-vswitchd processes the change, and vswitchd is
-// down in that window by construction; measured live, every pre-start set
-// hung to its timeout while the transaction still committed — every set
-// below carries --no-wait. 0.1.87: the start itself is expected to fail
-// once — vswitchd's cold start loses the operator hook's 5s race — and the
-// step waits out vswitchd's Restart=on-failure second start instead of
-// failing; see the start call below. 0.1.88: the bash's post-start sets
-// and restart are gone — with the settings in the database before
-// vswitchd's first read, a restart re-cold-starts an already-converged
-// vswitchd and only re-arms the hook race — and the add-br, itself a
-// waiting write measured timing out after 30s against the just-recovered
-// still-initializing vswitchd, runs --no-wait with waitBridge polling for
-// the netdev vswitchd materializes when it catches up.)
+// applyOvsSetup brings the node's OVS state to the profile: the five
+// other_config settings on the database and one br-rail-rN bridge per rail.
+//
+// 0.1.85 re-ordered the bash L775-793 sequence so the settings land BEFORE
+// openvswitch-switch starts (live on dsx-nwo-267, vswitchd's first start
+// failed whenever ovsdb-server had to materialize a fresh conf.db — its
+// control process died on a 5-second alarm and took the unit down; starting
+// ovsdb-server alone first gives vswitchd a warm database that already
+// carries the profile's config into its first read). 0.1.86 made every
+// ovs-vsctl write --no-wait: a waiting write blocks until ovs-vswitchd
+// processes the change (measured live: the transaction still committed, only
+// the wait hung). 0.1.87 waits out vswitchd's Restart=on-failure second
+// start when the first start fails. 0.1.88 dropped the bash's post-start
+// sets and restart (a restart re-cold-starts a converged vswitchd) and made
+// the add-br --no-wait behind a waitBridge netdev poll.
+//
+// 0.1.89 restructured the apply around the measured boot behavior (live on
+// dsx-nwo-267, boot #27-29): the SR-IOV Network Operator patches TWO
+// ExecStartPre hooks into the host's ovs-vswitchd unit, each opening with a
+// WAITING `ovs-vsctl -t 5 set … external_ids:sriov-operator-owned-keys` —
+// a write that blocks until ovs-vswitchd processes it, running BEFORE
+// ovs-vswitchd exists. Every systemd start attempt therefore burns the
+// hook's 5s alarm and dies (exit 142) before ExecStart ever runs, and the
+// unit crash-loops forever (measured: NRestarts=70, vswitchd never once
+// activated). So:
+//   - when ovsdb-server is ANSWERING (the common boot state — the operator
+//     brings it up early, even while vswitchd crash-loops), the apply NEVER
+//     stops, resets, or restarts anything: the settings and bridges are
+//     --no-wait writes into the live database, vswitchd picks them up when
+//     it comes up, and a running vswitchd processes them immediately. The
+//     destructive reset's "drop any OVS state outside the rails" contract
+//     is moot when ovsdb-server is not answering at all — there is no state
+//     to drop;
+//   - the destructive reset (stop both units, remove conf.db, start
+//     ovsdb-server) runs only when ovsdb-server is not answering — and
+//     stops ovsdb-server first, because a running-but-wedged server would
+//     keep serving the removed file's inode (measured: an rm under a live
+//     server leaves the writes going into a deleted database);
+//   - before any start of openvswitch-switch, the operator's ExecStartPre
+//     hooks are defused with a systemd drop-in (defuseVswitchdStartHooks) —
+//     without it the start itself is what keeps the crash loop alive;
+//   - a start that fails still waits out vswitchd's on-failure restart, and
+//     only a vswitchd that never activates fails the step.
 func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
-	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
-		return fmt.Errorf("stop openvswitch-switch: %v", err)
+	if !a.ovsRunning() {
+		if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
+			return fmt.Errorf("stop openvswitch-switch: %v", err)
+		}
+		// Stop ovsdb-server too: a running-but-wedged server would keep
+		// serving the removed conf.db's inode — the sets below would land
+		// in a deleted database and vanish with it.
+		if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "ovsdb-server"); err != nil {
+			return fmt.Errorf("stop ovsdb-server: %v", err)
+		}
+		// The bash removes the OVS database so the DOCA other_config lands
+		// on a pristine one; bridges and flows outside the rails are dropped
+		// too — the bash's contract, kept (and now only reachable when the
+		// database is not being served at all).
+		if err := os.Remove("/host/var/lib/openvswitch/conf.db"); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("reset /var/lib/openvswitch/conf.db: %v", err)
+		}
+		if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "ovsdb-server"); err != nil {
+			return fmt.Errorf("start ovsdb-server: %v", err)
+		}
+		// ovsdb-server is active as soon as systemd forks it, but its socket
+		// (and a freshly created conf.db's Open_vSwitch row) can lag; poll
+		// until ovs-vsctl answers so the sets land on the database, not the
+		// void.
+		if err := a.waitOvsdb(ovsdbWait); err != nil {
+			return err
+		}
 	}
-	// The bash removes the OVS database so the DOCA other_config lands on a
-	// pristine one; bridges and flows outside the rails are dropped too —
-	// the bash's contract, kept.
-	if err := os.Remove("/host/var/lib/openvswitch/conf.db"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reset /var/lib/openvswitch/conf.db: %v", err)
-	}
-	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "ovsdb-server"); err != nil {
-		return fmt.Errorf("start ovsdb-server: %v", err)
-	}
-	// ovsdb-server is active as soon as systemd forks it, but its socket (and
-	// a freshly created conf.db's Open_vSwitch row) can lag; poll until
-	// ovs-vsctl answers so the sets land on the database, not the void.
-	if err := a.waitOvsdb(ovsdbWait); err != nil {
-		return err
-	}
+	// The profile's other_config, on the database — always, in both paths:
+	// on a fresh database before vswitchd's first read (the 0.1.85 fix), and
+	// on a live one where the SR-IOV operator's boot churn wipes the keys it
+	// owns (the original incident). Every write carries --no-wait (measured
+	// live, 0.1.86): a waiting ovs-vsctl write blocks until ovs-vswitchd
+	// processes the change, and vswitchd may be down or mid-churn here —
+	// every waiting set hung to its timeout while the transaction still
+	// committed. --no-wait is the mode ovs-ctl itself uses for its startup
+	// config; the commit lands immediately and a starting vswitchd reads the
+	// settings from the database at its first read.
 	sets := [][2]string{
 		{"doca-init", "true"},
 		{"hw-offload", "true"},
@@ -1794,44 +1872,53 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		{"max-idle", "300000"},
 		{"doca-eswitch-max", strconv.Itoa(len(rails))},
 	}
-	// The profile's other_config, on the database before the service starts —
-	// the 0.1.85 boot-recovery fix (function comment). Every write below
-	// carries --no-wait (measured live on dsx-nwo-267, 0.1.86): a waiting
-	// ovs-vsctl write blocks until ovs-vswitchd processes the change, and
-	// vswitchd is down here by construction — every set hung to its timeout
-	// while the transaction still committed. --no-wait is the mode ovs-ctl
-	// itself uses for its startup config (`ovs-vsctl --no-wait -- init --
-	// set Open_vSwitch . db-version=…` in the ovsdb-server unit's own
-	// journal); the commit lands immediately and vswitchd reads the settings
-	// from the database at its first start. The bash's post-start sets and
-	// restart are gone (0.1.88): with the settings in the db before
-	// vswitchd's first read, a restart re-cold-starts vswitchd after
-	// everything has already converged and only re-arms the hook race.
 	for _, kv := range sets {
 		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
 			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
 		}
 	}
-	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
-		// vswitchd's FIRST start after our reset loses a fixed race on this
-		// cluster: its SR-IOV-operator control hook (`ovs-vsctl -t 5 set …
-		// external_ids:sriov-operator-owned-keys`) waits for vswitchd to
-		// process the change, vswitchd's cold DPDK init beats the 5s alarm,
-		// and the hook takes the unit down — the boot journal, 0.1.86's
-		// "start openvswitch-switch: exit status 1", and 0.1.84's identical
-		// failure are all this one race. vswitchd is Restart=on-failure and
-		// its automatic second start succeeds (measured live: NRestarts=1,
-		// active one second later) — wait for it instead of failing the
-		// step; only a vswitchd that never activates is a real failure.
-		if werr := a.waitVswitchdActive(vswitchWait); werr != nil {
-			return fmt.Errorf("start openvswitch-switch: %v (vswitchd did not recover: %v)", err, werr)
-		}
-		a.logf("start openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
+	// Preserve the operator's ownership record: the ExecStartPre hooks the
+	// drop-in below clears also wrote external_ids:sriov-operator-owned-keys
+	// (the union of this cluster's two hook lines). The config-daemon keys
+	// its own cleanup cycles off that record; --no-wait, for the same reason
+	// as the sets.
+	owned := "hw-offload doca-init hw-offload-ct-size max-idle"
+	if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".",
+		"external_ids:sriov-operator-owned-keys=\""+owned+"\""); err != nil {
+		return fmt.Errorf("set external_ids:sriov-operator-owned-keys: %v", err)
 	}
-	// The bash's post-start sets and restart are gone (0.1.88 — function
-	// comment): the settings are already on the database, vswitchd reads
-	// them at its first start, and a restart here would re-cold-start a
-	// converged vswitchd.
+	// The start. openvswitch-switch is a oneshot wrapper requiring
+	// ovsdb-server and ovs-vswitchd, so starting it brings up whatever is
+	// missing — and when vswitchd is already active it is a no-op, which is
+	// the whole point of the layered structure above: a running, converged
+	// OVS is never touched.
+	if !a.vswitchdActive() {
+		// Defuse the operator's ExecStartPre hooks BEFORE the start: each
+		// hook opens with a waiting `ovs-vsctl -t 5 set …
+		// external_ids:sriov-operator-owned-keys` that runs before vswitchd
+		// exists and can only die on its 5s alarm — every systemd start
+		// attempt fails before ExecStart runs, and the unit crash-loops
+		// forever (measured live, dsx-nwo-267 boot #29: NRestarts=70 with
+		// vswitchd never once reaching ExecStart). The hooks' work — the
+		// ownership record and the key re-apply — is preserved by the sets
+		// above; the db is the state carrier, and vswitchd reads it at
+		// start.
+		if err := a.defuseVswitchdStartHooks(); err != nil {
+			return err
+		}
+		if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
+			// vswitchd's first start can still lose its control race or
+			// fail its cold DPDK init over 8 emulated CX-7s (measured live:
+			// "Cannot allocate memory" while the hugepage pool was still
+			// settling). The unit is Restart=on-failure — wait for its own
+			// restart instead of failing the step; only a vswitchd that
+			// never activates is a real failure.
+			if werr := a.waitVswitchdActive(vswitchWait); werr != nil {
+				return fmt.Errorf("start openvswitch-switch: %v (vswitchd did not recover: %v)", err, werr)
+			}
+			a.logf("start openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
+		}
+	}
 	mtu := ovsRailsMTU(profile)
 	for _, d := range sortedByPci(rails) {
 		br := "br-rail-" + d.rail

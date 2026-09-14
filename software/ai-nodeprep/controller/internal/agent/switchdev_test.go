@@ -133,34 +133,28 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 	}
 }
 
-// The 0.1.85/0.1.86 boot-recovery fix: applyOvsSetup must land the five
-// other_config settings on the OVS database BEFORE openvswitch-switch is
-// started, and those pre-start sets must carry --no-wait. Live on
-// dsx-nwo-267: ovs-vswitchd's first start raced its SR-IOV operator control
-// hook against a freshly created conf.db — the hook timed out (signal 14)
-// and took the unit down, ovsSetup Failed, and the node reboot-looped
-// (0.1.85's fix starts ovsdb-server alone first); then 0.1.85's own pre-start
-// sets hung to their 30s timeouts because a waiting ovs-vsctl write blocks
-// until ovs-vswitchd processes the change and vswitchd is down in that
-// window by construction (measured: the transaction still committed, reads
-// stayed instant, fsync 2ms — only the wait was broken). --no-wait is the
-// mode ovs-ctl uses for its own startup config. And the start itself is
-// expected to fail once (0.1.87): vswitchd's cold start loses the operator
-// hook's 5s race and its Restart=on-failure second start succeeds — the
-// step waits that recovery out, and only a vswitchd that never activates
-// is a real failure. 0.1.88: the bash's post-start sets and restart are
-// gone — with the settings in the database before vswitchd's first read, a
-// restart re-cold-starts a converged vswitchd and only re-arms the hook
-// race — and the add-br carries --no-wait with waitBridge polling for the
-// kernel netdev (a waiting add-br timed out after 30s against the
-// just-recovered, still-initializing vswitchd). Also pinned: the settings
-// are on the database even when the start never recovers (the next boot
-// must find them), and a silent ovsdb-server stops the start attempt
-// entirely.
+// The 0.1.85→0.1.89 boot-recovery arc, pinned command by command. Live on
+// dsx-nwo-267 boots #27-29 the SR-IOV Network Operator's patched
+// ExecStartPre hooks turned every ovs-vswitchd start into a crash loop
+// (NRestarts=70): each hook opens with a WAITING ovs-vsctl -t 5 write that
+// runs before vswitchd exists and dies on its 5s alarm before ExecStart —
+// h00, whose unit was never patched, stayed healthy throughout. 0.1.89 is
+// therefore layered so a live, converged OVS is never touched: the five
+// other_config settings plus the operator's ownership record land on the
+// database with --no-wait in both paths (a waiting write blocks until
+// vswitchd processes it — measured live in 0.1.86 — and vswitchd may be
+// down or mid-churn here); the destructive conf.db reset only runs when
+// ovsdb-server is not answering at all (a wedged server would otherwise
+// keep serving the removed database's deleted inode); and before any start
+// the operator's hooks are defused with a systemd drop-in that resets
+// ExecStartPre, so the daemon actually reaches ExecStart. A failed start
+// waits out vswitchd's Restart=on-failure recovery (0.1.87), the add-br
+// carries --no-wait behind waitBridge's netdev poll (0.1.88), and only a
+// vswitchd that never activates is a real failure.
 func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
-	oldPoll, oldWait, oldVsw := ovsdbPoll, ovsdbWait, vswitchWait
-	ovsdbPoll, ovsdbWait, vswitchWait = time.Millisecond, 5*time.Millisecond, 5*time.Millisecond
-	defer func() { ovsdbPoll, ovsdbWait, vswitchWait = oldPoll, oldWait, oldVsw }()
+	oldPoll, oldWait, oldVsw, oldBr := ovsdbPoll, ovsdbWait, vswitchWait, bridgeWait
+	ovsdbPoll, ovsdbWait, vswitchWait, bridgeWait = time.Millisecond, 5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond
+	defer func() { ovsdbPoll, ovsdbWait, vswitchWait, bridgeWait = oldPoll, oldWait, oldVsw, oldBr }()
 
 	rails := []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}
 	profile := &v1alpha1.NodePrepProfile{}
@@ -170,17 +164,27 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		{"doca-init", "true"}, {"hw-offload", "true"}, {"hw-offload-ct-size", "0"},
 		{"max-idle", "300000"}, {"doca-eswitch-max", "1"}, // one rail
 	} {
-		wantSets = append(wantSets, "ovs-vsctl other_config:"+kv[0]+"="+kv[1])
+		wantSets = append(wantSets, "ovs-vsctl --no-wait other_config:"+kv[0]+"="+kv[1])
 	}
+	const wantOwned = `ovs-vsctl --no-wait external_ids:sriov-operator-owned-keys="hw-offload doca-init hw-offload-ct-size max-idle"`
 
 	// run drives applyOvsSetup against a scripted host: every command is
-	// recorded in order; the ovs-vsctl poll answers per `answer`,
-	// openvswitch-switch starts fail per `startFails`, and
-	// `systemctl is-active ovs-vswitchd` reports "active" per `vsActive`
-	// ("" — the empty string — means the unit never activates).
-	run := func(t *testing.T, startFails bool, vsActive string, answer func() (string, error)) ([]string, error) {
+	// recorded in order. db scripts ovsRunning's probe — "up" (a live
+	// database answers), "down" (the probe fails but the freshly started
+	// ovsdb-server answers waitOvsdb), "silent" (nothing ever answers).
+	// startFails fails the openvswitch-switch start; vsActive scripts
+	// `systemctl is-active ovs-vswitchd` — "active" (always), "" (never),
+	// "recover" (down until the first start attempt, then up — the shape of
+	// vswitchd's Restart=on-failure second start). The drop-in path is
+	// returned so subtests can assert on the written file.
+	run := func(t *testing.T, db string, startFails bool, vsActive string) (calls []string, dropIn string, err error) {
 		t.Helper()
-		var calls []string
+		dir := t.TempDir()
+		oldRoot := hostToolRoot
+		hostToolRoot = dir
+		defer func() { hostToolRoot = oldRoot }()
+
+		started := false
 		a := &Agent{
 			mellanoxFns: rails,
 			execFn: func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
@@ -188,23 +192,33 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 				case "systemctl":
 					calls = append(calls, "systemctl "+strings.Join(args, " "))
 					switch {
-					case (args[0] == "start" || args[0] == "restart") && args[1] == "openvswitch-switch" && startFails:
-						return "", fmt.Errorf("A dependency job for openvswitch-switch.service failed")
-					case args[0] == "is-active" && args[1] == "ovs-vswitchd":
-						if vsActive == "active" {
-							return "active\n", nil
+					case args[0] == "start" && args[1] == "openvswitch-switch":
+						started = true
+						if startFails {
+							return "", fmt.Errorf("A dependency job for openvswitch-switch.service failed")
 						}
-						return "", fmt.Errorf("failed")
+					case args[0] == "is-active" && args[1] == "ovs-vswitchd":
+						up := vsActive == "active" || (vsActive == "recover" && started)
+						if !up {
+							return "", fmt.Errorf("failed")
+						}
+						return "active\n", nil
 					}
 					return "", nil
 				case "ovs-vsctl":
 					switch {
+					case args[0] == "get": // ovsRunning's probe
+						if db == "up" {
+							return "uuid\n", nil
+						}
+						return "", fmt.Errorf("database unreachable")
 					case args[0] == "-t": // waitOvsdb's readiness probe
-						return answer()
-					case args[0] == "set" && strings.HasPrefix(args[3], "other_config:"):
-						calls = append(calls, "ovs-vsctl "+args[3])
-						return "", nil
-					case args[0] == "--no-wait" && args[1] == "set" && strings.HasPrefix(args[4], "other_config:"):
+						if db == "silent" {
+							return "", fmt.Errorf("no answer")
+						}
+						return "uuid\n", nil
+					case args[0] == "--no-wait" && args[1] == "set" &&
+						(strings.HasPrefix(args[4], "other_config:") || strings.HasPrefix(args[4], "external_ids:")):
 						calls = append(calls, "ovs-vsctl --no-wait "+args[4])
 						return "", nil
 					case args[0] == "--no-wait" && args[1] == "--may-exist":
@@ -218,22 +232,29 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 				return "", fmt.Errorf("unexpected exec: %s %v", name, args)
 			},
 		}
-		return calls, a.applyOvsSetup(profile, rails)
+		dropIn = filepath.Join(dir, "etc/systemd/system/ovs-vswitchd.service.d/99-nodeprep-start.conf")
+		return calls, dropIn, a.applyOvsSetup(profile, rails)
 	}
 
-	// preStartSets checks the sets recorded before the start attempt: all
-	// five, in order, each carrying --no-wait (a waiting ovs-vsctl write
+	// indexOf returns the first index of a recorded call, or -1.
+	indexOf := func(calls []string, want string) int {
+		for i, c := range calls {
+			if c == want {
+				return i
+			}
+		}
+		return -1
+	}
+	// setsBefore counts the five other_config sets recorded before index
+	// start, in order, each carrying --no-wait (a waiting ovs-vsctl write
 	// blocks until vswitchd processes the change — vswitchd is down in this
 	// window, measured live on dsx-nwo-267 in 0.1.85).
-	preStartSets := func(t *testing.T, calls []string, start int) int {
+	setsBefore := func(t *testing.T, calls []string, start int) int {
 		t.Helper()
 		n := 0
 		for _, c := range calls[:start] {
-			if strings.HasPrefix(c, "ovs-vsctl ") && strings.Contains(c, "other_config:") {
-				if !strings.Contains(c, "--no-wait") {
-					t.Fatalf("pre-start set %q must carry --no-wait (vswitchd is down in this window)", c)
-				}
-				if c != "ovs-vsctl --no-wait "+strings.TrimPrefix(wantSets[n], "ovs-vsctl ") {
+			if strings.HasPrefix(c, "ovs-vsctl --no-wait other_config:") {
+				if n >= len(wantSets) || c != wantSets[n] {
 					t.Fatalf("pre-start set %d = %q, want %q", n, c, wantSets[n])
 				}
 				n++
@@ -241,113 +262,152 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		}
 		return n
 	}
-	startIndex := func(t *testing.T, calls []string) int {
+	// ownedBefore pins the operator's ownership record before index start.
+	ownedBefore := func(t *testing.T, calls []string, start int) {
 		t.Helper()
-		for i, c := range calls {
-			if c == "systemctl start openvswitch-switch" {
-				return i
+		for _, c := range calls[:start] {
+			if c == wantOwned {
+				return
 			}
 		}
-		t.Fatalf("openvswitch-switch was never started: %v", calls)
-		return -1
+		t.Fatalf("the operator ownership record must be set before the start: %v", calls)
 	}
 
-	t.Run("settings land before the start", func(t *testing.T) {
-		calls, err := run(t, false, "active", func() (string, error) { return "uuid\n", nil })
+	t.Run("a live db is never reset or restarted", func(t *testing.T) {
+		// 0.1.89's core invariant, from the h00/h01 comparison: a healthy
+		// node's OVS (h00's unit was never patched by the operator and its
+		// vswitchd ran fine) must be left entirely alone — no stop, no db
+		// reset, no restart, no drop-in. Only the idempotent db writes and
+		// the bridge walk run.
+		calls, dropIn, err := run(t, "up", false, "active")
+		if err != nil {
+			t.Fatalf("applyOvsSetup on a converged node: %v", err)
+		}
+		if _, err := os.Stat(dropIn); !os.IsNotExist(err) {
+			t.Fatalf("a live db with vswitchd active must not write the hook drop-in: %v", err)
+		}
+		for _, c := range calls {
+			if strings.HasPrefix(c, "systemctl stop") || c == "systemctl start ovsdb-server" ||
+				c == "systemctl start openvswitch-switch" || c == "systemctl daemon-reload" {
+				t.Fatalf("a converged OVS must not be touched, got %q", c)
+			}
+		}
+		for _, want := range wantSets {
+			if indexOf(calls, want) < 0 {
+				t.Fatalf("missing %q: %v", want, calls)
+			}
+		}
+		if indexOf(calls, wantOwned) < 0 {
+			t.Fatalf("missing the operator ownership record: %v", calls)
+		}
+		if indexOf(calls, "ovs-vsctl --no-wait add-br br-rail-r0") < 0 {
+			t.Fatalf("the bridge walk must still run: %v", calls)
+		}
+	})
+
+	t.Run("a live db with vswitchd down gets defused hooks before the start", func(t *testing.T) {
+		// The measured h01 shape (boots #27-29): the database is fine, the
+		// operator's ExecStartPre hooks crash-loop the start (NRestarts=70,
+		// vswitchd never reached ExecStart). The db must be left alone, the
+		// hooks defused via drop-in + daemon-reload BEFORE the start, and
+		// the settings already on the db for vswitchd's first read.
+		calls, dropIn, err := run(t, "up", false, "")
 		if err != nil {
 			t.Fatalf("applyOvsSetup: %v", err)
 		}
-		firstSet := -1
-		for i, c := range calls {
-			if strings.HasPrefix(c, "ovs-vsctl ") && strings.Contains(c, "other_config:") {
-				firstSet = i
-				break
+		for _, c := range calls {
+			if strings.HasPrefix(c, "systemctl stop") || c == "systemctl start ovsdb-server" {
+				t.Fatalf("a live db must not be reset, got %q", c)
 			}
 		}
-		start := startIndex(t, calls)
-		if firstSet < 0 || firstSet > start {
-			t.Fatalf("the five other_config settings must precede start openvswitch-switch: %v", calls)
+		data, err := os.ReadFile(dropIn)
+		if err != nil {
+			t.Fatalf("the hook-defusing drop-in must be written before any start: %v", err)
 		}
-		ovsdbStart := -1
-		for i, c := range calls {
-			if c == "systemctl start ovsdb-server" {
-				ovsdbStart = i
-			}
+		if !strings.Contains(string(data), "ExecStartPre=") {
+			t.Fatalf("the drop-in must reset ExecStartPre, got %q", data)
 		}
-		if ovsdbStart < 0 || ovsdbStart > firstSet {
-			t.Fatalf("ovsdb-server must start before the sets: %v", calls)
+		start := indexOf(calls, "systemctl start openvswitch-switch")
+		if start < 0 {
+			t.Fatalf("openvswitch-switch was never started: %v", calls)
 		}
-		if n := preStartSets(t, calls, start); n != len(wantSets) {
+		if reload := indexOf(calls, "systemctl daemon-reload"); reload < 0 || reload > start {
+			t.Fatalf("daemon-reload must precede the start: %v", calls)
+		}
+		if n := setsBefore(t, calls, start); n != len(wantSets) {
 			t.Fatalf("want all %d settings pre-start, got %d: %v", len(wantSets), n, calls)
 		}
-		// The add-br is --no-wait too (0.1.88): a waiting add-br blocked
-		// until vswitchd processed the change and timed out after 30s
-		// against the just-recovered, still-initializing vswitchd. No other
-		// other_config writes may follow the start — the bash's post-start
-		// sets and restart are gone.
-		sawAddBr := 0
-		for i, c := range calls {
-			if strings.Contains(c, "add-br") {
-				if !strings.HasPrefix(c, "ovs-vsctl --no-wait add-br") {
-					t.Fatalf("add-br %q must carry --no-wait", c)
-				}
-				if i < start {
-					t.Fatalf("add-br %q ran before the start", c)
-				}
-				sawAddBr++
-			} else if i >= start && strings.Contains(c, "other_config:") {
-				t.Fatalf("no other_config writes after the start (post-start sets are gone), got %q", c)
-			}
+		ownedBefore(t, calls, start)
+	})
+
+	t.Run("a dead db is reset and ovsdb-server restarted before the sets", func(t *testing.T) {
+		// The bash's reset contract, now reachable only when ovsdb-server is
+		// not answering at all: stop the wrapper and the server (a wedged
+		// server would keep serving the removed conf.db's deleted inode),
+		// remove the database, start the server, and only once waitOvsdb
+		// sees it answer do the settings land.
+		calls, _, err := run(t, "down", false, "")
+		if err != nil {
+			t.Fatalf("applyOvsSetup: %v", err)
 		}
-		if sawAddBr == 0 {
-			t.Fatalf("no rail bridges created: %v", calls)
+		stopSw := indexOf(calls, "systemctl stop openvswitch-switch")
+		stopDb := indexOf(calls, "systemctl stop ovsdb-server")
+		startDb := indexOf(calls, "systemctl start ovsdb-server")
+		firstSet := indexOf(calls, wantSets[0])
+		if stopSw < 0 || stopDb < stopSw || startDb < stopDb || firstSet < startDb {
+			t.Fatalf("reset order must be stop switch < stop ovsdb-server < start ovsdb-server < sets: %v", calls)
+		}
+		start := indexOf(calls, "systemctl start openvswitch-switch")
+		if start < 0 {
+			t.Fatalf("openvswitch-switch was never started: %v", calls)
+		}
+		if n := setsBefore(t, calls, start); n != len(wantSets) {
+			t.Fatalf("want all %d settings pre-start, got %d: %v", len(wantSets), n, calls)
+		}
+		ownedBefore(t, calls, start)
+		if indexOf(calls, "ovs-vsctl --no-wait add-br br-rail-r0") < 0 {
+			t.Fatalf("the flow must continue past the recovered db: %v", calls)
 		}
 	})
 
 	t.Run("start failure recovers when vswitchd restarts", func(t *testing.T) {
-		// The measured shape (dsx-nwo-267, 0.1.86): the first start fails at
-		// the operator hook's 5s alarm, vswitchd's Restart=on-failure second
-		// start succeeds — the step must ride that recovery to Done, not
-		// fail.
-		calls, err := run(t, true, "active", func() (string, error) { return "uuid\n", nil })
+		// The measured shape (dsx-nwo-267, 0.1.86): the first start fails,
+		// vswitchd's Restart=on-failure second start succeeds — the step
+		// must ride that recovery to Done, not fail.
+		calls, _, err := run(t, "up", true, "recover")
 		if err != nil {
 			t.Fatalf("a vswitchd auto-restart must recover the failed start, got %v", err)
 		}
-		addBr := -1
-		for i, c := range calls {
-			if strings.Contains(c, "add-br") {
-				addBr = i
-			}
+		if indexOf(calls, "systemctl start openvswitch-switch") < 0 {
+			t.Fatalf("the start must have been attempted: %v", calls)
 		}
-		if addBr < 0 {
+		if indexOf(calls, "ovs-vsctl --no-wait add-br br-rail-r0") < 0 {
 			t.Fatalf("the flow must continue past the recovered start: %v", calls)
 		}
 	})
 
 	t.Run("settings survive an unrecovered start", func(t *testing.T) {
-		calls, err := run(t, true, "", func() (string, error) { return "uuid\n", nil })
+		calls, _, err := run(t, "up", true, "")
 		if err == nil || !strings.Contains(err.Error(), "did not recover") {
 			t.Fatalf("a start with a vswitchd that never activates must fail the step, got %v", err)
 		}
-		start := -1
-		for i, c := range calls {
-			if c == "systemctl start openvswitch-switch" {
-				start = i
-			}
+		start := indexOf(calls, "systemctl start openvswitch-switch")
+		if start < 0 {
+			t.Fatalf("the start must have been attempted: %v", calls)
 		}
-		if n := preStartSets(t, calls, start); n != len(wantSets) {
+		if n := setsBefore(t, calls, start); n != len(wantSets) {
 			t.Fatalf("all %d settings must be on the db before a failing start, got %d: %v", len(wantSets), n, calls)
 		}
 	})
 
 	t.Run("a silent ovsdb-server stops the start", func(t *testing.T) {
-		calls, err := run(t, false, "active", func() (string, error) { return "", fmt.Errorf("no answer") })
+		calls, _, err := run(t, "silent", false, "active")
 		if err == nil || !strings.Contains(err.Error(), "did not answer") {
 			t.Fatalf("a never-answering ovsdb-server must fail the wait, got %v", err)
 		}
 		for _, c := range calls {
-			if c == "systemctl start openvswitch-switch" {
-				t.Fatalf("the wrapper must not be started against an unverified db: %v", calls)
+			if c == "systemctl start openvswitch-switch" || strings.Contains(c, "add-br") {
+				t.Fatalf("nothing may run against an unverified db: %v", calls)
 			}
 		}
 	})
