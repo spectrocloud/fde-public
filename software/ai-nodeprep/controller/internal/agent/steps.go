@@ -316,10 +316,14 @@ func appendUnique(list []string, p string) []string {
 	return append(list, p)
 }
 
+// grubCmdlineFile is the kernel's boot cmdline (seam for tests — the unit
+// environment would otherwise read the test process's kernel cmdline).
+var grubCmdlineFile = "/proc/cmdline"
+
 // grubParamInCmdline reports whether the running kernel booted with param
 // (/proc/cmdline is the kernel's, visible from the pod).
 func grubParamInCmdline(param string) bool {
-	if b, err := os.ReadFile("/proc/cmdline"); err == nil {
+	if b, err := os.ReadFile(grubCmdlineFile); err == nil {
 		return grubLineHasParam(string(b), param)
 	}
 	return false
@@ -501,12 +505,26 @@ func expandPkg(pkg, krel string) (string, error) {
 // aptPackages, where the DOCA halt stopped the pass before they could run,
 // and each then armed its own reboot on the next boot: a whole extra boot
 // per fresh node, twice (spcx live walks). Kevin: "all three need to have
-// had the chance to run without preempting the other."
+// had the chance to run without preempting the other." Since 0.1.90 a
+// staged netns_mode is also mirrored onto the kernel cmdline (the SR-IOV
+// Network Operator checks only the ib_core.netns_mode parameter; see the
+// comment at the mirror above).
 func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	fw := profile.Spec.Firmware
 	hb := profile.Spec.HostBoot
 	hasPkgs := fw.DOCA.Deb != "" || len(fw.DOCA.Packages) > 0
 	grubWant := grubWantParams(profile)
+	// Mirror a staged ib_core netns_mode onto the kernel cmdline (Kevin,
+	// dsx-nwo-267 reboot loop): the SR-IOV Network Operator checks ONLY the
+	// ib_core.netns_mode parameter — a modprobe.d-only configuration reads
+	// as unset, the operator's own attempt to set the parameter fails on
+	// Ubuntu, and the node reboots in a loop. The kernel param is the
+	// stronger carrier anyway: it applies however early ib_core loads,
+	// initramfs included, so the dropin and the modprobe.d file say the
+	// same thing in both load paths.
+	if mode := strings.TrimSpace(hb.RDMANetnsMode); mode != "" {
+		grubWant = appendUnique(grubWant, "ib_core.netns_mode="+normNetnsMode(mode))
+	}
 	grubMissing, grubNotRunning := grubParamsStatus(a, grubWant)
 	if !hasPkgs && strings.TrimSpace(hb.RDMANetnsMode) == "" && len(grubWant) == 0 {
 		return v1alpha1.StepDone, "skipped: no DOCA deb or packages, rdmaNetnsMode or hostBoot parameters configured"

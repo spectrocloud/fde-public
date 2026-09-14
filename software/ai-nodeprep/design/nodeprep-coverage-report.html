@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.89</span>
+    <span>nodeprep-v105.sh → controller v0.1.90</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.89</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.90</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,34 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.90 — a staged ib_core netns_mode is mirrored onto the kernel cmdline (Kevin found
+      the dsx-nwo-267 reboot loop's root cause: the SR-IOV Network Operator, not nodeprep).</b>
+      The operator (26.7.0) checks ONLY whether the <code>ib_core.netns_mode=0</code> kernel
+      parameter is set — a netns_mode configured solely through
+      <code>/etc/modprobe.d/ib_core.conf</code>, exactly what nodeprep's rdmaNetnsMode staging
+      (0.1.75) writes, reads as <em>unset</em>. The operator then tries to set the parameter
+      itself, that fails on Ubuntu, and the node reboots — infinitely. Kevin's manual fix:
+      add <code>ib_core.netns_mode=0</code> to the third line of
+      <code>/etc/default/grub.d/90-nodeprep.cfg</code> (the dropin's pairs line, where the
+      managed parameters are re-appended), <code>update-grub</code>, reboot. 0.1.90 reproduces
+      that through the standard machinery: <code>stepAptPackages</code> appends
+      <code>ib_core.netns_mode=&lt;normalized mode&gt;</code> (<code>normNetnsMode</code> folds
+      Y/N/yes/no spellings to 0/1) to the managed grub parameter set whenever the profile stages
+      an rdmaNetnsMode, so <code>grubParamsStatus</code>/<code>stageGrubDropin</code> handle it
+      exactly like hugepages and iommu — the dropin carries it in both the sed-strip and the
+      pairs line, <code>update-grub</code> runs, the quiet <code>GrubChanged</code> reboot
+      applies it, and an arranged-but-not-booted state re-requests without rewriting. The kernel
+      parameter is the stronger carrier anyway: it applies however early ib_core loads
+      (initramfs included), so modprobe.d and the cmdline say the same thing in both load paths.
+      The <code>case ibRefresh</code> reboot (<code>RebootIbCoreNetns</code>) is now reachable
+      only when the module's sysfs disagrees with an already-arranged, already-booted cmdline —
+      the crashed-pass initramfs retry. <code>TestStepAptPackagesIbCoreGrubMirror</code> pins the
+      fresh pass (modprobe.d + dropin + one quiet reboot), the arranged re-request without
+      rewrite, and the post-boot quiet pass (kernel booted with the param, module holds the
+      value → no <code>update-grub</code>, no <code>update-initramfs</code>, no reboot — new
+      <code>grubCmdlineFile</code> seam for <code>/proc/cmdline</code>);
+      <code>TestStepAptPackagesGates</code>' profile-only case now asserts the mirrored dropin
+      and the GrubChanged reason.</li>
   <li><b>0.1.89 — the SR-IOV operator's ExecStartPre hooks are defused before any ovs-vswitchd
       start, and a live OVS is never touched (the real root cause of the 0.1.85-0.1.88 series,
       measured live on dsx-nwo-267 boots #27-29).</b> 0.1.88 deployed and the step failed worse:
@@ -2004,7 +2032,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.89 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.90 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

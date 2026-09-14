@@ -75,7 +75,7 @@ func TestStepAptPackagesGates(t *testing.T) {
 		HostBoot: v1alpha1.HostBootSpec{RDMANetnsMode: "0"},
 		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
 	}}
-	state, msg = stepAptPackages(&Agent{}, np, profile3)
+	state, msg = stepAptPackages(&Agent{hostEtcDir: func() string { return t.TempDir() }}, np, profile3)
 	if state != v1alpha1.StepBlocked || !strings.Contains(msg, "-host-mutations") {
 		t.Fatalf("profile-only, detect-only: got %s %q, want Blocked", state, msg)
 	}
@@ -86,11 +86,19 @@ func TestStepAptPackagesGates(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(etcd, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=0\n" {
 		t.Fatalf("profile-only staging wrote wrong content: %q", got)
 	}
+	// 0.1.90 (Kevin, dsx-nwo-267 reboot loop): the SR-IOV Network Operator
+	// checks ONLY the ib_core.netns_mode kernel parameter, so the staging
+	// must also mirror the mode into the grub dropin.
+	if dropin, err := os.ReadFile(filepath.Join(etcd, "default/grub.d/90-nodeprep.cfg")); err != nil || !strings.Contains(string(dropin), "ib_core.netns_mode=0") {
+		t.Fatalf("profile-only staging must mirror netns_mode on the cmdline dropin (err=%v): %q", err, dropin)
+	}
 	// The staged mode must not wait for someone else's reboot: an ib_core-only
 	// staging requests its own (quiet-checkpoint) reboot — 0.1.75 dropped the
-	// standalone step's request here, and the module never reloaded.
-	if len(a3.pendingReboot) != 1 || a3.pendingReboot[0].reason != v1alpha1.RebootIbCoreNetns {
-		t.Fatalf("profile-only staging must request the ib_core reboot, got %+v", a3.pendingReboot)
+	// standalone step's request here, and the module never reloaded. 0.1.90
+	// routes the request through the mirrored cmdline param, so the reason is
+	// GrubChanged with the same quiet form.
+	if len(a3.pendingReboot) != 1 || a3.pendingReboot[0].reason != v1alpha1.RebootGrubChanged || a3.pendingReboot[0].haltNow {
+		t.Fatalf("profile-only staging must request its reboot via the mirrored cmdline param, got %+v", a3.pendingReboot)
 	}
 }
 
@@ -168,6 +176,108 @@ func TestStepAptPackagesGrubFold(t *testing.T) {
 	for _, c := range calls {
 		if c == "a2:update-grub" {
 			t.Fatalf("an already-correct dropin must not be rewritten: %v", calls)
+		}
+	}
+}
+
+// The 0.1.90 ib_core → cmdline mirror (Kevin, dsx-nwo-267): the SR-IOV
+// Network Operator checks ONLY the ib_core.netns_mode kernel parameter — a
+// modprobe.d-only netns_mode read as unset, the operator's own attempt to
+// set the parameter failed on Ubuntu, and the node reboot-looped. Kevin's
+// manual fix was the nodeprep dropin's pairs line; the mirror reproduces
+// exactly that through the standard idempotent machinery, alongside the
+// profile's other managed parameters. Pinned: the dropin carries the
+// mirrored param alongside the profile's own params, the quiet GrubChanged
+// reboot is requested, an arranged-but-not-running pass re-requests without
+// rewriting, and once the kernel has booted with the param the step goes
+// quiet — no update-grub, no initramfs refresh, no reboot of our own.
+func TestStepAptPackagesIbCoreGrubMirror(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	etc := t.TempDir()
+	var calls []string
+	newAgent := func() *Agent {
+		return &Agent{hostMutations: true, hostEtcDir: func() string { return etc },
+			client: clientfake.NewSimpleClientset(),
+			execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+				calls = append(calls, name)
+				return "", nil
+			}}
+	}
+	yes := true
+	// The live basic-profile shape: hugepages on hostBoot plus rdmaNetnsMode,
+	// the combination that left modprobe.d carrying netns_mode=0 while the
+	// cmdline did not.
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		HostBoot: v1alpha1.HostBootSpec{
+			RDMANetnsMode: "0",
+			Hugepages:     v1alpha1.HugepagesSpec{Pages2M: 5120},
+		},
+		Policy: v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+
+	// Fresh pass: modprobe.d staged, dropin carries the profile params plus
+	// the mirror, update-grub runs, one quiet GrubChanged reboot.
+	calls = nil
+	a := newAgent()
+	state, msg := stepAptPackages(a, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "grub 90-nodeprep.cfg written") {
+		t.Fatalf("fresh mirror pass: got %s %q, want Done with the grub note", state, msg)
+	}
+	if got, _ := os.ReadFile(filepath.Join(etc, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=0\n" {
+		t.Fatalf("modprobe.d content wrong: %q", got)
+	}
+	dropin, err := os.ReadFile(filepath.Join(etc, "default/grub.d/90-nodeprep.cfg"))
+	if err != nil {
+		t.Fatalf("dropin must be written: %v", err)
+	}
+	if !strings.Contains(string(dropin), "hugepages=5120 ib_core.netns_mode=0") &&
+		!strings.Contains(string(dropin), "ib_core.netns_mode=0 hugepages=5120") {
+		t.Fatalf("the dropin pairs line must carry the mirror alongside the profile's params: %q", dropin)
+	}
+	if !strings.Contains(string(dropin), "ib_core.netns_mode=") || !strings.Contains(strings.Split(string(dropin), "\n")[1], "ib_core") {
+		t.Fatalf("the sed strip must clear the mirrored key before re-appending: %q", dropin)
+	}
+	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged || a.pendingReboot[0].haltNow {
+		t.Fatalf("the mirror must ride the quiet GrubChanged reboot, got %+v", a.pendingReboot)
+	}
+
+	// Arranged but not running (an agent restart lost the request): re-request
+	// without rewriting the dropin.
+	calls = nil
+	a2 := newAgent()
+	state, msg = stepAptPackages(a2, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "already arranged") {
+		t.Fatalf("arranged-but-not-running: got %s %q, want Done reporting the arrangement", state, msg)
+	}
+	if len(a2.pendingReboot) != 1 || a2.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
+		t.Fatalf("arranged-but-not-running must re-request the reboot, got %+v", a2.pendingReboot)
+	}
+	for _, c := range calls {
+		if c == "update-grub" {
+			t.Fatalf("an arranged dropin must not be rewritten: %v", calls)
+		}
+	}
+
+	// Post-boot quiet pass: the kernel booted with the mirror and the module
+	// holds the staged value — no staging, no rewrite, no reboot of our own.
+	cmdline := t.TempDir() + "/cmdline"
+	os.WriteFile(cmdline, []byte("ro net.ifnames=4 intel_iommu=on iommu=pt default_hugepagesz=2M hugepagesz=2M hugepages=5120 ib_core.netns_mode=0 quiet\n"), 0o644)
+	oldCmd, oldSys := grubCmdlineFile, ibCoreNetnsSysfs
+	grubCmdlineFile, ibCoreNetnsSysfs = cmdline, filepath.Join(t.TempDir(), "netns_mode")
+	defer func() { grubCmdlineFile, ibCoreNetnsSysfs = oldCmd, oldSys }()
+	os.WriteFile(ibCoreNetnsSysfs, []byte("N\n"), 0o644) // netns_mode=0 in the running module
+	calls = nil
+	a3 := newAgent()
+	state, msg = stepAptPackages(a3, np, profile)
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "kernel cmdline has required parameters") {
+		t.Fatalf("post-boot pass: got %s %q, want Done with the quiet cmdline note", state, msg)
+	}
+	if len(a3.pendingReboot) != 0 {
+		t.Fatalf("a booted mirror must not re-request the reboot, got %+v", a3.pendingReboot)
+	}
+	for _, c := range calls {
+		if c == "update-grub" || c == "update-initramfs" {
+			t.Fatalf("the post-boot pass must be quiet: %v", calls)
 		}
 	}
 }
