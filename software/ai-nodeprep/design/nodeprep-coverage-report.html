@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.87</span>
+    <span>nodeprep-v105.sh → controller v0.1.88</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.87</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.88</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,27 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.88 — the post-start restart and its waiting writes are gone (final layer of the
+      0.1.85 boot-recovery series, measured live on dsx-nwo-267 during the 0.1.87 Tier-1
+      deploy).</b> 0.1.87's recovery path worked exactly as designed — the agent logged
+      <code>restart openvswitch-switch failed (exit status 1); vswitchd recovered via its
+      on-failure restart</code> — but the step then failed at
+      <code>add-br br-rail-r0: ovs-vsctl --may-exist add-br … timed out after 30s</code>. Two
+      flaws in the tail of the flow, both inherited from the bash: the <code>restart</code> had
+      re-cold-started vswitchd <em>after</em> everything had already converged — pure harm, and
+      it re-armed the very hook race 0.1.87 waits out — and the add-br is itself a waiting-mode
+      write, blocking until vswitchd processes the change against a daemon that had
+      cold-started twice in ten seconds and was still initializing its DPDK datapaths.
+      <code>applyOvsSetup</code> now ends at the start (the settings are on the database before
+      vswitchd's first read, so the bash's post-start sets and restart have nothing left to
+      do), and the add-br runs <code>--no-wait</code> — the transaction commits to ovsdb-server
+      immediately — followed by a new <code>waitBridge</code> poll
+      (<code>ip link show dev br-rail-rN</code>, 2s probes, 60s budget) that waits for the
+      kernel netdev vswitchd materializes when it catches up, so the <code>ip link set</code>
+      finds it. <code>TestApplyOvsSetupOtherConfigBeforeStart</code> pins the new shape: the
+      add-br carries <code>--no-wait</code>, runs after the start, no other_config write
+      follows the start, and <code>TestWaitBridge</code> drives the poll's
+      not-yet-materialized and never-materializes paths.</li>
   <li><b>0.1.87 — the failed start waits out vswitchd's on-failure restart (follow-on to 0.1.86,
       measured live on dsx-nwo-267 during the 0.1.86 Tier-1 deploy).</b> The 0.1.86 pre-start sets
       went through clean (<code>--no-wait</code>, all five settings committed — read back on the
@@ -1935,7 +1956,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.87 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.88 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

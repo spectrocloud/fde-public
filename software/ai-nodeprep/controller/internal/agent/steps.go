@@ -1574,14 +1574,15 @@ func (a *Agent) ovsRunning() bool {
 	return err == nil && ovsValue(out) != ""
 }
 
-// ovsdbPoll backs waitOvsdb's and waitVswitchdActive's retry sleep,
-// ovsdbWait / vswitchWait the total budgets applyOvsSetup gives
-// ovsdb-server and ovs-vswitchd to become ready — vars so tests can
-// shrink them.
+// ovsdbPoll backs waitOvsdb's, waitVswitchdActive's, and waitBridge's retry
+// sleep, ovsdbWait / vswitchWait / bridgeWait the total budgets applyOvsSetup
+// gives ovsdb-server, ovs-vswitchd, and the bridge netdevs to become ready —
+// vars so tests can shrink them.
 var (
 	ovsdbPoll   = 2 * time.Second
 	ovsdbWait   = 30 * time.Second
 	vswitchWait = 60 * time.Second
+	bridgeWait  = 60 * time.Second
 )
 
 // waitOvsdb polls until ovs-vsctl gets an answer out of ovsdb-server: the
@@ -1622,11 +1623,31 @@ func (a *Agent) waitVswitchdActive(timeout time.Duration) error {
 	}
 }
 
+// waitBridge polls until vswitchd has materialized the bridge's kernel
+// netdev. The add-br transaction commits to ovsdb-server immediately under
+// --no-wait, but vswitchd creates the netdev only when it processes the
+// change, and the `ip link set` after it fails against a netdev that does
+// not exist yet — 0.1.87 measured the waiting add-br itself timing out
+// after 30s against a vswitchd that had just recovered its failed first
+// start and was still working through cold DPDK init.
+func (a *Agent) waitBridge(br string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := a.hostExec(nil, 10*time.Second, "ip", "link", "show", "dev", br); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("bridge %s did not appear within %s (ovs-vswitchd down or still initializing?)", br, timeout)
+		}
+		time.Sleep(ovsdbPoll)
+	}
+}
+
 // stepOvsSetup implements the DOCA OVS block that closes fn_set_vfs (bash
 // L775-793, switchdev only): stop openvswitch-switch, reset the OVS
 // database, start ovsdb-server alone, apply the hw-offload/doc other_config
-// to the pristine database, start openvswitch-switch, re-assert the config
-// and restart, and create one br-rail-rN bridge per rail (fail-mode=secure,
+// to the pristine database, start openvswitch-switch, and create one
+// br-rail-rN bridge per rail (fail-mode=secure,
 // datapath_type=netdev) brought up at the switchdev MTU. It runs between
 // vfGuids and udevRules — the bash's position: the tail of fn_set_vfs,
 // before the rename/VF bring-up; the PF ports are attached later by
@@ -1736,11 +1757,17 @@ func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciD
 // (0.1.86: the pre-start sets also need --no-wait — a waiting ovs-vsctl
 // write blocks until ovs-vswitchd processes the change, and vswitchd is
 // down in that window by construction; measured live, every pre-start set
-// hung to its timeout while the transaction still committed. See the
-// applyOC call below. 0.1.87: the start itself is expected to fail once —
-// vswitchd's cold start loses the operator hook's 5s race — and the step
-// waits out vswitchd's Restart=on-failure second start instead of
-// failing; see the start call below.)
+// hung to its timeout while the transaction still committed — every set
+// below carries --no-wait. 0.1.87: the start itself is expected to fail
+// once — vswitchd's cold start loses the operator hook's 5s race — and the
+// step waits out vswitchd's Restart=on-failure second start instead of
+// failing; see the start call below. 0.1.88: the bash's post-start sets
+// and restart are gone — with the settings in the database before
+// vswitchd's first read, a restart re-cold-starts an already-converged
+// vswitchd and only re-arms the hook race — and the add-br, itself a
+// waiting write measured timing out after 30s against the just-recovered
+// still-initializing vswitchd, runs --no-wait with waitBridge polling for
+// the netdev vswitchd materializes when it catches up.)
 func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevice) error {
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "stop", "openvswitch-switch"); err != nil {
 		return fmt.Errorf("stop openvswitch-switch: %v", err)
@@ -1768,30 +1795,22 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		{"doca-eswitch-max", strconv.Itoa(len(rails))},
 	}
 	// The profile's other_config, on the database before the service starts —
-	// the 0.1.85 boot-recovery fix (function comment). The pre-start sets
-	// carry --no-wait (measured live on dsx-nwo-267, 0.1.85): a waiting
+	// the 0.1.85 boot-recovery fix (function comment). Every write below
+	// carries --no-wait (measured live on dsx-nwo-267, 0.1.86): a waiting
 	// ovs-vsctl write blocks until ovs-vswitchd processes the change, and
-	// vswitchd is DOWN in this window by construction — every set hung to
-	// its timeout while the transaction still committed. --no-wait is the
-	// mode ovs-ctl itself uses for its startup config (`ovs-vsctl --no-wait
-	// -- init -- set Open_vSwitch . db-version=…` in the ovsdb-server unit's
-	// own journal); the commit lands immediately and vswitchd reads the
-	// settings from the database at its first start.
-	applyOC := func(stage string, noWait bool) error {
-		for _, kv := range sets {
-			args := []string{}
-			if noWait {
-				args = append(args, "--no-wait")
-			}
-			args = append(args, "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1])
-			if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", args...); err != nil {
-				return fmt.Errorf("%s: set other_config:%s: %v", stage, kv[0], err)
-			}
+	// vswitchd is down here by construction — every set hung to its timeout
+	// while the transaction still committed. --no-wait is the mode ovs-ctl
+	// itself uses for its startup config (`ovs-vsctl --no-wait -- init --
+	// set Open_vSwitch . db-version=…` in the ovsdb-server unit's own
+	// journal); the commit lands immediately and vswitchd reads the settings
+	// from the database at its first start. The bash's post-start sets and
+	// restart are gone (0.1.88): with the settings in the db before
+	// vswitchd's first read, a restart re-cold-starts vswitchd after
+	// everything has already converged and only re-arms the hook race.
+	for _, kv := range sets {
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
+			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
 		}
-		return nil
-	}
-	if err := applyOC("pre-start", true); err != nil {
-		return err
 	}
 	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "start", "openvswitch-switch"); err != nil {
 		// vswitchd's FIRST start after our reset loses a fixed race on this
@@ -1809,29 +1828,25 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 		}
 		a.logf("start openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
 	}
-	// The bash applied its sets after the start (vswitchd was already up in
-	// the bash's world); kept as an idempotent re-assertion — the SR-IOV
-	// operator's control hook removes other_config:hw-offload at vswitchd
-	// start before re-setting it — with the restart below re-reading whatever
-	// finally landed. Waiting mode here: vswitchd is up past the start, so
-	// the sets double as proof it processed the config.
-	if err := applyOC("post-start", false); err != nil {
-		return err
-	}
-	if _, err := a.hostExec(nil, 60*time.Second, "systemctl", "restart", "openvswitch-switch"); err != nil {
-		// The restart's start can lose the same hook race (a vswitchd start
-		// is a vswitchd start); same recovery.
-		if werr := a.waitVswitchdActive(vswitchWait); werr != nil {
-			return fmt.Errorf("restart openvswitch-switch: %v (vswitchd did not recover: %v)", err, werr)
-		}
-		a.logf("restart openvswitch-switch failed (%v); vswitchd recovered via its on-failure restart", err)
-	}
+	// The bash's post-start sets and restart are gone (0.1.88 — function
+	// comment): the settings are already on the database, vswitchd reads
+	// them at its first start, and a restart here would re-cold-start a
+	// converged vswitchd.
 	mtu := ovsRailsMTU(profile)
 	for _, d := range sortedByPci(rails) {
 		br := "br-rail-" + d.rail
-		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--may-exist", "add-br", br,
+		// --no-wait: the add-br is a waiting write like the sets — it blocks
+		// until vswitchd processes the change, and 0.1.87 measured it timing
+		// out after 30s against the just-recovered, still-initializing
+		// vswitchd. The transaction commits to ovsdb-server immediately;
+		// waitBridge polls for the netdev vswitchd materializes when it
+		// catches up, so the `ip link set` below finds it.
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "--may-exist", "add-br", br,
 			"--", "set", "br", br, "fail-mode=secure", "datapath_type=netdev"); err != nil {
 			return fmt.Errorf("add-br %s: %v", br, err)
+		}
+		if err := a.waitBridge(br, bridgeWait); err != nil {
+			return err
 		}
 		args := []string{"link", "set", "dev", br}
 		if mtu > 0 {

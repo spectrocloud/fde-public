@@ -148,9 +148,15 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 // expected to fail once (0.1.87): vswitchd's cold start loses the operator
 // hook's 5s race and its Restart=on-failure second start succeeds — the
 // step waits that recovery out, and only a vswitchd that never activates
-// is a real failure. Also pinned: the settings are on the database even
-// when the start never recovers (the next boot must find them), and a
-// silent ovsdb-server stops the start attempt entirely.
+// is a real failure. 0.1.88: the bash's post-start sets and restart are
+// gone — with the settings in the database before vswitchd's first read, a
+// restart re-cold-starts a converged vswitchd and only re-arms the hook
+// race — and the add-br carries --no-wait with waitBridge polling for the
+// kernel netdev (a waiting add-br timed out after 30s against the
+// just-recovered, still-initializing vswitchd). Also pinned: the settings
+// are on the database even when the start never recovers (the next boot
+// must find them), and a silent ovsdb-server stops the start attempt
+// entirely.
 func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 	oldPoll, oldWait, oldVsw := ovsdbPoll, ovsdbWait, vswitchWait
 	ovsdbPoll, ovsdbWait, vswitchWait = time.Millisecond, 5*time.Millisecond, 5*time.Millisecond
@@ -201,8 +207,8 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 					case args[0] == "--no-wait" && args[1] == "set" && strings.HasPrefix(args[4], "other_config:"):
 						calls = append(calls, "ovs-vsctl --no-wait "+args[4])
 						return "", nil
-					case args[0] == "--may-exist":
-						calls = append(calls, "ovs-vsctl add-br "+args[2])
+					case args[0] == "--no-wait" && args[1] == "--may-exist":
+						calls = append(calls, "ovs-vsctl --no-wait add-br "+args[3])
 						return "", nil
 					}
 					return "", fmt.Errorf("unexpected ovs-vsctl: %v", args)
@@ -274,12 +280,27 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		if n := preStartSets(t, calls, start); n != len(wantSets) {
 			t.Fatalf("want all %d settings pre-start, got %d: %v", len(wantSets), n, calls)
 		}
-		// Post-start re-assertion runs waiting-mode: vswitchd is up, and the
-		// sets double as proof it processed the config.
-		for _, c := range calls[start:] {
-			if strings.Contains(c, "other_config:") && strings.Contains(c, "--no-wait") {
-				t.Fatalf("post-start set %q must not carry --no-wait", c)
+		// The add-br is --no-wait too (0.1.88): a waiting add-br blocked
+		// until vswitchd processed the change and timed out after 30s
+		// against the just-recovered, still-initializing vswitchd. No other
+		// other_config writes may follow the start — the bash's post-start
+		// sets and restart are gone.
+		sawAddBr := 0
+		for i, c := range calls {
+			if strings.Contains(c, "add-br") {
+				if !strings.HasPrefix(c, "ovs-vsctl --no-wait add-br") {
+					t.Fatalf("add-br %q must carry --no-wait", c)
+				}
+				if i < start {
+					t.Fatalf("add-br %q ran before the start", c)
+				}
+				sawAddBr++
+			} else if i >= start && strings.Contains(c, "other_config:") {
+				t.Fatalf("no other_config writes after the start (post-start sets are gone), got %q", c)
 			}
+		}
+		if sawAddBr == 0 {
+			t.Fatalf("no rail bridges created: %v", calls)
 		}
 	})
 
@@ -294,7 +315,7 @@ func TestApplyOvsSetupOtherConfigBeforeStart(t *testing.T) {
 		}
 		addBr := -1
 		for i, c := range calls {
-			if strings.HasPrefix(c, "ovs-vsctl add-br") {
+			if strings.Contains(c, "add-br") {
 				addBr = i
 			}
 		}
@@ -360,6 +381,45 @@ func TestWaitOvsdb(t *testing.T) {
 	answer = ""
 	if err := a.waitOvsdb(5 * time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Fatalf("a silent ovsdb-server must time out naming the budget, got %v", err)
+	}
+}
+
+// waitBridge polls until vswitchd materializes the bridge's kernel netdev:
+// the --no-wait add-br commits instantly, but `ip link set` fails against a
+// netdev that does not exist yet, so the poll is what makes the flow
+// survive a vswitchd that is up but still initializing (0.1.88).
+func TestWaitBridge(t *testing.T) {
+	oldPoll := ovsdbPoll
+	ovsdbPoll = time.Millisecond
+	defer func() { ovsdbPoll = oldPoll }()
+
+	a := &Agent{}
+	probes := 0
+	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+		if name != "ip" || args[0] != "link" || args[1] != "show" || args[2] != "dev" {
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		}
+		probes++
+		if probes < 3 {
+			return "", fmt.Errorf("Device %q does not exist", args[3])
+		}
+		return "", nil
+	}
+	if err := a.waitBridge("br-rail-r0", 5*time.Second); err != nil {
+		t.Fatalf("waitBridge once the netdev appears: %v", err)
+	}
+	if probes < 3 {
+		t.Fatalf("waitBridge must poll until the netdev exists, gave up after %d probes", probes)
+	}
+
+	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+		if name != "ip" || args[0] != "link" || args[1] != "show" || args[2] != "dev" {
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		}
+		return "", fmt.Errorf("Device %q does not exist", args[3])
+	}
+	if err := a.waitBridge("br-rail-r0", 5*time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not appear") {
+		t.Fatalf("a netdev that never appears must time out naming the budget, got %v", err)
 	}
 }
 
