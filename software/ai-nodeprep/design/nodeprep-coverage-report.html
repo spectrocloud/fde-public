@@ -1047,7 +1047,18 @@
       label+taint-free, mismatch strips the label and front-runs the taint in one pass,
       mid-walk strips and holds, ignore leaves the label untouched in both boot states
       while the taint contract still applies). De-adoption keeps its leave-as-is posture
-      (the node is released to normal operation, label included).</li>
+      (the node is released to normal operation, label included). Verified live on dsx-new
+      with a full h01 reboot cycle against the operator's
+      <code>sriov-network-config-daemon</code> (now nodeSelector-gated on the worker
+      label): the strip + taint front-run landed <strong>before the agent's boot-detect
+      patch</strong> (the NodePrep still recorded the old bootId when the label was
+      observed gone), the pre-reboot bound pod object was deleted by the DaemonSet
+      controller once the node no longer matched (desired 1 → 0 — the verify window ran
+      with zero daemon pods), and after boot-verify passed the restore took 11s
+      (BootVerified True → label back, taint released, daemon rescheduled desired 0 → 1).
+      Agent restart tolerance rides the same properties: the gate reads only durable API
+      state, so the agent pod's own recreation across the reboot never touched the
+      label.</li>
   <li><b>0.1.93 — <code>pci=realloc</code> joins the VF-demand grub parameters, and the
       netns_mode staging is pinned VF-independent (Kevin, dsx-new).</b> With VFs demanded
       (east-west, or north-south under the offloadEngine gate — the same
