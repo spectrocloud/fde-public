@@ -1059,6 +1059,36 @@
       Agent restart tolerance rides the same properties: the gate reads only durable API
       state, so the agent pod's own recreation across the reboot never touched the
       label.</li>
+  <li><b>0.1.96 — the Ready-phase mlxconfig query reads only the keys it manages:
+      selective <code>q KEY…</code> instead of the full NV dump (Kevin, DSX Air device
+      errors).</b> On DSX Air the emulated NIC was straining under the walk-time query
+      form the boot-verify reused every five minutes: a bare
+      <code>mlxconfig -d &lt;pci&gt; q</code> dumps the device's entire NV parameter
+      table, and the verify pass only ever looks at the handful of keys the profile's
+      flash set could contain. The verify read now asks for exactly those keys —
+      <code>mlxconfig -d &lt;pci&gt; q SRIOV_EN LINK_TYPE_P1 …</code> — and the candidate
+      list is <strong>derived from <code>buildFlashSet</code> itself</strong> (a probe
+      map claims every managed key exposed, the emissions are deduplicated in order), so
+      the verify query and the walk's managed set can never diverge: a key added to
+      <code>buildFlashSet</code> without joining <code>mlxconfigManagedKeys</code> is
+      caught by <code>TestMlxconfigFlashKeysAreManaged</code>'s grid over the full
+      devType × variant × link-type × RoCE-CC × offload × VF-count matrix. A selective
+      read that errors (MFT builds rejecting an unsupported key — the manual probe
+      confirmed a DPU-only key makes the emulated CX-7 exit non-zero) falls back to the
+      bare full query, so pre-0.1.96 semantics survive odd firmware; the walk-time read
+      keeps the full dump by design (its set-build gating wants the complete view and
+      runs once per walk, not every five minutes). For the dsx-new Air ConnectX-7
+      profile the candidates resolve to a 10-key subset (SRIOV_EN, LINK_TYPE_P1,
+      NUM_OF_VFS, the RoCE RTT/CC block, adaptive routing, TX scheduler locality,
+      CC steering) — DPU-only and port-2 keys never enter the argv. Tests:
+      <code>TestMlxconfigVerifyQueriesSelectiveKeys</code> (selective read drift-checks
+      identically, argv is a strict subset),
+      <code>TestMlxconfigVerifySelectiveFallback</code> (failing selective read → bare
+      full query, step still Done), and the selective-argv assertion inside
+      <code>TestMlxconfigBootVerifyDetectOnly</code>. Live on dsx-new: the exact
+      production argv (all 10 keys) exited 0 against the emulated device with values in
+      the same <code>FIXED_VALUE(1)</code> shape the parser already handles, and the
+      agent's own verify pass came back clean on all 8 rails.</li>
   <li><b>0.1.95 — the rdmaNetnsMode vocabulary becomes the operator's words:
       <code>exclusive</code> | <code>shared</code> (Kevin, pre-chart-pack cleanup).</b>
       The CRD's <code>spec.hostBoot.rdmaNetnsMode</code> carried the kernel's raw
