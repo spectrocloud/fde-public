@@ -76,7 +76,7 @@ spec:
 
   hostBoot:
     iommu: auto
-    rdmaNetnsMode: "0" # options ib_core netns_mode=0
+    rdmaNetnsMode: exclusive # ib_core netns_mode=0 (exclusive|shared; legacy "0"/"1" still read)
     hugepages:
       defaultSize: 2M
       pages1G: 0

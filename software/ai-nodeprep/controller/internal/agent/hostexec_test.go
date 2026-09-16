@@ -74,7 +74,9 @@ func TestGrubWantParamsVfGates(t *testing.T) {
 // The 0.1.93 check (Kevin): ib_core.netns_mode must be staged regardless of
 // the VF count — a VF-less profile that carries rdmaNetnsMode still gets the
 // modprobe.d file, the cmdline mirror, and (unlike a VF-carrying profile)
-// no pci=realloc.
+// no pci=realloc. Runs on the 0.1.95 CRD vocabulary ("exclusive") so the new
+// words get full-step proof; the numeric legacy spellings keep their cells
+// in TestStepAptPackagesGates.
 func TestStepAptPackagesNetnsModeIndependentOfVFs(t *testing.T) {
 	np := &v1alpha1.NodePrep{}
 	etc := t.TempDir()
@@ -86,7 +88,7 @@ func TestStepAptPackagesNetnsModeIndependentOfVFs(t *testing.T) {
 	yes := true
 	// No numVFs anywhere — east-west zero, north-south zero and ungated.
 	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
-		HostBoot: v1alpha1.HostBootSpec{RDMANetnsMode: "0"},
+		HostBoot: v1alpha1.HostBootSpec{RDMANetnsMode: "exclusive"},
 		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
 	}}
 	state, msg := stepAptPackages(a, np, profile)
@@ -108,6 +110,48 @@ func TestStepAptPackagesNetnsModeIndependentOfVFs(t *testing.T) {
 	}
 	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
 		t.Fatalf("the staged mirror must still request its reboot, got %+v", a.pendingReboot)
+	}
+}
+
+// The 0.1.95 CRD vocabulary (Kevin): spec.hostBoot.rdmaNetnsMode speaks
+// exclusive | shared — the operator-facing words for the ib_core netns_mode
+// kernel values 0 | 1 — and every staging surface (modprobe.d, cmdline
+// mirror, ledger note) carries the numeric form. Stored profiles predating
+// the CRD change keep their numeric spellings working byte-identically, and
+// an unknown word fails the step loudly instead of staging an option the
+// module would reject at load.
+func TestStepAptPackagesNetnsModeVocabulary(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	yes := true
+	run := func(mode string) (v1alpha1.StepState, string) {
+		etc := t.TempDir()
+		a := &Agent{hostMutations: true, hostEtcDir: func() string { return etc },
+			client: clientfake.NewSimpleClientset(),
+			execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+				return "", nil
+			}}
+		profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+			HostBoot: v1alpha1.HostBootSpec{RDMANetnsMode: mode},
+			Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
+		}}
+		return stepAptPackages(a, np, profile)
+	}
+
+	state, msg := run("exclusive")
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "netns_mode=0 staged") {
+		t.Fatalf("exclusive: got %s %q, want Done with the netns_mode=0 note", state, msg)
+	}
+	state, msg = run("shared")
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "netns_mode=1 staged") {
+		t.Fatalf("shared: got %s %q, want Done with the netns_mode=1 note", state, msg)
+	}
+	state, msg = run("0") // legacy numeric spelling of a pre-0.1.95 stored profile
+	if state != v1alpha1.StepDone || !strings.Contains(msg, "netns_mode=0 staged") {
+		t.Fatalf("legacy \"0\": got %s %q, want Done with the netns_mode=0 note", state, msg)
+	}
+	state, msg = run("always")
+	if state != v1alpha1.StepFailed || !strings.Contains(msg, "unsupported rdmaNetnsMode") {
+		t.Fatalf("unknown word: got %s %q, want Failed with the vocabulary hint", state, msg)
 	}
 }
 
@@ -365,22 +409,22 @@ func TestStepAptPackagesIbCoreGrubMirror(t *testing.T) {
 }
 
 // The folded ib_core netns staging: write-once, per-process dedup for the
-// initramfs refresh, and the running-module check via the sysfs seam.
+// initramfs refresh, and the running-module check via the sysfs seam. The
+// mode arrives canonical (netnsModeCanonical resolved it), so the vocabulary
+// cells here double as the mapping proof: exclusive→0, shared→1.
 func TestStageIbCoreNetns(t *testing.T) {
 	etc := t.TempDir()
 	sys := filepath.Join(t.TempDir(), "netns_mode")
 	a := &Agent{hostEtcDir: func() string { return etc }}
-	p := &v1alpha1.NodePrepProfile{}
 
-	if refresh, err := a.stageIbCoreNetns(p); refresh || err != nil {
+	if refresh, err := a.stageIbCoreNetns(""); refresh || err != nil {
 		t.Fatalf("no mode set: got refresh=%v err=%v, want false/nil", refresh, err)
 	}
 	if _, err := os.Stat(filepath.Join(etc, "modprobe.d/ib_core.conf")); !os.IsNotExist(err) {
 		t.Fatalf("no mode set must not write modprobe.d")
 	}
 
-	p.Spec.HostBoot.RDMANetnsMode = "0"
-	refresh, err := a.stageIbCoreNetns(p)
+	refresh, err := a.stageIbCoreNetns("0")
 	if err != nil || !refresh {
 		t.Fatalf("fresh staging: got refresh=%v err=%v, want true/nil", refresh, err)
 	}
@@ -388,7 +432,7 @@ func TestStageIbCoreNetns(t *testing.T) {
 		t.Fatalf("staged content wrong: %q", got)
 	}
 	// Same process, flag armed: no second refresh for unchanged content.
-	if refresh, _ := a.stageIbCoreNetns(p); refresh {
+	if refresh, _ := a.stageIbCoreNetns("0"); refresh {
 		t.Fatalf("armed process must not re-request the refresh")
 	}
 
@@ -398,7 +442,7 @@ func TestStageIbCoreNetns(t *testing.T) {
 	ibCoreNetnsSysfs = sys
 	t.Cleanup(func() { ibCoreNetnsSysfs = "/sys/module/ib_core/parameters/netns_mode" })
 	a2 := &Agent{hostEtcDir: func() string { return etc }}
-	if refresh, _ := a2.stageIbCoreNetns(p); refresh {
+	if refresh, _ := a2.stageIbCoreNetns("0"); refresh {
 		t.Fatalf("running module matches the staged mode: no refresh pending")
 	}
 
@@ -406,7 +450,30 @@ func TestStageIbCoreNetns(t *testing.T) {
 	// value → the crashed-pass refresh must re-arm.
 	os.WriteFile(sys, []byte("Y\n"), 0o644)
 	a3 := &Agent{hostEtcDir: func() string { return etc }}
-	if refresh, _ := a3.stageIbCoreNetns(p); !refresh {
+	if refresh, _ := a3.stageIbCoreNetns("0"); !refresh {
 		t.Fatalf("staged but not loaded: refresh must be pending (retries a crashed pass)")
+	}
+
+	// 0.1.95 vocabulary (Kevin): the CRD words stage the kernel's numeric
+	// form — byte-identical to the numeric spelling, so re-wording a stored
+	// profile across the CRD change re-stages nothing. "exclusive" must
+	// leave the file from the "0" staging above untouched.
+	a4 := &Agent{hostEtcDir: func() string { return etc }}
+	if _, err := a4.stageIbCoreNetns("exclusive"); err != nil {
+		t.Fatalf("exclusive: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(etc, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=0\n" {
+		t.Fatalf("exclusive must stage netns_mode=0 (byte-identical to \"0\"): %q", got)
+	}
+	etc5 := t.TempDir()
+	a5 := &Agent{hostEtcDir: func() string { return etc5 }}
+	if _, err := a5.stageIbCoreNetns("shared"); err != nil {
+		t.Fatalf("shared: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(etc5, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=1\n" {
+		t.Fatalf("shared must stage netns_mode=1: %q", got)
+	}
+	if _, err := a5.stageIbCoreNetns("always"); err == nil || !strings.Contains(err.Error(), "unsupported rdmaNetnsMode") {
+		t.Fatalf("an unknown mode must fail loudly instead of staging it, got %v", err)
 	}
 }

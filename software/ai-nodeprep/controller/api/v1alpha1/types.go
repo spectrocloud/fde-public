@@ -266,7 +266,12 @@ type Rail struct {
 }
 
 type HostBootSpec struct {
-	IOMMU             string        `json:"iommu,omitempty"` // auto | intel | amd | off
+	IOMMU string `json:"iommu,omitempty"` // auto | intel | amd | off
+	// RDMANetnsMode is exclusive | shared as of 0.1.95 (CRD enum; Kevin) —
+	// the operator-facing words for the ib_core netns_mode kernel values
+	// 0 | 1. The agent maps to the numeric form when staging; the legacy
+	// numeric spellings ("0"/"1") remain readable for stored profiles that
+	// predate the CRD change.
 	RDMANetnsMode     string        `json:"rdmaNetnsMode,omitempty"`
 	Hugepages         HugepagesSpec `json:"hugepages,omitempty"`
 	BootHook          *bool         `json:"bootHook,omitempty"`          // nil = on: render nodeprep-boot.service

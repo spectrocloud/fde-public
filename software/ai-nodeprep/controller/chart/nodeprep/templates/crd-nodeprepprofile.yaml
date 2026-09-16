@@ -216,6 +216,11 @@ spec:
                       enum: [auto, intel, amd, off, ""]
                     rdmaNetnsMode:
                       type: string
+                      # exclusive | shared (0.1.95) — operator-facing words for
+                      # the ib_core netns_mode kernel values 0 | 1. The agent
+                      # maps to the numeric form; "" (or omitted) leaves the
+                      # parameter unmanaged.
+                      enum: ["", exclusive, shared]
                     hugepages:
                       type: object
                       properties:

@@ -341,7 +341,7 @@ spec:
 
   hostBoot:                          <span class="c"># the grub + modprobe + boot-hook surface (§6.2)</span>
     iommu: <span class="s">auto</span>                      <span class="c"># intel_iommu=on | amd_iommu=on by CPU vendor</span>
-    rdmaNetnsMode: <span class="s">0</span>                 <span class="c"># ib_core netns_mode, only written when VFs &gt; 0</span>
+    rdmaNetnsMode: <span class="s">exclusive</span>          <span class="c"># exclusive | shared (kernel 0 | 1, 0.1.95) — staged regardless of VF count</span>
     hugepages: { defaultSize: <span class="s">1G</span>, pages1G: <span class="s">32</span>, pages2M: <span class="s">0</span> }
     bootHook: <span class="s">true</span>                   <span class="c"># render nodeprep-boot.service, runs pre-kubelet</span>
     kubeletStateReset: <span class="s">always</span>        <span class="c"># always | readyCheck | off</span>

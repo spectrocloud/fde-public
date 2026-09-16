@@ -232,6 +232,34 @@ func TestLinkTypeNumAndClamps(t *testing.T) {
 	}
 }
 
+// The 0.1.95 vocabulary mapping (Kevin): the CRD words exclusive|shared
+// resolve to the kernel's 0|1; the numeric spellings of stored profiles that
+// predate the CRD change keep resolving; anything else is a loud error, not
+// a staged option the module would reject at load.
+func TestNetnsModeCanonical(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want string
+	}{
+		{"exclusive", "0"},
+		{"Exclusive ", "0"},
+		{"shared", "1"},
+		{"SHARED", "1"},
+		{"0", "0"},
+		{"1", "1"},
+		{"", ""},
+		{"  ", ""},
+	} {
+		got, err := netnsModeCanonical(c.in)
+		if err != nil || got != c.want {
+			t.Fatalf("netnsModeCanonical(%q) = %q, %v; want %q, nil", c.in, got, err, c.want)
+		}
+	}
+	if _, err := netnsModeCanonical("always"); err == nil || !strings.Contains(err.Error(), "unsupported rdmaNetnsMode") {
+		t.Fatalf("an unknown mode must error, got %v", err)
+	}
+}
+
 func TestMatchesConnectX79(t *testing.T) {
 	for _, c := range []struct {
 		typ  string

@@ -387,7 +387,9 @@ GRUB_CMDLINE_LINUX="$(echo "$GRUB_CMDLINE_LINUX" | xargs)"
 // the unit environment has no /sys/module/ib_core).
 var ibCoreNetnsSysfs = "/sys/module/ib_core/parameters/netns_mode"
 
-// stageIbCoreNetns applies the profile's rdmaNetnsMode as
+// stageIbCoreNetns applies the profile's rdmaNetnsMode (resolved to the
+// kernel's numeric form by netnsModeCanonical — the mapping lives here too,
+// so no caller can stage a word the module would reject) as
 // 'options ib_core netns_mode=<mode>' (bash writes the same file in its
 // SR-IOV block) and reports whether the initramfs snapshot still needs a
 // refresh for it. The work lives inside aptPackages since 0.1.75 (Kevin's
@@ -407,8 +409,11 @@ var ibCoreNetnsSysfs = "/sys/module/ib_core/parameters/netns_mode"
 // pass (file written, refresh never ran) must still converge — it retries
 // on the next process, not every cycle (the flag is set optimistically in
 // refreshIbCoreInitramfs).
-func (a *Agent) stageIbCoreNetns(profile *v1alpha1.NodePrepProfile) (bool, error) {
-	mode := strings.TrimSpace(profile.Spec.HostBoot.RDMANetnsMode)
+func (a *Agent) stageIbCoreNetns(raw string) (bool, error) {
+	mode, err := netnsModeCanonical(raw)
+	if err != nil {
+		return false, err
+	}
 	if mode == "" {
 		return false, nil
 	}
@@ -429,7 +434,7 @@ func (a *Agent) stageIbCoreNetns(profile *v1alpha1.NodePrepProfile) (bool, error
 	if a.ibCoreInitramfs == conf {
 		return false, nil // refreshed (or staged) this process lifetime
 	}
-	if got, err := os.ReadFile(ibCoreNetnsSysfs); err == nil && normNetnsMode(string(got)) == normNetnsMode(mode) {
+	if got, err := os.ReadFile(ibCoreNetnsSysfs); err == nil && normNetnsMode(string(got)) == mode {
 		a.ibCoreInitramfs = conf // already active in the running module
 		return false, nil
 	}
@@ -448,9 +453,9 @@ func (a *Agent) refreshIbCoreInitramfs(env []string) error {
 
 // ibCoreNetnsNote is the ledger note for a staged netns_mode: the running
 // module keeps its value until the reboot the DOCA install (or the walk's
-// mlxconfig work) requests anyway.
+// mlxconfig work) requests anyway. mode arrives canonical (numeric).
 func ibCoreNetnsNote(mode string) string {
-	return "ib_core netns_mode=" + normNetnsMode(mode) + " staged (modprobe.d + initramfs); module reloads at the next reboot"
+	return "ib_core netns_mode=" + mode + " staged (modprobe.d + initramfs); module reloads at the next reboot"
 }
 
 // normNetnsMode folds the parameter spellings together: sysfs reports Y/N,
@@ -463,6 +468,33 @@ func normNetnsMode(v string) string {
 		return "0"
 	}
 	return strings.TrimSpace(v)
+}
+
+// netnsModeCanonical resolves the profile's rdmaNetnsMode to the numeric
+// form the ib_core module actually takes. Since 0.1.95 the CRD (and Palette
+// profiles) speak the operator-facing words — exclusive | shared (Kevin):
+// the kernel parameter keeps its 0 | 1 values, so the agent maps and stages
+// the numeric form everywhere (modprobe.d, cmdline mirror, ledger notes).
+// The numeric spellings stay accepted for stored profiles that predate the
+// CRD change — a re-decoded old profile must not fail, and the normalized
+// staging content is byte-identical, so the 0.1.95 rollout re-stages
+// nothing on clusters already holding netns_mode. Anything else fails
+// loudly instead of staging an option the module would reject at load.
+func netnsModeCanonical(v string) (string, error) {
+	t := strings.TrimSpace(v)
+	if t == "" {
+		return "", nil
+	}
+	switch strings.ToLower(t) {
+	case "exclusive":
+		return "0", nil
+	case "shared":
+		return "1", nil
+	}
+	if n := normNetnsMode(t); n == "0" || n == "1" {
+		return n, nil
+	}
+	return "", fmt.Errorf("unsupported rdmaNetnsMode %q (use \"exclusive\" or \"shared\")", t)
 }
 
 // stepNotConfiguredYet marks provision-side package steps deferred to v0.2;
@@ -518,6 +550,13 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	hb := profile.Spec.HostBoot
 	hasPkgs := fw.DOCA.Deb != "" || len(fw.DOCA.Packages) > 0
 	grubWant := grubWantParams(profile)
+	// Resolve the profile's rdmaNetnsMode to the kernel's numeric form once
+	// (exclusive|shared → 0|1, 0.1.95); every consumer below — modprobe.d,
+	// cmdline mirror, reboot message, ledger note — speaks the numeric form.
+	netnsMode, err := netnsModeCanonical(hb.RDMANetnsMode)
+	if err != nil {
+		return v1alpha1.StepFailed, "ib_core netns_mode: " + err.Error()
+	}
 	// Mirror a staged ib_core netns_mode onto the kernel cmdline (Kevin,
 	// dsx-nwo-267 reboot loop): the SR-IOV Network Operator checks ONLY the
 	// ib_core.netns_mode parameter — a modprobe.d-only configuration reads
@@ -526,11 +565,11 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 	// stronger carrier anyway: it applies however early ib_core loads,
 	// initramfs included, so the dropin and the modprobe.d file say the
 	// same thing in both load paths.
-	if mode := strings.TrimSpace(hb.RDMANetnsMode); mode != "" {
-		grubWant = appendUnique(grubWant, "ib_core.netns_mode="+normNetnsMode(mode))
+	if netnsMode != "" {
+		grubWant = appendUnique(grubWant, "ib_core.netns_mode="+netnsMode)
 	}
 	grubMissing, grubNotRunning := grubParamsStatus(a, grubWant)
-	if !hasPkgs && strings.TrimSpace(hb.RDMANetnsMode) == "" && len(grubWant) == 0 {
+	if !hasPkgs && netnsMode == "" && len(grubWant) == 0 {
 		return v1alpha1.StepDone, "skipped: no DOCA deb or packages, rdmaNetnsMode or hostBoot parameters configured"
 	}
 	if !a.mutationsAllowed(profile) {
@@ -541,7 +580,7 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		return v1alpha1.StepBlocked, blocked + " require -host-mutations and policy.hostMutations"
 	}
 	env := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-	ibRefresh, err := a.stageIbCoreNetns(profile)
+	ibRefresh, err := a.stageIbCoreNetns(netnsMode)
 	if err != nil {
 		return v1alpha1.StepFailed, "ib_core netns_mode: " + err.Error()
 	}
@@ -688,7 +727,7 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		a.requestRebootBg(v1alpha1.RebootGrubChanged, msg, "")
 	case ibRefresh:
 		a.requestRebootBg(v1alpha1.RebootIbCoreNetns,
-			fmt.Sprintf("ib_core netns_mode=%s staged; reboot required to reload ib_core", normNetnsMode(hb.RDMANetnsMode)), "")
+			fmt.Sprintf("ib_core netns_mode=%s staged; reboot required to reload ib_core", netnsMode), "")
 	}
 
 	// --- ledger message: what ran, what it rides ---
@@ -711,7 +750,7 @@ func stepAptPackages(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrep
 		notes = append(notes, "no DOCA packages configured")
 	}
 	if ibRefresh {
-		notes = append(notes, ibCoreNetnsNote(hb.RDMANetnsMode))
+		notes = append(notes, ibCoreNetnsNote(netnsMode))
 	}
 	if len(grubMissing) > 0 {
 		notes = append(notes, fmt.Sprintf("grub 90-nodeprep.cfg written (%s), update-grub ran", strings.Join(grubMissing, " ")))
