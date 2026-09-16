@@ -1037,7 +1037,20 @@
       its quiet <code>GrubChanged</code> reboot, with <code>pci=realloc</code> confirmed
       absent (the SR-IOV Network Operator reads the parameter on every node it manages,
       VFs or not — a VF-gated staging would reintroduce the 0.1.90 reboot loop on VF-less
-      nodes).</li>
+      nodes). Verified live on dsx-new (5th env, chart-deployed 0.1.92 → Tier-1 0.1.93):
+      the nodes boot with <code>pci=realloc</code> already on the kernel cmdline (Kevin's
+      manual MMIO fix, the same shape as the 0.1.90 netns_mode case), so the fresh walk's
+      <code>aptPackages</code> took the quiet path — <code>kernel cmdline has required
+      parameters (intel_iommu=on iommu=pt pci=realloc … ib_core.netns_mode=0)</code>, zero
+      staging churn — proving the new managed set and its detection end-to-end; the h01
+      walk then Failed at Configuring on the env's persistent 0000:0c:00.0 emulation flake
+      (<code>mlxconfig query: exit status 3</code> ×5, survived one node reboot, cleared
+      after the second), and the resumed walk converged: Configuring → Finalizing →
+      <strong>Ready, BootVerified, taint released, worker label restored, one
+      walk-recorded reboot</strong>. The CP (h00) is un-adopted by design there —
+      <code>controlPlane.prep: false</code>, the §3.1 gate silently skips it (no NodePrep,
+      no log), which first read as a controller bug until the profile's CP block was
+      checked.</li>
   <li><b>0.1.92 — an undecodable stored profile is reported, not silently skipped (found in
       the 0.1.91 rollout itself).</b> <code>matchProfile</code> skipped a profile whose
       stored object failed struct decode with a bare <code>continue</code> — so when the
