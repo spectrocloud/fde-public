@@ -362,6 +362,16 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 	}
 	pol := profile.Spec.Policy
 	bootVerified := k8sutil.ConditionStatus(np.Status.Conditions, v1alpha1.ConditionBootVerified) == "True"
+	// bootIDMatch compares the NodePrep's recorded boot against the node's
+	// RUNNING boot (kubelet-reported). A mismatch — or a never-recorded boot
+	// — means the node rebooted and the agent has not yet verified the new
+	// boot. Every reconcile already holds both values, so the node's first
+	// post-boot status post (a node-informer event) triggers the label strip
+	// and the taint front-run within seconds — no waiting for the agent's
+	// boot-detect patch, no NotReady watching (tunnel blips and kubelet
+	// restarts fake those with the bootID unchanged), and no agent-side
+	// change.
+	bootIDMatch := np.Status.BootID != "" && np.Status.BootID == node.Status.NodeInfo.BootID
 
 	// --- Node object: taint + labels (single update with retry) ---
 	labelsWant := map[string]string{}
@@ -378,20 +388,29 @@ func (c *Controller) lifecycle(ctx context.Context, node *corev1.Node, profile *
 	} else {
 		labelsWant[v1alpha1.LegacyLabel] = "\x00delete"
 	}
-	// The worker-role label choreography (design §6.3) reaches workers
-	// always and control-plane nodes only when they carry no control-plane
-	// taint — an untainted CP node is expected to execute workloads, so a
-	// completed prep earns the label there too; a tainted CP node keeps its
-	// role identity untouched in both directions (WorkerLabelApplies).
+	// The worker-role label choreography (design §6.3 as of 0.1.94) reaches
+	// workers always and control-plane nodes only when they carry no
+	// control-plane taint (WorkerLabelApplies), and is gated on the current
+	// boot's verification — the SR-IOV Network Config Daemon's DaemonSet
+	// only schedules onto nodes carrying the label, so the label must be
+	// off for the whole walk and on only a verified boot.
 	if WorkerLabelApplies(node, isCP) {
-		switch WorkerLabelDecision(phase, pol) {
+		switch WorkerLabelDecision(phase, bootVerified, bootIDMatch, pol) {
 		case WorkerLabelSet:
 			labelsWant[v1alpha1.WorkerRoleLabel] = ""
 		case WorkerLabelRemove:
 			labelsWant[v1alpha1.WorkerRoleLabel] = "\x00delete"
 		}
 	}
+	// Taint front-run: on a boot the agent has not confirmed yet the taint
+	// returns immediately, ahead of the agent's boot-detect patch (which
+	// flips BootVerified — TaintShouldExist's signal — at the agent's pace
+	// rather than the first node event). Mid-walk phases already carry the
+	// taint, so this only ever fires on Ready nodes.
 	wantTaint := TaintShouldExist(phase, bootVerified, pol)
+	if !bootIDMatch {
+		wantTaint = wantTaint || pol.TaintsOn()
+	}
 	c.applyNodeChanges(ctx, node, wantTaint, labelsWant, phase, np.Name)
 
 	// --- CAPI pause ---

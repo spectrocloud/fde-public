@@ -97,22 +97,25 @@ const (
 	WorkerLabelRemove
 )
 
-// WorkerLabelDecision implements design §6.3: demoted entering Finalizing,
-// restored at Ready, untouched otherwise. Only when policy says manage
-// (empty means manage, matching the legacy controller's unconditional
-// behavior).
-func WorkerLabelDecision(phase v1alpha1.Phase, policy v1alpha1.PolicySpec) WorkerLabelOp {
+// WorkerLabelDecision implements design §6.3 as of 0.1.94 (Kevin, dsx-new:
+// the SR-IOV Network Config Daemon's DaemonSet only schedules onto nodes
+// carrying this label, so it must never run while nodeprep owns the node —
+// its pod interferes with the walk). The label is OFF for the entire walk
+// and ON only on a Ready node whose CURRENT boot the agent has verified:
+// phase == Ready, the BootVerified condition True, and the NodePrep's
+// recorded bootId matching the node's running bootID — a fresh boot is
+// unverified until the agent's boot-verify pass passes. All three inputs
+// are durable API state, so an agent pod restart, upgrade or crashloop
+// never flaps the label. Only when policy says manage (empty means manage,
+// matching the legacy controller's unconditional behavior).
+func WorkerLabelDecision(phase v1alpha1.Phase, bootVerified, bootIDMatch bool, policy v1alpha1.PolicySpec) WorkerLabelOp {
 	if policy.WorkerRoleLabel != "" && policy.WorkerRoleLabel != "manage" {
 		return WorkerLabelNone
 	}
-	switch phase {
-	case v1alpha1.PhaseFinalizing:
-		return WorkerLabelRemove
-	case v1alpha1.PhaseReady:
+	if phase == v1alpha1.PhaseReady && bootVerified && bootIDMatch {
 		return WorkerLabelSet
-	default:
-		return WorkerLabelNone
 	}
+	return WorkerLabelRemove
 }
 
 // WorkerLabelApplies gates the choreography by node role. Workers always

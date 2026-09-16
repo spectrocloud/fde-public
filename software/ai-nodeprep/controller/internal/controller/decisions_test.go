@@ -133,20 +133,40 @@ func TestExcludeLabelMatch(t *testing.T) {
 
 func TestWorkerLabelDecision(t *testing.T) {
 	pol := v1alpha1.PolicySpec{}
-	if WorkerLabelDecision(v1alpha1.PhaseFinalizing, pol) != WorkerLabelRemove {
-		t.Error("Finalizing must remove the worker label (design §6.3)")
+	// The single ON cell: Ready + boot-verified + the recorded boot is the
+	// node's running boot (0.1.94 — the SR-IOV Network Config Daemon only
+	// schedules onto labelled nodes, so the label must mean "safe to run").
+	if WorkerLabelDecision(v1alpha1.PhaseReady, true, true, pol) != WorkerLabelSet {
+		t.Error("Ready + verified + matching boot must restore the worker label")
 	}
-	if WorkerLabelDecision(v1alpha1.PhaseReady, pol) != WorkerLabelSet {
-		t.Error("Ready must restore the worker label")
+	// A fresh boot the agent has not verified yet — even with a stale
+	// verified condition — must strip it.
+	if WorkerLabelDecision(v1alpha1.PhaseReady, true, false, pol) != WorkerLabelRemove {
+		t.Error("Ready + verified but a NEW boot (bootID mismatch) must remove the label")
 	}
-	for _, p := range []v1alpha1.Phase{v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseColdRebootRequired, v1alpha1.PhaseFailed} {
-		if WorkerLabelDecision(p, pol) != WorkerLabelNone {
-			t.Errorf("phase %v must not touch the worker label", p)
+	if WorkerLabelDecision(v1alpha1.PhaseReady, false, true, pol) != WorkerLabelRemove {
+		t.Error("Ready without boot verification must remove the label")
+	}
+	// The whole walk is off — 0.1.94 tightened the untouched-until-Finalizing
+	// rule to an active strip at every non-Ready phase.
+	for _, p := range []v1alpha1.Phase{v1alpha1.PhasePending, v1alpha1.PhaseProvisioning, v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing, v1alpha1.PhaseColdRebootRequired, v1alpha1.PhaseFailed} {
+		if WorkerLabelDecision(p, true, true, pol) != WorkerLabelRemove {
+			t.Errorf("phase %v must remove the worker label", p)
 		}
 	}
+	// ignore disables management entirely — the label is never touched.
 	ignore := v1alpha1.PolicySpec{WorkerRoleLabel: "ignore"}
-	if WorkerLabelDecision(v1alpha1.PhaseReady, ignore) != WorkerLabelNone {
-		t.Error("workerRoleLabel=ignore must disable management")
+	for _, c := range []struct {
+		p             v1alpha1.Phase
+		ver, matching bool
+	}{
+		{v1alpha1.PhaseReady, true, true},
+		{v1alpha1.PhaseReady, true, false},
+		{v1alpha1.PhaseProvisioning, false, false},
+	} {
+		if WorkerLabelDecision(c.p, c.ver, c.matching, ignore) != WorkerLabelNone {
+			t.Errorf("workerRoleLabel=ignore must disable management (%v %v %v)", c.p, c.ver, c.matching)
+		}
 	}
 }
 

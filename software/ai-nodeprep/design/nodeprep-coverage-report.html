@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.93</span>
+    <span>nodeprep-v105.sh → controller v0.1.94</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.93</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.94</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,34 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.94 — the worker-role label follows the CURRENT boot, and the taint front-runs it
+      (Kevin, dsx-new: the SR-IOV Network Config Daemon's DaemonSet only schedules onto
+      nodes carrying the label — a 30s reconcile was too slow to keep it off a fresh
+      boot).</b> The label decision (§6.3) tightened from "demoted entering Finalizing,
+      restored at Ready" to <strong>ON only on a Ready node whose current boot the agent
+      has verified</strong> — phase Ready AND BootVerified True AND the NodePrep's recorded
+      <code>bootId</code> matching the node's running <code>nodeInfo.bootID</code>; every
+      other cell actively strips it (mid-walk phases included, tightened from
+      untouched-until-Finalizing; Failed included — nodeprep still owns the node). The
+      same <code>bootIDMatch</code> front-runs the taint: a node that rebooted while its
+      status still reads Ready+verified re-taints at its <em>first post-boot status
+      post</em> — a node-informer event, seconds after the kubelet returns — instead of
+      waiting for the agent's boot-detect patch (the controller is the sole taint writer;
+      the agent never touches taints). NotReady-watching was deliberately rejected: tunnel
+      blips and kubelet restarts fake the transition with the bootID unchanged, a
+      controller restart misses it entirely, and the bootID comparison it would need makes
+      it redundant. The whole gate reads only durable API state, so an agent restart,
+      upgrade or crashloop never flaps the label (the inputs cannot change under it); the
+      one pre-existing interaction is a failed agent restart's boot-verify pass flipping
+      BootVerified False — the maintenance window, where the daemon genuinely must not
+      run. <code>WorkerLabelDecision(phase, bootVerified, bootIDMatch, policy)</code>
+      (rewritten <code>TestWorkerLabelDecision</code>: one ON cell, both degraded Ready
+      cells, every mid-walk phase, ignore-disables) and
+      <code>TestLifecycleWorkerLabelBootGate</code> (the full-lifecycle wiring: match keeps
+      label+taint-free, mismatch strips the label and front-runs the taint in one pass,
+      mid-walk strips and holds, ignore leaves the label untouched in both boot states
+      while the taint contract still applies). De-adoption keeps its leave-as-is posture
+      (the node is released to normal operation, label included).</li>
   <li><b>0.1.93 — <code>pci=realloc</code> joins the VF-demand grub parameters, and the
       netns_mode staging is pinned VF-independent (Kevin, dsx-new).</b> With VFs demanded
       (east-west, or north-south under the offloadEngine gate — the same
@@ -2106,7 +2134,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.93 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.94 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
