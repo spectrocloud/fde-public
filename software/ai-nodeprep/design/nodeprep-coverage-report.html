@@ -1085,7 +1085,13 @@
       VF-independence test now runs on the new vocabulary. Live on dsx-new: CRD applied,
       dry-run matrix green, 0.1.95 controller+agent rolled out with the stored
       <code>"0"</code> profile still reconciling (h01 Ready + BootVerified, zero netns
-      staging churn).</li>
+      staging churn). Kevin then pushed the re-worded profile through Palette
+      (<code>basic-profile</code> generation 2, <code>rdmaNetnsMode: exclusive</code>):
+      the designed profile-change re-walk opened every step, and the vocabulary swap was
+      proven semantics-neutral end to end — aptPackages found the cmdline already carrying
+      <code>ib_core.netns_mode=0</code> (normalized from <code>exclusive</code>) and stayed
+      quiet, zero reboots across the whole re-walk, Ready restored with the 0.1.94 label
+      gate stripping and restoring the worker label around it as designed.</li>
   <li><b>0.1.93 — <code>pci=realloc</code> joins the VF-demand grub parameters, and the
       netns_mode staging is pinned VF-independent (Kevin, dsx-new).</b> With VFs demanded
       (east-west, or north-south under the offloadEngine gate — the same
