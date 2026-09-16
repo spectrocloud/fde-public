@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.92</span>
+    <span>nodeprep-v105.sh → controller v0.1.93</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.92</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.93</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1020,6 +1020,24 @@
       DPU-policy skip is silenced the same way by sharing the site. <code>TestMlxconfigSkipLinesLogOnce</code>
       drives two inventory cycles and pins each line at exactly one occurrence, including the
       per-device distinction (two unmapped devices each log their own line once).</li>
+  <li><b>0.1.93 — <code>pci=realloc</code> joins the VF-demand grub parameters, and the
+      netns_mode staging is pinned VF-independent (Kevin, dsx-new).</b> With VFs demanded
+      (east-west, or north-south under the offloadEngine gate — the same
+      <code>dpuNSVFs</code> condition as the iommu block) the kernel must reallocate PCI
+      BAR space or the VF BARs may not fit the firmware's MMIO reservations, so
+      <code>grubWantParams</code> now appends <code>pci=realloc</code> alongside
+      <code>iommu=pt</code>; the parameter rides the same dropin staging, the same
+      <code>GrubChanged</code> reboot decision, and the same cmdline checks as the rest.
+      Two tests pin the shape: <code>TestGrubWantParamsVfGates</code> (EW numVFs 16 →
+      <code>pci=realloc</code>+<code>iommu=pt</code>; NS 8 under offloadEngine → yes; NS 8
+      without the gate → no VF params) and
+      <code>TestStepAptPackagesNetnsModeIndependentOfVFs</code> — the 0.1.90 netns mirror is
+      deliberately <em>not</em> under the VF gate: a VF-less profile carrying
+      <code>rdmaNetnsMode</code> still stages modprobe.d, mirrors the cmdline, and requests
+      its quiet <code>GrubChanged</code> reboot, with <code>pci=realloc</code> confirmed
+      absent (the SR-IOV Network Operator reads the parameter on every node it manages,
+      VFs or not — a VF-gated staging would reintroduce the 0.1.90 reboot loop on VF-less
+      nodes).</li>
   <li><b>0.1.92 — an undecodable stored profile is reported, not silently skipped (found in
       the 0.1.91 rollout itself).</b> <code>matchProfile</code> skipped a profile whose
       stored object failed struct decode with a bare <code>continue</code> — so when the
@@ -2074,7 +2092,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.92 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.93 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 

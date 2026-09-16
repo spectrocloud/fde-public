@@ -29,6 +29,88 @@ func TestIsInstalledStatus(t *testing.T) {
 	}
 }
 
+// grubWantParams' VF gates (Kevin, dsx-new): pci=realloc joins the iommu
+// parameters exactly when VFs are demanded — east-west, or north-south with
+// the offloadEngine gate on. A stale northSouth.numVFs with DPU management
+// off must not wake it (dpuNSVFs semantics, 0.1.84). ib_core.netns_mode is
+// deliberately NOT under either gate — see
+// TestStepAptPackagesNetnsModeIndependentOfVFs.
+func TestGrubWantParamsVfGates(t *testing.T) {
+	contains := func(list []string, s string) bool {
+		for _, v := range list {
+			if v == s {
+				return true
+			}
+		}
+		return false
+	}
+
+	// East-west VFs: iommu=pt and pci=realloc.
+	p := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		EastWest: v1alpha1.EastWestSpec{NumVFs: 16},
+	}}
+	want := grubWantParams(p)
+	if !contains(want, "pci=realloc") || !contains(want, "iommu=pt") {
+		t.Fatalf("EW numVFs 16 must demand iommu=pt + pci=realloc, got %v", want)
+	}
+
+	// North-south VFs count only under the offloadEngine gate.
+	yes := true
+	p = &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		NorthSouth: v1alpha1.NorthSouthSpec{NumVFs: 8, OffloadEngine: true},
+		Policy:     v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	if want = grubWantParams(p); !contains(want, "pci=realloc") {
+		t.Fatalf("NS numVFs 8 with offloadEngine must demand pci=realloc, got %v", want)
+	}
+	p = &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		NorthSouth: v1alpha1.NorthSouthSpec{NumVFs: 8},
+	}}
+	if want = grubWantParams(p); contains(want, "pci=realloc") || contains(want, "iommu=pt") {
+		t.Fatalf("NS numVFs 8 without offloadEngine must demand no VF params, got %v", want)
+	}
+}
+
+// The 0.1.93 check (Kevin): ib_core.netns_mode must be staged regardless of
+// the VF count — a VF-less profile that carries rdmaNetnsMode still gets the
+// modprobe.d file, the cmdline mirror, and (unlike a VF-carrying profile)
+// no pci=realloc.
+func TestStepAptPackagesNetnsModeIndependentOfVFs(t *testing.T) {
+	np := &v1alpha1.NodePrep{}
+	etc := t.TempDir()
+	a := &Agent{hostMutations: true, hostEtcDir: func() string { return etc },
+		client: clientfake.NewSimpleClientset(),
+		execFn: func(_ []string, _ time.Duration, name string, _ bool, _ []string) (string, error) {
+			return "", nil
+		}}
+	yes := true
+	// No numVFs anywhere — east-west zero, north-south zero and ungated.
+	profile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		HostBoot: v1alpha1.HostBootSpec{RDMANetnsMode: "0"},
+		Policy:   v1alpha1.PolicySpec{HostMutations: &yes},
+	}}
+	state, msg := stepAptPackages(a, np, profile)
+	if state != v1alpha1.StepDone {
+		t.Fatalf("VF-less netns-only profile: got %s %q, want Done", state, msg)
+	}
+	if got, _ := os.ReadFile(filepath.Join(etc, "modprobe.d/ib_core.conf")); string(got) != "options ib_core netns_mode=0\n" {
+		t.Fatalf("modprobe.d must be staged at numVFs 0: %q", got)
+	}
+	dropin, err := os.ReadFile(filepath.Join(etc, "default/grub.d/90-nodeprep.cfg"))
+	if err != nil {
+		t.Fatalf("dropin must be written: %v", err)
+	}
+	if !strings.Contains(string(dropin), "ib_core.netns_mode=0") {
+		t.Fatalf("the cmdline mirror must be staged at numVFs 0: %q", dropin)
+	}
+	if strings.Contains(string(dropin), "pci=realloc") {
+		t.Fatalf("pci=realloc must not ride a VF-less profile: %q", dropin)
+	}
+	if len(a.pendingReboot) != 1 || a.pendingReboot[0].reason != v1alpha1.RebootGrubChanged {
+		t.Fatalf("the staged mirror must still request its reboot, got %+v", a.pendingReboot)
+	}
+}
+
 // stepAptPackages decision gates: no configuration skips, detect-only mode
 // blocks, a configured deb missing from the cache fails loudly, and the
 // folded ib_core staging (0.1.75) runs even with no packages configured —

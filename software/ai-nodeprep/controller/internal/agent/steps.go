@@ -221,6 +221,9 @@ func grubWantParams(profile *v1alpha1.NodePrepProfile) []string {
 	}
 	// VFs requested: SRIOV needs the vendor IOMMU on and passthrough on the
 	// next boot (bash fn_init_sw_stage L379-402), regardless of hostBoot.
+	// pci=realloc rides the same condition (Kevin, dsx-new): with VFs
+	// demanded the kernel must reallocate PCI BAR space or the VF BARs may
+	// not fit the firmware's MMIO reservations.
 	if profile.Spec.EastWest.NumVFs > 0 || dpuNSVFs(profile) > 0 {
 		switch grubCPUVendor() {
 		case "intel":
@@ -229,6 +232,7 @@ func grubWantParams(profile *v1alpha1.NodePrepProfile) []string {
 			want = appendUnique(want, "amd_iommu=on")
 		}
 		want = appendUnique(want, "iommu=pt")
+		want = appendUnique(want, "pci=realloc")
 	}
 	if hb.Hugepages.Pages1G > 0 {
 		want = append(want, "default_hugepagesz=1G", fmt.Sprintf("hugepagesz=1G"), fmt.Sprintf("hugepages=%d", hb.Hugepages.Pages1G))
