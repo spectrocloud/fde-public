@@ -71,13 +71,69 @@ func (a *Agent) mlxconfigGet(pci, key string) (string, bool, error) {
 
 // mlxconfigGetAll runs one full `mlxconfig q` per device and parses every
 // KEY VALUE line. The per-key form costs one mlxconfig invocation per key
-// (the Ready-phase verify passes re-read all of them every pass); a single
+// (the walk-time detect re-reads all of them every pass); a single
 // full query carries the same lines. Keys the device does not expose are
 // simply absent from the map. The query dumps the device's whole
 // configuration table, so it runs quiet — the step message (and, with
-// -verbose, the exec log) carries the detail.
+// -verbose, the exec log) carries the detail. Walk-time only since 0.1.96:
+// the Ready-phase verify reads the same keys selectively
+// (mlxconfigGetKeys) because the emulated NV strains under the full dump.
 func (a *Agent) mlxconfigGetAll(pci string) (map[string]string, error) {
 	out, err := a.hostExecQuiet(nil, 30*time.Second, "mlxconfig", "-d", pci, "q")
+	if err != nil {
+		return nil, err
+	}
+	return parseMlxconfigAll(out), nil
+}
+
+// mlxconfigManagedKeys is every NV key nodeprep manages across all device
+// classes — the universe buildFlashSet's emissions live in. Adding a key to
+// buildFlashSet REQUIRES adding it here: the Ready-phase verify reads only
+// these keys, and a key missing from the list would be silently dropped
+// from drift checking (TestMlxconfigFlashKeysAreManaged enforces the
+// coupling over the full class × variant × params matrix).
+var mlxconfigManagedKeys = []string{
+	"SRIOV_EN",
+	"LINK_TYPE_P1", "LINK_TYPE_P2",
+	"NUM_OF_VFS",
+	"MULTIPATH_DSCP",
+	"INTERNAL_CPU_OFFLOAD_ENGINE",
+	"ROCE_RTT_RESP_DSCP_P1", "ROCE_RTT_RESP_DSCP_MODE_P1",
+	"ROCE_RTT_RESP_DSCP_P2", "ROCE_RTT_RESP_DSCP_MODE_P2",
+	"ROCE_ADAPTIVE_ROUTING_EN", "USER_PROGRAMMABLE_CC",
+	"TX_SCHEDULER_LOCALITY_MODE", "ROCE_CC_STEERING_EXT",
+	"ROCE_CC_RTT_TIMESTAMP_FORMAT",
+}
+
+// flashQueryKeys lists the NV keys the profile's flash set could contain
+// for this device: buildFlashSet run against the probe map (every managed
+// key claimed exposed), deduplicated in emission order. Keys the real
+// device then omits from the selective result are exactly the ones addKV's
+// gating would have dropped from the set — the semantics match the
+// full-query era (an unexposed key is skipped, not drift), while a key the
+// walk WOULD manage but the query missed cannot exist: the probe derives
+// the candidates from buildFlashSet itself, so the two can never diverge.
+func flashQueryKeys(a *Agent, d pciDevice, p mlxconfigParams, probe map[string]string) []string {
+	keys := make([]string, 0, len(mlxconfigManagedKeys))
+	seen := map[string]bool{}
+	for _, kv := range buildFlashSet(a, d, probe, p) {
+		if !seen[kv.key] {
+			seen[kv.key] = true
+			keys = append(keys, kv.key)
+		}
+	}
+	return keys
+}
+
+// mlxconfigGetKeys runs one selective `mlxconfig -d <pci> q KEY...` and
+// parses the same KEY VALUE lines (0.1.96, Kevin/DSX Air: the emulated NIC
+// strains under the full-table dump; the verify pass knows exactly which
+// parameters it manages). Keys absent from the result read as unexposed —
+// the same map shape the full query produced, so the gating and drift
+// comparison downstream are unchanged.
+func (a *Agent) mlxconfigGetKeys(pci string, keys []string) (map[string]string, error) {
+	args := append([]string{"-d", pci, "q"}, keys...)
+	out, err := a.hostExecQuiet(nil, 30*time.Second, "mlxconfig", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +364,15 @@ func mlxconfigScope(d pciDevice, profile *v1alpha1.NodePrepProfile) (bool, strin
 // entirely by a transient read, each cycle's reset wiping non-profile NV
 // config. Drift here is reported per key so a divergent NV is at least
 // visible; the walk applies the config.
+//
+// Since 0.1.96 the query itself is selective (Kevin, DSX Air): the emulated
+// NIC strains under the full NV dump and the verify pass errors devices out
+// of boot-verify entirely — and boot-verify already knows exactly which
+// keys it manages. Each device is read with `mlxconfig q KEY...` for the
+// candidate keys its class could manage (derived from buildFlashSet itself,
+// see flashQueryKeys), never the whole table. The walk-time path keeps the
+// full query — its set-build gating wants the complete view and runs once
+// per walk, not every five minutes.
 func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	ew, ns := profile.Spec.EastWest, profile.Spec.NorthSouth
 	lt, ltNS := linkTypeNum(ew.LinkType), linkTypeNum(ns.LinkType)
@@ -319,6 +384,16 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 	if ns.OffloadEngine {
 		dpuOffload = "1"
 	}
+	params := mlxconfigParams{lt: lt, ltNS: ltNS, roceCC: roceCC, dpuOffload: dpuOffload,
+		cnxVFs: fwVFCount(ew.NumVFs), dpuVFs: fwVFCount(ns.NumVFs)}
+	// The probe map claims every managed key is exposed, so buildFlashSet's
+	// support gating passes and its output enumerates exactly what this
+	// device's class could manage — the selective query's key list. Values
+	// are never read from the probe (presence is the only signal).
+	probe := make(map[string]string, len(mlxconfigManagedKeys))
+	for _, k := range mlxconfigManagedKeys {
+		probe[k] = ""
+	}
 
 	var matched, drifted, failures []string
 	var airReverted []string
@@ -329,13 +404,21 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 			}
 			continue
 		}
-		vals, err := a.mlxconfigGetAll(d.pci)
+		vals, err := a.mlxconfigGetKeys(d.pci, flashQueryKeys(a, d, params, probe))
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: query: %v", d.pci, err))
-			continue
+			// Some hardware/MFT builds reject a selective query naming a key
+			// the device does not support (the full-table read tolerates
+			// absence — addKV's gating was built on exactly such devices).
+			// Fall back to the walk-time full query so those devices keep
+			// verifying; a healthy emulation never reaches this, and a device
+			// that fails both reads fails the step as it would have before.
+			a.logf("mlxconfig: selective query failed on %s (%v); falling back to the full table", d.pci, err)
+			if vals, err = a.mlxconfigGetAll(d.pci); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: query: %v", d.pci, err))
+				continue
+			}
 		}
-		flash := buildFlashSet(a, d, vals, mlxconfigParams{lt: lt, ltNS: ltNS, roceCC: roceCC, dpuOffload: dpuOffload,
-			cnxVFs: fwVFCount(ew.NumVFs), dpuVFs: fwVFCount(ns.NumVFs)})
+		flash := buildFlashSet(a, d, vals, params)
 		if len(flash) == 0 {
 			continue
 		}

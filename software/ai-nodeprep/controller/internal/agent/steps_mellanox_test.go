@@ -1301,11 +1301,20 @@ func TestWriteEcnAttrLandsWhereReadbackLooks(t *testing.T) {
 }
 
 // The flash set the DSX Air ConnectX-7 build actually applies (isCx79 CC
-// keys + Air ConnectX branch), in the steady-state full-query shape.
-func mlxconfigAirQuery(out map[string]string) string {
+// keys + Air ConnectX branch), in the steady-state full-query shape. Keys
+// (0.1.96 selective form) filters the output to the requested parameters —
+// the way a real `mlxconfig q KEY...` answers only what was asked.
+func mlxconfigAirQuery(out map[string]string, keys ...string) string {
 	order := []string{"NUM_OF_VFS", "SRIOV_EN", "ROCE_CC_RTT_TIMESTAMP_FORMAT", "ROCE_RTT_RESP_DSCP_P1",
 		"ROCE_RTT_RESP_DSCP_MODE_P1", "ROCE_ADAPTIVE_ROUTING_EN", "USER_PROGRAMMABLE_CC",
 		"TX_SCHEDULER_LOCALITY_MODE", "ROCE_CC_STEERING_EXT", "LINK_TYPE_P1"}
+	var want map[string]bool
+	if len(keys) > 0 {
+		want = map[string]bool{}
+		for _, k := range keys {
+			want[k] = true
+		}
+	}
 	form := map[string]string{
 		"SRIOV_EN":                     "True(%s)",
 		"ROCE_ADAPTIVE_ROUTING_EN":     "True(%s)",
@@ -1318,6 +1327,9 @@ func mlxconfigAirQuery(out map[string]string) string {
 	b.WriteString("Device #0:\n----------\nDevice type: ConnectX7\n\n")
 	b.WriteString("Configurations:                                         Next Boot\n")
 	for _, k := range order {
+		if want != nil && !want[k] {
+			continue
+		}
 		v, ok := out[k]
 		if !ok {
 			continue
@@ -1372,8 +1384,8 @@ func TestMlxconfigBootVerifyDetectOnly(t *testing.T) {
 	var cmds []string
 	a.execFn = func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
 		cmds = append(cmds, name+" "+strings.Join(args, " "))
-		if name == "mlxconfig" && len(args) == 3 && args[2] == "q" {
-			return mlxconfigAirQuery(full), nil
+		if name == "mlxconfig" && len(args) >= 3 && args[2] == "q" {
+			return mlxconfigAirQuery(full, args[3:]...), nil
 		}
 		return "", fmt.Errorf("unexpected exec: %s %v", name, args)
 	}
@@ -1384,6 +1396,12 @@ func TestMlxconfigBootVerifyDetectOnly(t *testing.T) {
 	}
 	if len(cmds) != 1 {
 		t.Fatalf("detect-only must exec only the query, got %v", cmds)
+	}
+	// 0.1.96 (Kevin/DSX Air): the Ready-phase read is selective — exactly the
+	// candidate keys this device's class could manage, never the bare `q`
+	// full-table dump (the emulated NV strains under it).
+	if got, want := queryKeys(cmds[0], t), mlxconfigCandidateKeys(); !equalSets(got, want) {
+		t.Fatalf("the verify query must request exactly the class's candidate keys, got %v\nwant %v\ncmd: %s", got, want, cmds[0])
 	}
 
 	// Drifted NV: Blocked with the per-key detail — and still only queries.
@@ -1462,8 +1480,8 @@ func TestMlxconfigAirAdaptiveRevertNotDrift(t *testing.T) {
 			mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", variant: variant, rail: "r0"}},
 			execFn: func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
 				cmds = append(cmds, name+" "+strings.Join(args, " "))
-				if name == "mlxconfig" && len(args) == 3 && args[2] == "q" {
-					return mlxconfigAirQuery(full), nil
+				if name == "mlxconfig" && len(args) >= 3 && args[2] == "q" {
+					return mlxconfigAirQuery(full, args[3:]...), nil
 				}
 				return "", fmt.Errorf("unexpected exec: %s %v", name, args)
 			},
@@ -1509,6 +1527,207 @@ func TestMlxconfigAirAdaptiveRevertNotDrift(t *testing.T) {
 	}
 	if strings.Contains(msg, "ignored") {
 		t.Fatalf("the Air note must not appear for Physical hardware, got %q", msg)
+	}
+}
+
+// queryKeys extracts the requested parameter names from a recorded
+// "mlxconfig -d <pci> q K..." command line.
+func queryKeys(cmd string, t *testing.T) []string {
+	t.Helper()
+	f := strings.Fields(cmd)
+	for i := range f {
+		if f[i] == "q" {
+			return f[i+1:]
+		}
+	}
+	t.Fatalf("command is not a query: %s", cmd)
+	return nil
+}
+
+func equalSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ma := map[string]bool{}
+	for _, k := range a {
+		ma[k] = true
+	}
+	for _, k := range b {
+		if !ma[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// mlxconfigCandidateKeys computes the verify-pass query keys for the test's
+// Air ConnectX-7 shape (Ethernet, RoceCC, 1 VF) through the production
+// derivation (flashQueryKeys over the probe map).
+func mlxconfigCandidateKeys() []string {
+	a := &Agent{}
+	d := pciDevice{pci: "0000:05:00.0", devType: "ConnectX7", variant: "Air", rail: "r0"}
+	probe := make(map[string]string, len(mlxconfigManagedKeys))
+	for _, k := range mlxconfigManagedKeys {
+		probe[k] = ""
+	}
+	p := mlxconfigParams{lt: 2, ltNS: 2, roceCC: "1", dpuOffload: "0",
+		cnxVFs: fwVFCount(1), dpuVFs: fwVFCount(0)}
+	return flashQueryKeys(a, d, p, probe)
+}
+
+// The 0.1.96 selective read (Kevin/DSX Air: the emulated NIC strains under
+// the full NV dump): the Ready-phase verify asks for exactly the candidate
+// keys its class could manage — never the bare `q` full-table dump — and
+// the selective result drift-checks identically.
+func TestMlxconfigVerifyQueriesSelectiveKeys(t *testing.T) {
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+	profile.Spec.EastWest.RoceCC = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	full := map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "LINK_TYPE_P1": "2",
+		"ROCE_RTT_RESP_DSCP_P1": "48", "ROCE_RTT_RESP_DSCP_MODE_P1": "1",
+		"ROCE_ADAPTIVE_ROUTING_EN": "1", "USER_PROGRAMMABLE_CC": "1",
+		"TX_SCHEDULER_LOCALITY_MODE": "2", "ROCE_CC_STEERING_EXT": "2",
+		"ROCE_CC_RTT_TIMESTAMP_FORMAT": "0",
+	}
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", variant: "Air", rail: "r0"}}}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	var cmds []string
+	a.execFn = func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
+		cmds = append(cmds, name+" "+strings.Join(args, " "))
+		if name == "mlxconfig" && len(args) >= 3 && args[2] == "q" {
+			return mlxconfigAirQuery(full, args[3:]...), nil
+		}
+		return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+	}
+	a.verifyOnly = true
+	st, msg := stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("matched NV must verify Done from the selective read, got %s %q", st, msg)
+	}
+	keys := queryKeys(cmds[0], t)
+	got := map[string]bool{}
+	for _, k := range keys {
+		got[k] = true
+	}
+	// The managed core must be present…
+	for _, k := range []string{"LINK_TYPE_P1", "NUM_OF_VFS", "SRIOV_EN", "ROCE_ADAPTIVE_ROUTING_EN"} {
+		if !got[k] {
+			t.Fatalf("the selective query must include managed key %s, got %v", k, keys)
+		}
+	}
+	// …the DPU-only key must not ride an adapter query…
+	if got["INTERNAL_CPU_OFFLOAD_ENGINE"] {
+		t.Fatalf("an adapter's selective query must not carry the DPU-only key, got %v", keys)
+	}
+	// …and the read must be a subset of the managed universe, not the dump.
+	if len(keys) >= len(mlxconfigManagedKeys) {
+		t.Fatalf("the selective query must stay under the managed universe, got %d keys: %v", len(keys), keys)
+	}
+}
+
+// Hardware/MFT builds that reject a selective query naming a key the device
+// does not support must still verify: the pass falls back to the walk-time
+// full-table read for that device instead of failing boot-verify forever
+// (the pre-0.1.96 behavior for such devices).
+func TestMlxconfigVerifySelectiveFallback(t *testing.T) {
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+	profile.Spec.EastWest.RoceCC = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	full := map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "LINK_TYPE_P1": "2",
+		"ROCE_RTT_RESP_DSCP_P1": "48", "ROCE_RTT_RESP_DSCP_MODE_P1": "1",
+		"ROCE_ADAPTIVE_ROUTING_EN": "1", "USER_PROGRAMMABLE_CC": "1",
+		"TX_SCHEDULER_LOCALITY_MODE": "2", "ROCE_CC_STEERING_EXT": "2",
+		"ROCE_CC_RTT_TIMESTAMP_FORMAT": "0",
+	}
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", variant: "Physical", rail: "r0"}}}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	var cmds []string
+	a.execFn = func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
+		cmds = append(cmds, name+" "+strings.Join(args, " "))
+		if name == "mlxconfig" && len(args) >= 3 && args[2] == "q" {
+			if len(args) > 3 {
+				return "", fmt.Errorf("MFE-parms: parameter not supported by the device")
+			}
+			return mlxconfigAirQuery(full), nil
+		}
+		return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+	}
+	a.verifyOnly = true
+	st, msg := stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("a selective-query failure must fall back to the full read and verify, got %s %q", st, msg)
+	}
+	if len(cmds) != 2 || !strings.HasSuffix(cmds[1], " q") {
+		t.Fatalf("the fallback must be the bare full-table query, got %v", cmds)
+	}
+}
+
+// Every key buildFlashSet can emit must live in mlxconfigManagedKeys, or
+// the Ready-phase selective query would silently stop drift-checking a key
+// the walk still manages. The probe map claims every managed key exposed,
+// so the emitted set is the complete per-class universe; the grid permutes
+// class × variant × profile parameters.
+func TestMlxconfigFlashKeysAreManaged(t *testing.T) {
+	a := &Agent{}
+	probe := make(map[string]string, len(mlxconfigManagedKeys))
+	for _, k := range mlxconfigManagedKeys {
+		probe[k] = ""
+	}
+	managed := map[string]bool{}
+	for _, k := range mlxconfigManagedKeys {
+		managed[k] = true
+	}
+	for _, devType := range []string{"SuperNIC", "DPU", "ConnectX7", "ConnectX8", "ConnectX9", "ConnectX6"} {
+		for _, variant := range []string{"Physical", "Air"} {
+			for _, lt := range []int{1, 2} {
+				for _, roceCC := range []string{"0", "1"} {
+					for _, dpuOffload := range []string{"0", "1"} {
+						for _, vfs := range []int{0, 8} {
+							p := mlxconfigParams{lt: lt, ltNS: lt, roceCC: roceCC, dpuOffload: dpuOffload,
+								cnxVFs: fwVFCount(vfs), dpuVFs: fwVFCount(vfs)}
+							d := pciDevice{pci: "0000:05:00.0", devType: devType, variant: variant}
+							for _, kv := range buildFlashSet(a, d, probe, p) {
+								if !managed[kv.key] {
+									t.Fatalf("buildFlashSet emits %s (class %s/%s lt=%d roceCC=%s) but it is not in mlxconfigManagedKeys — the Ready-phase selective query would never read it", kv.key, devType, variant, lt, roceCC)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
