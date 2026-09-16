@@ -1044,8 +1044,9 @@
       parameters (intel_iommu=on iommu=pt pci=realloc … ib_core.netns_mode=0)</code>, zero
       staging churn — proving the new managed set and its detection end-to-end; the h01
       walk then Failed at Configuring on the env's persistent 0000:0c:00.0 emulation flake
-      (<code>mlxconfig query: exit status 3</code> ×5, survived one node reboot, cleared
-      after the second), and the resumed walk converged: Configuring → Finalizing →
+      (<code>mlxconfig query: exit status 3</code> ×5), one node reboot cleared it (the
+      standing reboot-don't-troubleshoot rule holding again), and the resumed walk
+      converged: Configuring → Finalizing →
       <strong>Ready, BootVerified, taint released, worker label restored, one
       walk-recorded reboot</strong>. The CP (h00) is un-adopted by design there —
       <code>controlPlane.prep: false</code>, the §3.1 gate silently skips it (no NodePrep,
