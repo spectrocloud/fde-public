@@ -109,6 +109,7 @@ func TestOvsSetupDivergenceMustNotReadDone(t *testing.T) {
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	profile := &v1alpha1.NodePrepProfile{}
 	profile.Spec.EastWest.EswitchMode = "switchdev"
+	profile.Spec.EastWest.ManageOVS = true
 	profile.Spec.EastWest.NumVFs = 1
 
 	// A bare agent cannot exec the host: OVS is not answering — divergent.
@@ -492,6 +493,7 @@ func TestOvsStepsSkipGates(t *testing.T) {
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	legacy := &v1alpha1.NodePrepProfile{}
 	legacy.Spec.EastWest.EswitchMode = "legacy"
+	legacy.Spec.EastWest.ManageOVS = true
 	legacy.Spec.EastWest.NumVFs = 1
 
 	if st, msg := stepOvsSetup(a, np, legacy); st != v1alpha1.StepDone || !strings.Contains(msg, "eswitch mode is not switchdev") {
@@ -503,6 +505,7 @@ func TestOvsStepsSkipGates(t *testing.T) {
 
 	switchdev := &v1alpha1.NodePrepProfile{}
 	switchdev.Spec.EastWest.EswitchMode = "switchdev"
+	switchdev.Spec.EastWest.ManageOVS = true
 	switchdev.Spec.EastWest.NumVFs = 1
 	if st, msg := stepOvsSetup(a, np, switchdev); st != v1alpha1.StepDone || !strings.Contains(msg, "no Mellanox hardware") {
 		t.Fatalf("switchdev without Mellanox must skip ovsSetup, got %s %q", st, msg)
@@ -522,6 +525,53 @@ func TestOvsStepsSkipGates(t *testing.T) {
 	// fires on the mode alone) — with OVS tooling absent it Blocks instead.
 	if st, msg := stepOvsBridges(inventory, np, switchdev); st != v1alpha1.StepBlocked || !strings.Contains(msg, "ovs-vsctl not found") {
 		t.Fatalf("switchdev ovsBridges without OVS tooling must Block, got %s %q", st, msg)
+	}
+}
+
+// The 0.1.97 manageOVS gate (Kevin, Spectrum-X controller 26.7.0): with
+// spec.eastWest.manageOVS at its false default the OVS steps must return
+// before ANY OVS interaction — the exec recorder stays empty even with the
+// full managed-path stage set (switchdev, VFs, Mellanox inventory, tooling,
+// host mutations). Existing bridges and databases are left exactly as an
+// external manager keeps them: nothing is torn down.
+func TestOvsManageGateOff(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "ovs-vsctl"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	var execs []string
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}}
+	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+		execs = append(execs, name+" "+strings.Join(args, " "))
+		return "", fmt.Errorf("the manageOVS gate must not exec anything")
+	}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.EswitchMode = "switchdev"
+	profile.Spec.EastWest.NumVFs = 1
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	for _, run := range []struct {
+		name string
+		fn   func() (v1alpha1.StepState, string)
+	}{
+		{"ovsSetup", func() (v1alpha1.StepState, string) { return stepOvsSetup(a, np, profile) }},
+		{"ovsBridges", func() (v1alpha1.StepState, string) { return stepOvsBridges(a, np, profile) }},
+	} {
+		if st, msg := run.fn(); st != v1alpha1.StepDone || !strings.Contains(msg, "skipped by policy (eastWest.manageOVS=false)") {
+			t.Fatalf("%s must skip by policy under the manageOVS gate, got %s %q", run.name, st, msg)
+		}
+	}
+	if len(execs) != 0 {
+		t.Fatalf("the manageOVS gate must not exec anything, got %d calls: %q", len(execs), execs)
 	}
 }
 

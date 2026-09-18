@@ -145,6 +145,16 @@ spec:
                     eswitchMode:
                       type: string
                       enum: [switchdev, legacy, ""]
+                    manageOVS:
+                      description: >
+                        OpenvSwitch ownership gate (0.1.97): false (the default) leaves
+                        OVS entirely to an external manager (e.g. NVIDIA Spectrum-X
+                        controller 26.7.0) — no database reset at startup, no OVS
+                        service management or patching, no Open_vSwitch other_config,
+                        no rail bridges created, no PFs attached to bridges. true =
+                        nodeprep manages the DOCA OVS setup and the rail bridges.
+                      type: boolean
+                      default: false
                     roceCC:
                       type: boolean
                     planesNum:

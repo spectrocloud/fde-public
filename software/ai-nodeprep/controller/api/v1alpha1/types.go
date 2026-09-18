@@ -219,7 +219,17 @@ type EastWestSpec struct {
 	NumVFs      int    `json:"numVFs,omitempty"`      // per rail-mapped function (spec.rails); bash: NUMVF_EW
 	MTU         int    `json:"mtu,omitempty"`         // bash: MTU_EW, default 9216
 	EswitchMode string `json:"eswitchMode,omitempty"` // switchdev | legacy (bash: ESWITCH_MODE)
-	RoceCC      bool   `json:"roceCC,omitempty"`      // bash: ROCECC
+	// ManageOVS is the OpenvSwitch ownership gate (0.1.97, Kevin — Spectrum-X
+	// controller 26.7.0 manages OVS itself): false (the default) means
+	// nodeprep performs no OVS interaction at all — no conf.db reset at
+	// startup, no OVS service management or ExecStartPre patching, no
+	// Open_vSwitch other_config, no rail bridges created, no PFs attached to
+	// bridges; ovsSetup/ovsBridges report "skipped by policy" and boot-verify
+	// skips them. true = the bash-era DOCA OVS management (fn_set_vfs's OVS
+	// block and fn_add_pfs_to_rail_bridges). Switchdev/eswitch handling is
+	// independent: devlink mode and VF work proceed regardless of this gate.
+	ManageOVS bool `json:"manageOVS,omitempty"`
+	RoceCC    bool `json:"roceCC,omitempty"` // bash: ROCECC
 	// PlanesNum reserves the multi-plane east-west topology (1|2|4, default
 	// 1): each SuperNIC presents multiple ports, one per plane. Structure
 	// only since 0.1.77 — no step consumes it yet; the mlxconfig firmware

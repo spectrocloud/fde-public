@@ -1756,12 +1756,20 @@ func (a *Agent) waitBridge(br string, timeout time.Duration) error {
 // before the rename/VF bring-up; the PF ports are attached later by
 // ovsBridges (fn_add_pfs_to_rail_bridges), after losslessRoce.
 //
+// The 0.1.97 manageOVS gate comes first: when spec.eastWest.manageOVS is
+// false (the default), the step returns before any OVS interaction — no
+// database reads, no service checks, nothing. Spectrum-X 26.7.0 manages
+// OVS itself and nodeprep must leave it alone (Kevin).
+//
 // Detect-first: when every other_config value and every bridge already
 // matches, the step reports Done without touching the OVS database — the
 // bash re-runs its destructive conf.db reset on every complete-stage pass,
 // which a converged 5s-poll re-verify must not (a reset drops any OVS state
 // outside the rails). When anything deviates the full bash sequence runs.
 func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	if !profile.Spec.EastWest.ManageOVS {
+		return v1alpha1.StepDone, "skipped by policy (eastWest.manageOVS=false)"
+	}
 	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
 		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
 	}
@@ -2014,7 +2022,15 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 // bash's position — so the PFC/ECN/register work lands on the PF before
 // OVS's PMD takes it over. Detect-first: an attached, correctly-typed,
 // correctly-sized port reads as converged without touching OVS.
+//
+// Gated by spec.eastWest.manageOVS like ovsSetup (0.1.97): false = the
+// step returns before any OVS interaction — existing bridges and ports
+// are left exactly as an external manager (Spectrum-X 26.7.0) keeps them;
+// nothing is torn down.
 func stepOvsBridges(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	if !profile.Spec.EastWest.ManageOVS {
+		return v1alpha1.StepDone, "skipped by policy (eastWest.manageOVS=false)"
+	}
 	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
 		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
 	}

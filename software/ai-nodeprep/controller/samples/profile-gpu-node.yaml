@@ -49,6 +49,7 @@ spec:
     numVFs: 1
     mtu: 9216
     eswitchMode: switchdev
+    manageOVS: false # true = nodeprep manages OVS (db reset, services, other_config, rail bridges, PF attach)
     roceCC: true
 
   northSouth: # LINKTYPE_NS=2, NUMVF_NS=16; offloadEngine=false leaves DPUs alone
