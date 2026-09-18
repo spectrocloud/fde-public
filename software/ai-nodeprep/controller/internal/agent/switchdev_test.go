@@ -528,12 +528,13 @@ func TestOvsStepsSkipGates(t *testing.T) {
 	}
 }
 
-// The 0.1.97 manageOVS gate (Kevin, Spectrum-X controller 26.7.0): with
-// spec.eastWest.manageOVS at its false default the OVS steps must return
-// before ANY OVS interaction — the exec recorder stays empty even with the
-// full managed-path stage set (switchdev, VFs, Mellanox inventory, tooling,
-// host mutations). Existing bridges and databases are left exactly as an
-// external manager keeps them: nothing is torn down.
+// The 0.1.97/0.1.98 manageOVS gate (Kevin, Spectrum-X controller 26.7.0):
+// with spec.eastWest.manageOVS at its false default ovsBridges is fully
+// externalized — zero execs, existing bridges and ports left exactly as the
+// external manager keeps them — while ovsSetup keeps exactly one duty: the
+// five switchdev other_config parameters (they proved required even when
+// Spectrum-X owns OVS). The minimal path must never touch the services, the
+// database file, the bridges or the ownership record.
 func TestOvsManageGateOff(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
@@ -550,7 +551,7 @@ func TestOvsManageGateOff(t *testing.T) {
 	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}}
 	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
 		execs = append(execs, name+" "+strings.Join(args, " "))
-		return "", fmt.Errorf("the manageOVS gate must not exec anything")
+		return "", fmt.Errorf("unexpected exec under the manageOVS gate")
 	}
 	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	profile := &v1alpha1.NodePrepProfile{}
@@ -559,19 +560,98 @@ func TestOvsManageGateOff(t *testing.T) {
 	yes := true
 	profile.Spec.Policy.HostMutations = &yes
 
-	for _, run := range []struct {
-		name string
-		fn   func() (v1alpha1.StepState, string)
-	}{
-		{"ovsSetup", func() (v1alpha1.StepState, string) { return stepOvsSetup(a, np, profile) }},
-		{"ovsBridges", func() (v1alpha1.StepState, string) { return stepOvsBridges(a, np, profile) }},
-	} {
-		if st, msg := run.fn(); st != v1alpha1.StepDone || !strings.Contains(msg, "skipped by policy (eastWest.manageOVS=false)") {
-			t.Fatalf("%s must skip by policy under the manageOVS gate, got %s %q", run.name, st, msg)
-		}
+	// ovsBridges: fully skipped, zero execs.
+	if st, msg := stepOvsBridges(a, np, profile); st != v1alpha1.StepDone || !strings.Contains(msg, "skipped by policy (eastWest.manageOVS=false)") {
+		t.Fatalf("ovsBridges must skip by policy under the manageOVS gate, got %s %q", st, msg)
 	}
 	if len(execs) != 0 {
-		t.Fatalf("the manageOVS gate must not exec anything, got %d calls: %q", len(execs), execs)
+		t.Fatalf("ovsBridges under the manageOVS gate must not exec anything, got %q", execs)
+	}
+
+	// ovsSetup with OVS not answering: Blocked (the external manager has not
+	// brought OVS up yet — nodeprep must not start it) — and the only exec
+	// is the ovsdb probe: no service management, no database reset.
+	if st, msg := stepOvsSetup(a, np, profile); st != v1alpha1.StepBlocked || !strings.Contains(msg, "managed externally") {
+		t.Fatalf("gate-off ovsSetup with OVS down must Block waiting for the external manager, got %s %q", st, msg)
+	}
+	if len(execs) != 1 || !strings.Contains(execs[0], "_uuid") {
+		t.Fatalf("gate-off ovsSetup with OVS down must only probe ovsdb, got %q", execs)
+	}
+}
+
+// The 0.1.98 other_config-only duty (Kevin: the five sets are required even
+// when Spectrum-X 26.7.0 owns OVS): with the gate off and OVS answering,
+// the step applies exactly the five other_config sets — no systemctl, no
+// conf.db reset, no external_ids ownership record, no add-br — and reads
+// Done off the converged readback.
+func TestOvsSetupGateOffAppliesOtherConfigOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "ovs-vsctl"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	sets := map[string]string{}
+	var others []string
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:05:00.0", devType: "ConnectX7", rail: "r0", netdev: "eth_r0"}}}
+	a.execFn = func(_ []string, _ time.Duration, name string, _ bool, args []string) (string, error) {
+		if name != "ovs-vsctl" {
+			others = append(others, name+" "+strings.Join(args, " "))
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		}
+		// get Open_vSwitch . _uuid → ovsdb-server answers.
+		if args[0] == "get" && args[3] == "_uuid" {
+			return "64f5d1c3-0e77-4f6a-9b7c-2f9c5a1f0001\n", nil
+		}
+		if args[0] == "get" && strings.HasPrefix(args[3], "other_config:") {
+			if v, ok := sets[strings.TrimPrefix(args[3], "other_config:")]; ok {
+				return v + "\n", nil
+			}
+			return "", nil // key absent: divergent until the sets land
+		}
+		if args[0] == "--no-wait" && args[1] == "set" {
+			kv := strings.TrimPrefix(args[4], "other_config:")
+			parts := strings.SplitN(kv, "=", 2)
+			sets[parts[0]] = parts[1]
+			return "", nil
+		}
+		others = append(others, "ovs-vsctl "+strings.Join(args, " "))
+		return "", fmt.Errorf("unexpected ovs-vsctl call: %v", args)
+	}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.EswitchMode = "switchdev"
+	profile.Spec.EastWest.NumVFs = 1
+	a.hostMutations = true
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	st, msg := stepOvsSetup(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "eastWest.manageOVS=false") {
+		t.Fatalf("gate-off ovsSetup with answering OVS must apply the sets and go Done, got %s %q", st, msg)
+	}
+	want := map[string]string{
+		"doca-init":          "true",
+		"hw-offload":         "true",
+		"hw-offload-ct-size": "0",
+		"max-idle":           "300000",
+		"doca-eswitch-max":   "1",
+	}
+	for k, v := range want {
+		if sets[k] != v {
+			t.Fatalf("other_config:%s = %q, want %q (all sets: %v)", k, sets[k], v, sets)
+		}
+	}
+	if len(sets) != 5 {
+		t.Fatalf("the gate-off path must apply exactly the five other_config sets, got %d: %v", len(sets), sets)
+	}
+	if len(others) != 0 {
+		t.Fatalf("the gate-off path must not exec anything but ovs-vsctl gets/sets, got %q", others)
 	}
 }
 

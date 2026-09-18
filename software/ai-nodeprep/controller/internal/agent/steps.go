@@ -1756,10 +1756,12 @@ func (a *Agent) waitBridge(br string, timeout time.Duration) error {
 // before the rename/VF bring-up; the PF ports are attached later by
 // ovsBridges (fn_add_pfs_to_rail_bridges), after losslessRoce.
 //
-// The 0.1.97 manageOVS gate comes first: when spec.eastWest.manageOVS is
-// false (the default), the step returns before any OVS interaction — no
-// database reads, no service checks, nothing. Spectrum-X 26.7.0 manages
-// OVS itself and nodeprep must leave it alone (Kevin).
+// The 0.1.97 manageOVS gate splits the step's duties (0.1.98, Kevin — the
+// five other_config sets proved required even under Spectrum-X 26.7.0): when
+// spec.eastWest.manageOVS is false (the default) the services, the database
+// file, the bridges and the port attachment are externalized, but the five
+// switchdev other_config parameters stay nodeprep's to apply —
+// stepOvsOtherConfigOnly below. The full managed path is unchanged.
 //
 // Detect-first: when every other_config value and every bridge already
 // matches, the step reports Done without touching the OVS database — the
@@ -1767,11 +1769,11 @@ func (a *Agent) waitBridge(br string, timeout time.Duration) error {
 // which a converged 5s-poll re-verify must not (a reset drops any OVS state
 // outside the rails). When anything deviates the full bash sequence runs.
 func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
-	if !profile.Spec.EastWest.ManageOVS {
-		return v1alpha1.StepDone, "skipped by policy (eastWest.manageOVS=false)"
-	}
 	if !strings.EqualFold(profile.Spec.EastWest.EswitchMode, "switchdev") {
 		return v1alpha1.StepDone, "skipped: eswitch mode is not switchdev"
+	}
+	if !profile.Spec.EastWest.ManageOVS {
+		return stepOvsOtherConfigOnly(a, profile)
 	}
 	if profile.Spec.EastWest.NumVFs+dpuNSVFs(profile) == 0 {
 		// The OVS block lives inside fn_set_vfs's any-VF-demand gate.
@@ -1809,26 +1811,99 @@ func stepOvsSetup(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPro
 	return v1alpha1.StepFailed, "OVS setup ran but the other_config/bridge readback still diverges from the profile"
 }
 
-// ovsSetupConverged verifies the OVS state the setup step manages; the
-// first return value is "" when converged, else the divergence description.
-func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice) (string, string) {
+// stepOvsOtherConfigOnly is stepOvsSetup's eastWest.manageOVS=false path
+// (0.1.98, Kevin/Spectrum-X 26.7.0): the five other_config parameters are
+// still nodeprep's to apply — the switchdev datapath requires them
+// regardless of who owns OVS — while every other interaction is
+// externalized: no conf.db reset, no openvswitch-switch/ovsdb-server
+// service management, no ExecStartPre patching, no rail bridges, no port
+// attachment, no ownership record (the external_ids write of the managed
+// path is Spectrum-X's business now). When ovsdb-server is not answering
+// there is nothing to write to and nothing nodeprep may start: the step
+// Blocks and retries on the poll cadence until the external manager brings
+// OVS up. Unlike the managed path there is no fn_set_vfs any-VF-demand
+// gate — the sets ride the switchdev mode alone.
+func stepOvsOtherConfigOnly(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
+	if !a.hasMellanox() {
+		return v1alpha1.StepDone, "skipped: no Mellanox hardware present"
+	}
+	rails := railFns(profile, a)
+	if len(rails) == 0 {
+		return v1alpha1.StepDone, "skipped: no rail NICs to bridge"
+	}
+	if _, err := findHostTool("ovs-vsctl"); err != nil {
+		return v1alpha1.StepBlocked, fmt.Sprintf("ovs-vsctl not found on host (install the DOCA OVS / openvswitch-switch package): %v", err)
+	}
+	if !a.ovsRunning() {
+		return v1alpha1.StepBlocked, "OVS is not answering ovs-vsctl (eastWest.manageOVS=false: OVS is managed externally; waiting for it to come up)"
+	}
+	if st, _ := ovsOtherConfigConverged(a, len(rails)); st == "" {
+		return v1alpha1.StepDone, fmt.Sprintf("ovs other_config verified on externally-managed OVS (eastWest.manageOVS=false): doca-init, hw-offload, hw-offload-ct-size, max-idle, doca-eswitch-max=%d", len(rails))
+	}
+	if !a.mutationsAllowed(profile) {
+		return v1alpha1.StepBlocked, "ovs other_config apply requires -host-mutations (detect-only run)"
+	}
+	if err := applyOvsOtherConfig(a, len(rails)); err != nil {
+		return v1alpha1.StepFailed, err.Error()
+	}
+	if st, _ := ovsOtherConfigConverged(a, len(rails)); st == "" {
+		return v1alpha1.StepDone, fmt.Sprintf("ovs other_config applied on externally-managed OVS (eastWest.manageOVS=false): doca-init, hw-offload, hw-offload-ct-size, max-idle, doca-eswitch-max=%d", len(rails))
+	}
+	return v1alpha1.StepFailed, "ovs other_config ran but the readback still diverges from the profile"
+}
+
+// ovsOtherConfigSets is the five other_config key/value pairs nodeprep
+// applies to the Open_vSwitch table — the bash's sets, required even when
+// Spectrum-X 26.7.0 owns OVS (eastWest.manageOVS=false, Kevin): only the
+// services, the database file, the bridges and the port attachment are
+// externalized, never these values.
+func ovsOtherConfigSets(numRails int) [][2]string {
+	return [][2]string{
+		{"doca-init", "true"},
+		{"hw-offload", "true"},
+		{"hw-offload-ct-size", "0"},
+		{"max-idle", "300000"},
+		{"doca-eswitch-max", strconv.Itoa(numRails)},
+	}
+}
+
+// applyOvsOtherConfig writes the five other_config values onto the
+// Open_vSwitch table, every write --no-wait (0.1.86: a waiting write blocks
+// until ovs-vswitchd processes the change, and vswitchd may be down or
+// mid-churn — the commit lands on ovsdb-server immediately).
+func applyOvsOtherConfig(a *Agent, numRails int) error {
+	for _, kv := range ovsOtherConfigSets(numRails) {
+		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
+			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
+		}
+	}
+	return nil
+}
+
+// ovsOtherConfigConverged verifies the five other_config values the
+// bash's sets manage; the first return value is "" when converged, else
+// the divergence description. ovsRunning is part of the check: a silent
+// ovsdb-server is divergence (the step decides what to do about it).
+func ovsOtherConfigConverged(a *Agent, numRails int) (string, string) {
 	if !a.ovsRunning() {
 		return "divergent", "OVS is not answering ovs-vsctl"
 	}
-	numRails := len(rails)
-	wantOC := map[string]string{
-		"doca-init":          "true",
-		"hw-offload":         "true",
-		"hw-offload-ct-size": "0",
-		"max-idle":           "300000",
-		"doca-eswitch-max":   strconv.Itoa(numRails),
-	}
-	for _, k := range []string{"doca-init", "hw-offload", "hw-offload-ct-size", "max-idle", "doca-eswitch-max"} {
-		out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "Open_vSwitch", ".", "other_config:"+k)
-		if err != nil || ovsValue(out) != wantOC[k] {
-			return "divergent", fmt.Sprintf("other_config:%s = %q, want %s", k, ovsValue(out), wantOC[k])
+	for _, kv := range ovsOtherConfigSets(numRails) {
+		out, err := a.hostExec(nil, 15*time.Second, "ovs-vsctl", "get", "Open_vSwitch", ".", "other_config:"+kv[0])
+		if err != nil || ovsValue(out) != kv[1] {
+			return "divergent", fmt.Sprintf("other_config:%s = %q, want %s", kv[0], ovsValue(out), kv[1])
 		}
 	}
+	return "", ""
+}
+
+// ovsSetupConverged verifies the OVS state the setup step manages; the
+// first return value is "" when converged, else the divergence description.
+func ovsSetupConverged(a *Agent, profile *v1alpha1.NodePrepProfile, rails []pciDevice) (string, string) {
+	if st, msg := ovsOtherConfigConverged(a, len(rails)); st != "" {
+		return st, msg
+	}
+	numRails := len(rails)
 	mtu := ovsRailsMTU(profile)
 	var bridges []string
 	for _, d := range sortedByPci(rails) {
@@ -1933,18 +2008,11 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 	// every waiting set hung to its timeout while the transaction still
 	// committed. --no-wait is the mode ovs-ctl itself uses for its startup
 	// config; the commit lands immediately and a starting vswitchd reads the
-	// settings from the database at its first read.
-	sets := [][2]string{
-		{"doca-init", "true"},
-		{"hw-offload", "true"},
-		{"hw-offload-ct-size", "0"},
-		{"max-idle", "300000"},
-		{"doca-eswitch-max", strconv.Itoa(len(rails))},
-	}
-	for _, kv := range sets {
-		if _, err := a.hostExec(nil, 30*time.Second, "ovs-vsctl", "--no-wait", "set", "Open_vSwitch", ".", "other_config:"+kv[0]+"="+kv[1]); err != nil {
-			return fmt.Errorf("set other_config:%s: %v", kv[0], err)
-		}
+	// settings from the database at its first read. The five sets are the
+	// same ones the manageOVS=false path applies (0.1.98) — see
+	// ovsOtherConfigSets.
+	if err := applyOvsOtherConfig(a, len(rails)); err != nil {
+		return err
 	}
 	// Preserve the operator's ownership record: the ExecStartPre hooks the
 	// drop-in below clears also wrote external_ids:sriov-operator-owned-keys
@@ -2023,10 +2091,11 @@ func (a *Agent) applyOvsSetup(profile *v1alpha1.NodePrepProfile, rails []pciDevi
 // OVS's PMD takes it over. Detect-first: an attached, correctly-typed,
 // correctly-sized port reads as converged without touching OVS.
 //
-// Gated by spec.eastWest.manageOVS like ovsSetup (0.1.97): false = the
-// step returns before any OVS interaction — existing bridges and ports
-// are left exactly as an external manager (Spectrum-X 26.7.0) keeps them;
-// nothing is torn down.
+// Gated by spec.eastWest.manageOVS (0.1.97): false = the step returns
+// before any OVS interaction — existing bridges and ports are left exactly
+// as an external manager (Spectrum-X 26.7.0) keeps them; nothing is torn
+// down. (ovsSetup keeps the five other_config sets under the same gate —
+// 0.1.98 — but the bridges and port attachment stay fully externalized.)
 func stepOvsBridges(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	if !profile.Spec.EastWest.ManageOVS {
 		return v1alpha1.StepDone, "skipped by policy (eastWest.manageOVS=false)"

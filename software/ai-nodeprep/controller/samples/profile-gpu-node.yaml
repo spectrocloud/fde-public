@@ -49,7 +49,7 @@ spec:
     numVFs: 1
     mtu: 9216
     eswitchMode: switchdev
-    manageOVS: false # true = nodeprep manages OVS (db reset, services, other_config, rail bridges, PF attach)
+    manageOVS: false # false (default): external manager (Spectrum-X) owns OVS services/db/bridges/PFs; nodeprep still applies the 5 switchdev other_config. true = nodeprep manages OVS
     roceCC: true
 
   northSouth: # LINKTYPE_NS=2, NUMVF_NS=16; offloadEngine=false leaves DPUs alone

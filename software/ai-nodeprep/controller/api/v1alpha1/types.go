@@ -220,14 +220,17 @@ type EastWestSpec struct {
 	MTU         int    `json:"mtu,omitempty"`         // bash: MTU_EW, default 9216
 	EswitchMode string `json:"eswitchMode,omitempty"` // switchdev | legacy (bash: ESWITCH_MODE)
 	// ManageOVS is the OpenvSwitch ownership gate (0.1.97, Kevin — Spectrum-X
-	// controller 26.7.0 manages OVS itself): false (the default) means
-	// nodeprep performs no OVS interaction at all — no conf.db reset at
-	// startup, no OVS service management or ExecStartPre patching, no
-	// Open_vSwitch other_config, no rail bridges created, no PFs attached to
-	// bridges; ovsSetup/ovsBridges report "skipped by policy" and boot-verify
-	// skips them. true = the bash-era DOCA OVS management (fn_set_vfs's OVS
-	// block and fn_add_pfs_to_rail_bridges). Switchdev/eswitch handling is
-	// independent: devlink mode and VF work proceed regardless of this gate.
+	// controller 26.7.0 manages OVS itself). false (the default) externalizes
+	// the OVS state: no conf.db reset at startup, no OVS service management
+	// or ExecStartPre patching, no rail bridges created, no PFs attached to
+	// bridges, no ownership record — ovsBridges skips entirely, and
+	// ovsSetup's role shrinks to the five switchdev other_config parameters
+	// (doca-init, hw-offload, hw-offload-ct-size, max-idle, doca-eswitch-max),
+	// which stay nodeprep's to apply because the switchdev datapath requires
+	// them regardless of who owns OVS (0.1.98). true = the bash-era DOCA OVS
+	// management (fn_set_vfs's OVS block and fn_add_pfs_to_rail_bridges).
+	// Switchdev/eswitch handling is independent: devlink mode and VF work
+	// proceed regardless of this gate.
 	ManageOVS bool `json:"manageOVS,omitempty"`
 	RoceCC    bool `json:"roceCC,omitempty"` // bash: ROCECC
 	// PlanesNum reserves the multi-plane east-west topology (1|2|4, default
