@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.95</span>
+    <span>nodeprep-v105.sh → controller v0.1.97</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.95</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.97</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1059,6 +1059,35 @@
       Agent restart tolerance rides the same properties: the gate reads only durable API
       state, so the agent pod's own recreation across the reboot never touched the
       label.</li>
+  <li><b>0.1.97 — <code>eastWest.manageOVS</code>: nodeprep hands OVS to Spectrum-X
+      (Kevin, Spectrum-X controller 26.7.0).</b> NVIDIA's new Spectrum-X controller
+      version manages OpenvSwitch itself, so nodeprep must not fight it for ownership:
+      the NodePrepProfile CRD grows <code>spec.eastWest.manageOVS</code> (boolean,
+      default <strong>false</strong>), and false means NO OVS interaction whatsoever —
+      the <code>ovsSetup</code>/<code>ovsBridges</code> step bodies return
+      "skipped by policy" before their first OVS read: no conf.db reset at startup, no
+      OVS service management and no ExecStartPre patching (the 0.1.89
+      <code>defuseVswitchdStartHooks</code> drop-in included), no
+      <code>Open_vSwitch</code> <code>other_config</code>/<code>external_ids</code>
+      writes, no rail bridges created, no PFs attached to bridges. Existing OVS state
+      is left exactly as the external manager keeps it — the gate disables the steps,
+      it does not tear anything down. <code>true</code> restores the bash-era DOCA OVS
+      management byte-for-byte (the whole 0.1.85→0.1.89 boot-recovery arc stays
+      reachable for profiles that still want nodeprep-owned OVS). Switchdev/eswitch
+      handling and VF demand are independent of the gate: devlink flips and VF
+      bring-up proceed with the gate off. Boot-verify treats the policy skip as Done,
+      so flipping a Ready node from nodeprep-owned OVS to Spectrum-X ownership never
+      wedges it — the next 5-minute pass rewrites the step messages to the skip line
+      and keeps BootVerified True. Tests:
+      <code>TestOvsManageGateOff</code> (gate-off exec recorder stays empty through the
+      full managed-path stage set — switchdev, VFs, Mellanox inventory, ovs-vsctl
+      tooling, host mutations), and every pre-existing OVS test now pins
+      <code>ManageOVS: true</code> so the managed behavior stays covered. Live on
+      dsx-new (0.1.97 Tier-1, <code>basic-profile</code> carrying no manageOVS field →
+      CRD default false): the agent's first boot-verify pass logged
+      <code>boot-verify step ovsSetup/ovsBridges: Done — skipped by policy
+      (eastWest.manageOVS=false)</code> and passed BootVerified cleanly — worker label
+      present, no taints, sriov daemon 2/2 desired/ready.</li>
   <li><b>0.1.96 — the Ready-phase mlxconfig query reads only the keys it manages:
       selective <code>q KEY…</code> instead of the full NV dump (Kevin, DSX Air device
       errors).</b> On DSX Air the emulated NIC was straining under the walk-time query
@@ -2208,7 +2237,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.95 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.97 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
