@@ -8,7 +8,7 @@
 # (needs binfmt: docker run --privileged tonistiigi/binfmt --install all).
 # The agent target installs util-linux because the default reboot command is
 # `nsenter -t 1 -m -u -i -n -- systemctl reboot`.
-FROM --platform=$BUILDPLATFORM golang:1.24.1-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS build
 WORKDIR /src
 # TARGETOS/TARGETARCH are injected by buildx per requested platform; the
 # defaults keep a plain (non-buildx) `docker build` working too.
@@ -24,8 +24,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -o /out/agent ./cmd/agent
 
-FROM alpine:3.20 AS base
-RUN apk add --no-cache util-linux ca-certificates
+FROM alpine:3.23 AS base
+RUN apk add --no-cache util-linux-misc ca-certificates
 COPY --from=build /out/ /usr/local/bin/
 
 FROM base AS controller
