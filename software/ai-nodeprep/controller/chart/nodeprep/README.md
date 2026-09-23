@@ -88,3 +88,95 @@ The CRD templates must stay byte-identical to `manifests/crd-*.yaml`:
 ```sh
 make chart-sync-crds
 ```
+
+## Example NodePrepProfile
+
+In order to trigger nodeprep on nodes, deploy a NodePrepProfile resource:
+
+```
+apiVersion: nodeprep.spectrocloud.com/v1alpha1
+kind: NodePrepProfile
+metadata:
+  name: basic-profile
+spec:
+  mode: allNodes
+  # mode: labelSelector
+  # nodeSelector:
+  #   matchLabels:
+  #     node.spectrocloud.com/ai-worker: "true"
+  excludeLabel: node.spectrocloud.com/ai-worker=false
+
+  controlPlane:
+    bootstrapGate: auto
+    expectedCount: 0
+    prep: false
+    strategy: serial
+  eastWest:
+    linkType: "Ethernet"
+    numVFs: 0
+    mtu: 9000
+    eswitchMode: legacy
+    manageOVS: false
+    roceCC: true
+  firmware:
+    aptUpgrade: true
+    bfb:
+      name: bf-fwbundle-3.5.0-89_26.07-prod.bfb
+      sha256: 2d02f198b952b3e6a652beccbd7740ed4ab78ded3d00c3939acd1d707c93391d
+    doca:
+      deb: doca-host_3.5.0-082000-26.07-ubuntu2404_amd64.deb
+      sha256: a2312bb04b980fae370fb5de483fda8cc6bc590553bf3c8dc77f980e3840740a
+      packages:
+      - linux-headers-$(uname -r)
+      - gcc-12
+      - libgcc-12-dev
+      - doca-all
+      - lldpd
+      - mft
+      - netplan.io
+      - pv
+      - psmisc
+    source: "http://maas.internal:8069/rcp" # base URL for artifacts (MAAS mirror)
+  hostBoot:
+    kubeletStateReset: always
+    mlnxInterfaceMgr: wait
+    rdmaNetnsMode: exclusive # or shared
+    iommu: auto
+    hugepages:
+      defaultSize: 2M
+      pages1G: 0
+      pages2M: 0
+  nfsRdma:
+    enabled: true
+  northSouth:
+    linkType: "Ethernet"
+    numVFs: 0
+    offloadEngine: false
+  policy:
+    capiPause: true
+    controlDPU: false
+    disableACS: true
+    hostMutations: true
+    labelCompat: false
+    maxConcurrentFlashes: 1
+    rebootEnabled: true
+    taintEnabled: true
+    workerRoleLabel: manage
+  rails: []
+    # - rail: r0
+    #   pciFunction: "05:00"
+    # - rail: r1
+    #   pciFunction: "06:00"
+    # - rail: r2
+    #   pciFunction: "07:00"
+    # - rail: r3
+    #   pciFunction: "08:00"
+    # - rail: r4
+    #   pciFunction: "09:00"
+    # - rail: r5
+    #   pciFunction: "0a:00"
+    # - rail: r6
+    #   pciFunction: "0b:00"
+    # - rail: r7
+    #   pciFunction: "0c:00"
+```
