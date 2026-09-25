@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v0.1.98</span>
+    <span>nodeprep-v105.sh → controller v1.0.1</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 0.1.98</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 1.0.1</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1088,6 +1088,48 @@
       <code>boot-verify step ovsSetup/ovsBridges: Done — skipped by policy
       (eastWest.manageOVS=false)</code> and passed BootVerified cleanly — worker label
       present, no taints, sriov daemon 2/2 desired/ready.</li>
+  <li><b>1.0.1 — the selective verify query skips keys the device is known
+      not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
+      selective read derives its candidate list from
+      <code>buildFlashSet</code> itself against a probe map that claims every
+      managed key exposed — deliberately, so the candidates are the superset
+      the device's class <em>could</em> manage. On a 25GbE ConnectX-4 Lx that
+      superset names <code>LINK_TYPE_P1</code>, which the card does not carry
+      at all: mlxconfig rejects the <em>entire</em> query
+      (<code>-E- The Device doesn't support LINK_TYPE_P1 parameter</code>,
+      exit 3) and the pass fell back to the full-table dump the selective
+      query exists to avoid — on every single pass, forever. The walk had
+      already learned the fact in the same process (its full read logs
+      "does not expose LINK_TYPE_P1, skipping key") and simply never passed
+      it to the query builder. Now a per-PCI memo on the agent
+      (<code>mlxconfigUnexposed</code>, <code>refreshMlxconfigExposure</code>)
+      records which managed keys each device carries from every full-table
+      read — the authority, and the very read <code>addKV</code> already
+      gates the walk's set on, so a memoized key can never be one the walk
+      manages and filtering it cannot hide drift.
+      <code>mlxconfigQueryableKeys</code> applies the memo to the verify's
+      candidate list; a key present in a later full read clears its entry, so
+      a firmware update that adds a parameter cannot stay filtered out. A
+      device left with no candidates is skipped exactly like an empty flash
+      set. Cost: the first verify after an agent restart still pays one
+      fallback per device (nothing is known yet) and learns from it; in the
+      common walk-then-Ready flow the walk's full read populates the memo
+      before the first verify. Tests:
+      <code>TestMlxconfigExposureMemo</code> (per-PCI scoping, self-heal,
+      managed-universe guard) and
+      <code>TestMlxconfigVerifyDropsKnownUnexposedKeys</code> (pass one falls
+      back and learns; pass two queries the reduced list in a single exec
+      with no fallback while still drift-checking the keys the card does
+      carry). Live-verified on the demo cluster: the 1.0.1 agents' first pass
+      logged the fallback plus "does not expose LINK_TYPE_P1", and the 5-minute
+      pass after it queried <code>SRIOV_EN ROCE_RTT_RESP_DSCP_P1
+      ROCE_RTT_RESP_DSCP_MODE_P1 NUM_OF_VFS ROCE_RTT_RESP_DSCP_P2
+      ROCE_RTT_RESP_DSCP_MODE_P2</code> — both <code>LINK_TYPE</code> keys
+      dropped (the CX-4 Lx carries neither), one exec per device, the
+      fallback count unchanged, <code>BootVerified</code> still True. (1.0.0 in between was a packaging release
+      only: images moved to <code>ghcr.io/spectrocloud/fde-public/ai-nodeprep</code>
+      with the CVE remediation — Go 1.27.1 builder, alpine 3.23, x/*
+      module bumps — and no behavioral change.)</li>
   <li><b>0.1.98 — <code>manageOVS=false</code> keeps the five switchdev
       <code>other_config</code> sets (Kevin: they are required even when
       Spectrum-X owns OVS).</b> The 0.1.97 gate skipped the sets along with
@@ -2280,7 +2322,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 0.1.98 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 1.0.1 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
