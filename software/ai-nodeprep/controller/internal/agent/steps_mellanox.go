@@ -83,7 +83,54 @@ func (a *Agent) mlxconfigGetAll(pci string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseMlxconfigAll(out), nil
+	vals := parseMlxconfigAll(out)
+	// A full-table read is the authority on what this device exposes —
+	// refresh the memo the selective verify query filters with (1.0.1).
+	a.refreshMlxconfigExposure(pci, vals)
+	return vals, nil
+}
+
+// refreshMlxconfigExposure records which managed NV keys one device exposes
+// from a full-table read: present clears any memo entry (a firmware update
+// that adds a key must not stay filtered out), absent records the key as
+// unexposed. Only keys in the managed universe are tracked, so nothing a
+// stray parse could produce enters the memo.
+func (a *Agent) refreshMlxconfigExposure(pci string, vals map[string]string) {
+	if a.mlxconfigUnexposed == nil {
+		a.mlxconfigUnexposed = map[string]map[string]bool{}
+	}
+	un := a.mlxconfigUnexposed[pci]
+	if un == nil {
+		un = map[string]bool{}
+		a.mlxconfigUnexposed[pci] = un
+	}
+	for _, k := range mlxconfigManagedKeys {
+		if _, ok := vals[k]; ok {
+			delete(un, k)
+			continue
+		}
+		un[k] = true
+	}
+}
+
+// mlxconfigQueryableKeys drops from a candidate key list the keys this
+// device is known not to expose. Naming one makes mlxconfig reject the
+// entire selective query (exit 3, "-E- The Device doesn't support <KEY>
+// parameter"), which costs the full-table dump this step exists to avoid and
+// repeats on every pass — the walk learned the fact already, so the verify
+// may as well use it. Returns the input untouched when nothing is known.
+func (a *Agent) mlxconfigQueryableKeys(pci string, keys []string) []string {
+	un := a.mlxconfigUnexposed[pci]
+	if len(un) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !un[k] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // mlxconfigManagedKeys is every NV key nodeprep manages across all device
@@ -113,6 +160,12 @@ var mlxconfigManagedKeys = []string{
 // full-query era (an unexposed key is skipped, not drift), while a key the
 // walk WOULD manage but the query missed cannot exist: the probe derives
 // the candidates from buildFlashSet itself, so the two can never diverge.
+//
+// The probe is deliberately blind to what this particular device exposes —
+// that is what makes it the candidate superset — so the caller passes the
+// result through mlxconfigQueryableKeys before querying: keys already known
+// unexposed (recorded from a full read) must not be named, or mlxconfig
+// rejects the whole query (1.0.1, demo-cluster ConnectX-4 Lx).
 func flashQueryKeys(a *Agent, d pciDevice, p mlxconfigParams, probe map[string]string) []string {
 	keys := make([]string, 0, len(mlxconfigManagedKeys))
 	seen := map[string]bool{}
@@ -404,7 +457,17 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 			}
 			continue
 		}
-		vals, err := a.mlxconfigGetKeys(d.pci, flashQueryKeys(a, d, params, probe))
+		// Candidates minus the keys this device is known not to expose: a
+		// selective query naming one is rejected outright by mlxconfig, and
+		// (1.0.1) the walk's full read already recorded exactly which keys
+		// those are, so naming them again can only cost the full-table dump.
+		// A device left with no candidates has nothing this step could
+		// manage — same outcome as the empty flash set below.
+		candidates := a.mlxconfigQueryableKeys(d.pci, flashQueryKeys(a, d, params, probe))
+		if len(candidates) == 0 {
+			continue
+		}
+		vals, err := a.mlxconfigGetKeys(d.pci, candidates)
 		if err != nil {
 			// Some hardware/MFT builds reject a selective query naming a key
 			// the device does not support (the full-table read tolerates
@@ -412,6 +475,10 @@ func stepMlxconfigVerify(a *Agent, profile *v1alpha1.NodePrepProfile) (v1alpha1.
 			// Fall back to the walk-time full query so those devices keep
 			// verifying; a healthy emulation never reaches this, and a device
 			// that fails both reads fails the step as it would have before.
+			// The fallback read also refreshes the exposure memo, so a device
+			// reaching this branch pays the dump once per agent process, not
+			// once per pass (before 1.0.1 the demo cluster's ConnectX-4 Lx
+			// rails fell back on every single verify pass).
 			a.logf("mlxconfig: selective query failed on %s (%v); falling back to the full table", d.pci, err)
 			if vals, err = a.mlxconfigGetAll(d.pci); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: query: %v", d.pci, err))

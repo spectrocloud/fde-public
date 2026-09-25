@@ -1694,6 +1694,145 @@ func TestMlxconfigVerifySelectiveFallback(t *testing.T) {
 	}
 }
 
+// refreshMlxconfigExposure/​mlxconfigQueryableKeys: a full read records which
+// managed keys the device carries, and a key that later turns up present must
+// leave the memo (a firmware update that adds a parameter cannot stay
+// filtered out of the verify query forever).
+func TestMlxconfigExposureMemo(t *testing.T) {
+	a := &Agent{}
+	// CX-4 Lx-like read: no LINK_TYPE_P1/P2, and none of the CX-7 keys.
+	a.refreshMlxconfigExposure("0000:49:00.0", map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "ROCE_RTT_RESP_DSCP_P1": "48",
+	})
+	keys := a.mlxconfigQueryableKeys("0000:49:00.0", []string{"SRIOV_EN", "LINK_TYPE_P1", "NUM_OF_VFS", "LINK_TYPE_P2"})
+	if len(keys) != 2 || keys[0] != "SRIOV_EN" || keys[1] != "NUM_OF_VFS" {
+		t.Fatalf("a known-unexposed key must not survive into the query list, got %v", keys)
+	}
+	// Another device's memo never bleeds over.
+	if got := a.mlxconfigQueryableKeys("0000:05:00.0", []string{"LINK_TYPE_P1"}); len(got) != 1 {
+		t.Fatalf("the memo is per PCI address, got %v", got)
+	}
+	// Self-heal: the key appears in a later full read.
+	a.refreshMlxconfigExposure("0000:49:00.0", map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1", "LINK_TYPE_P1": "2",
+	})
+	if got := a.mlxconfigQueryableKeys("0000:49:00.0", []string{"LINK_TYPE_P1", "LINK_TYPE_P2"}); len(got) != 1 || got[0] != "LINK_TYPE_P1" {
+		t.Fatalf("a key present in the latest full read must be queryable again, got %v", got)
+	}
+	// The universe guard: an empty read memoizes the managed universe and
+	// nothing else.
+	a.refreshMlxconfigExposure("0000:99:00.0", map[string]string{})
+	managed := map[string]bool{}
+	for _, k := range mlxconfigManagedKeys {
+		managed[k] = true
+	}
+	for k := range a.mlxconfigUnexposed["0000:99:00.0"] {
+		if !managed[k] {
+			t.Fatalf("only managed keys may enter the memo, got %q", k)
+		}
+	}
+	if len(a.mlxconfigUnexposed["0000:99:00.0"]) != len(mlxconfigManagedKeys) {
+		t.Fatalf("an empty read marks the whole managed universe unexposed, got %d of %d",
+			len(a.mlxconfigUnexposed["0000:99:00.0"]), len(mlxconfigManagedKeys))
+	}
+}
+
+// The demo-cluster case (Kevin, 2026-09-23): the walk's full read showed the
+// ConnectX-4 Lx rails do not expose LINK_TYPE_P1, so the selective verify
+// query must not name it. Before the fix every pass named it, mlxconfig
+// rejected the whole query ("-E- The Device doesn't support LINK_TYPE_P1
+// parameter") and the pass fell back to the full table — forever. The first
+// pass here still pays that fallback once (there is nothing to know yet) and
+// learns from it; every pass after queries the reduced list, single exec, no
+// fallback.
+func TestMlxconfigVerifyDropsKnownUnexposedKeys(t *testing.T) {
+	profile := &v1alpha1.NodePrepProfile{}
+	profile.Spec.EastWest.LinkType = "Ethernet"
+	profile.Spec.EastWest.NumVFs = 1
+	yes := true
+	profile.Spec.Policy.HostMutations = &yes
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "usr", "bin", "mlxconfig"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := hostToolRoot
+	hostToolRoot = dir
+	defer func() { hostToolRoot = oldRoot }()
+
+	// The device's whole configuration table: a 25GbE ConnectX-4 Lx has no
+	// LINK_TYPE_* parameter at all (mlxconfig: "The Device doesn't support
+	// LINK_TYPE_P1 parameter").
+	full := map[string]string{
+		"NUM_OF_VFS": "1", "SRIOV_EN": "1",
+		"ROCE_RTT_RESP_DSCP_P1": "48", "ROCE_RTT_RESP_DSCP_MODE_P1": "1",
+	}
+	a := &Agent{mellanoxFns: []pciDevice{{pci: "0000:49:00.0", devType: "ConnectX4LX", variant: "Physical", rail: "r0"}}}
+	np := &v1alpha1.NodePrep{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	var cmds []string
+	a.execFn = func(env []string, timeout time.Duration, name string, quiet bool, args []string) (string, error) {
+		cmds = append(cmds, name+" "+strings.Join(args, " "))
+		if name != "mlxconfig" || len(args) < 3 || args[2] != "q" {
+			return "", fmt.Errorf("unexpected exec: %s %v", name, args)
+		}
+		for _, k := range args[3:] {
+			if k == "LINK_TYPE_P1" {
+				return "", fmt.Errorf("Device #1:\n\nDevice type:        ConnectX4LX\n\n-E- The Device doesn't support LINK_TYPE_P1 parameter")
+			}
+		}
+		return mlxconfigAirQuery(full, args[3:]...), nil
+	}
+	a.verifyOnly = true
+
+	// Pass 1: nothing known yet — the candidates name LINK_TYPE_P1, the
+	// device rejects the query, and the pass falls back to the full read
+	// (which is also where the knowledge comes from).
+	st, msg := stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("the fallback pass must still verify the device, got %s %q", st, msg)
+	}
+	if !strings.Contains(cmds[0], "LINK_TYPE_P1") {
+		t.Fatalf("with nothing memoized the first pass queries the full candidate list, got %q", cmds[0])
+	}
+	if len(cmds) != 2 || strings.HasSuffix(cmds[0], " q") {
+		t.Fatalf("the first pass must be selective-then-fallback, got %v", cmds)
+	}
+	if !a.mlxconfigUnexposed["0000:49:00.0"]["LINK_TYPE_P1"] {
+		t.Fatalf("the full read must record LINK_TYPE_P1 as unexposed, memo: %v", a.mlxconfigUnexposed["0000:49:00.0"])
+	}
+
+	// Pass 2: same agent — one selective query, without the unexposed keys,
+	// and no fallback.
+	cmds = nil
+	st, msg = stepMlxconfig(a, np, profile)
+	if st != v1alpha1.StepDone || !strings.Contains(msg, "verified on 1 device(s)") {
+		t.Fatalf("the learned pass must verify the device, got %s %q", st, msg)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("a learned device must not fall back again, got %v", cmds)
+	}
+	for _, k := range queryKeys(cmds[0], t) {
+		if k == "LINK_TYPE_P1" {
+			t.Fatalf("the query must not name a key the device is known not to expose, got %q", cmds[0])
+		}
+	}
+	// The keys the device does carry are still drift-checked.
+	for _, k := range []string{"SRIOV_EN", "NUM_OF_VFS", "ROCE_RTT_RESP_DSCP_P1"} {
+		found := false
+		for _, q := range queryKeys(cmds[0], t) {
+			if q == k {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the reduced query must keep drift-checking %s, got %q", k, cmds[0])
+		}
+	}
+}
+
 // Every key buildFlashSet can emit must live in mlxconfigManagedKeys, or
 // the Ready-phase selective query would silently stop drift-checking a key
 // the walk still manages. The probe map claims every managed key exposed,

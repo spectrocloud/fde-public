@@ -29,7 +29,7 @@ spec:
           operator: Exists
       containers:
         - name: controller
-          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.0-controller
+          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.1-controller
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true

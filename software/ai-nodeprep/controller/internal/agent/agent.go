@@ -64,6 +64,20 @@ type Agent struct {
 	// corrects itself on a later refresh.
 	mftCache map[string]mftInfo
 
+	// mlxconfigUnexposed memoizes, per PCI address, the managed NV keys the
+	// device does not expose — learned from every full-table read (the
+	// authority) via refreshMlxconfigExposure. The Ready-phase selective
+	// query must not name them: mlxconfig rejects the whole query with
+	// "-E- The Device doesn't support <KEY> parameter", which forced a
+	// full-table fallback on EVERY verify pass on the demo cluster's
+	// ConnectX-4 Lx rails (Kevin, 2026-09-23) — the walk already knew the
+	// key was unexposed and simply never told the verify. A key absent from
+	// a full read is the same fact addKV gates the walk's set on, so
+	// filtering candidates with it cannot hide drift: a key the device does
+	// not carry can never be in the walk's managed set. In-memory per agent
+	// process; entries clear as soon as a full read shows the key present.
+	mlxconfigUnexposed map[string]map[string]bool
+
 	// mftPendingLogged fires the one-line "MFT not installed yet" inventory
 	// notice once per process instead of per device per cycle (found noisy
 	// live on a fresh node: 4 lines × every poll cycle through the whole

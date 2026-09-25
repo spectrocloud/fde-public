@@ -1,7 +1,7 @@
 GO      ?= go
 GOFLAGS ?= -mod=mod
 IMG     ?= ghcr.io/spectrocloud/fde-public/ai-nodeprep
-VERSION ?= 1.0.0
+VERSION ?= 1.0.1
 PLATFORMS ?= linux/amd64,linux/arm64
 
 # One repo, two binaries: the component rides in the tag because a single

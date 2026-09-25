@@ -36,7 +36,7 @@ spec:
           operator: Exists
       containers:
         - name: agent
-          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.0-agent
+          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.1-agent
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME
