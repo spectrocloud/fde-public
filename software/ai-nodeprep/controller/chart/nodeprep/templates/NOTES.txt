@@ -1,0 +1,25 @@
+NodePrep {{ .Chart.AppVersion }} deployed.
+
+Workloads:
+  kubectl -n {{ include "nodeprep.namespace" . }} get deploy/{{ include "nodeprep.fullname" . }}-controller
+  kubectl -n {{ include "nodeprep.namespace" . }} get ds/{{ include "nodeprep.fullname" . }}-agent
+
+Next steps:
+  1. Verify the agent is Running on every node (it tolerates the nodeprep and
+     control-plane taints):
+     kubectl get nodes | grep -c Ready   # compare with agent pod count
+  2. Create a NodePrepProfile (see samples/ in the repo) — a profile with no
+     selection adopts nothing.
+  3. Watch a walk: kubectl get nodeprep -w
+
+Safety posture reminder: with agent.args.hostMutations=false (the default)
+the agent is detect-only — mutating steps report Blocked instead of touching
+the host. A converging walk needs hostMutations AND allowReboot.
+{{- if not .Values.agent.args.hostMutations }}
+
+  NOTE: this release runs the agent DETECT-ONLY (hostMutations=false).
+{{- end }}
+{{- if not .Values.agent.args.allowReboot }}
+
+  NOTE: reboots are DISABLED (allowReboot=false).
+{{- end }}

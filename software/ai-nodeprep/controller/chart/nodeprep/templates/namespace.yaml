@@ -1,0 +1,19 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "nodeprep.namespace" . }}
+  labels:
+    app.kubernetes.io/part-of: nodeprep
+    # The agent DaemonSet is privileged with hostPID and hostPath mounts by
+    # design (host mutations, nsenter reboots), so the namespace must opt out
+    # of baseline/restricted enforcement.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+  # Uninstalling the chart must not cascade-delete the namespace: it holds
+  # the NodePrep ledger-adjacent state and re-creating it re-runs PSA
+  # evaluation against running pods. Kept on uninstall; delete by hand if
+  # ever truly wanted.
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}

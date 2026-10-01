@@ -1,0 +1,100 @@
+# Example NodePrepProfile for an AI worker with Bluefield-3 DPUs on the
+# north-south rail and ConnectX SuperNICs on two east-west rails.
+# Mirrors the parameters of nodeprep-v105.sh (names in the comments).
+#
+# Artifacts below are the exact ones verified live on the test cluster
+# (controller/agent 0.1.11): downloads are sha256-verified, and a local copy
+# in the spcx cache that still hashes to the configured sha256 is reused
+# instead of re-fetched — keep the checksums set so re-preps stay off the
+# network.
+apiVersion: nodeprep.spectrocloud.com/v1alpha1
+kind: NodePrepProfile
+metadata:
+  name: gpu-worker-v105
+spec:
+  nodeSelector:
+    matchLabels:
+      node.spectrocloud.com/ai-worker: "true"
+
+  firmware:
+    #source: http://maas.internal:8069/rcp # base URL for artifacts (MAAS mirror)
+    source: https://kevin-s3-public.s3.eu-west-1.amazonaws.com/rcp
+    bfb:
+      name: bf-fwbundle-3.5.0-89_26.07-prod.bfb
+      sha256: 2d02f198b952b3e6a652beccbd7740ed4ab78ded3d00c3939acd1d707c93391d
+      # minVersion: <FW version flint reports on a card running this BFB>
+      # Flash gate floor (BlueField-3 only): a card whose running firmware
+      # sorts below this is outdated and gets flashed; omit to gate on the
+      # flash body alone.
+    doca:
+      deb: doca-host_3.5.0-082000-26.07-ubuntu2404_amd64.deb
+      sha256: a2312bb04b980fae370fb5de483fda8cc6bc590553bf3c8dc77f980e3840740a
+      # fn_init_sw_stage's exact install set: the DOCA bundle plus the
+      # companion packages (mft is a hard prerequisite of the Mellanox-gated
+      # steps — mlxconfig/bfb-install/mlnx_qos).
+      packages:
+      - linux-headers-$(uname -r)
+      - gcc-12
+      - libgcc-12-dev
+      - doca-all
+      - lldpd
+      - mft
+      - netplan.io
+      - pv
+      - psmisc
+    aptUpgrade: false
+
+  eastWest: # LINKTYPE_EW=2, NUMVF_EW=8, MTU_EW=9216, ESWITCH_MODE=switchdev
+    linkType: Ethernet
+    numVFs: 1
+    mtu: 9216
+    eswitchMode: switchdev
+    manageOVS: false # false (default): external manager (Spectrum-X) owns OVS services/db/bridges/PFs; nodeprep still applies the 5 switchdev other_config. true = nodeprep manages OVS
+    roceCC: true
+
+  northSouth: # LINKTYPE_NS=2, NUMVF_NS=16; offloadEngine=false leaves DPUs alone
+    linkType: Ethernet
+    numVFs: 16
+    offloadEngine: false # true = flash + configure DPUs (VFs when numVFs > 0)
+
+  rails: # rails_pciaddr in the bash script
+    - rail: r0
+      pciFunction: "05:00"
+    - rail: r1
+      pciFunction: "06:00"
+    - rail: r2
+      pciFunction: "07:00"
+    - rail: r3
+      pciFunction: "08:00"
+    - rail: r4
+      pciFunction: "09:00"
+    - rail: r5
+      pciFunction: "0a:00"
+    - rail: r6
+      pciFunction: "0b:00"
+    - rail: r7
+      pciFunction: "0c:00"
+
+  hostBoot:
+    iommu: auto
+    rdmaNetnsMode: exclusive # ib_core netns_mode=0 (exclusive|shared; legacy "0"/"1" still read)
+    hugepages:
+      defaultSize: 2M
+      pages1G: 0
+      pages2M: 5120
+    bootHook: true # nodeprep-boot.service rendered Before=kubelet.service (nil = on)
+    kubeletStateReset: always # guarded stop -> rm -> start at boot
+    mlnxInterfaceMgr: wait # two-condition gate (script + hardware)
+
+  policy:
+    capiPause: false # pause the CAPI Machine while prepping
+    workerRoleLabel: manage # demote at Finalizing, restore at Ready
+    labelCompat: false # set to "true" to migrate a cluster using the legacy spectrocloud.com/nodeprep label
+    maxConcurrentFlashes: 1 # fleet flash window
+    disableACS: false
+    taintEnabled: true # default; shown for clarity
+    rebootEnabled: true # flip with the agent's -allow-reboot
+    hostMutations: true # flip with the agent's -host-mutations
+
+  nfsRdma:
+    enabled: false

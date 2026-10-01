@@ -1,0 +1,92 @@
+{{/*
+The RBAC contract is the design, not a tuning knob — the rules match
+manifests/rbac.yaml exactly (the externally-enforced source). Changes land
+there first and are synced here, never the other way around.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-controller
+  labels:
+    {{- include "nodeprep.controllerLabels" . | nindent 4 }}
+rules:
+  # Controller: adoption, taint contract, labels, CAPI pause.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodepreps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodepreps/status]
+    verbs: [get, update, patch]
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodeprepprofiles]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create]
+  - apiGroups: [cluster.x-k8s.io]
+    resources: [machines]
+    verbs: [get, list, watch, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-agent
+  labels:
+    {{- include "nodeprep.agentLabels" . | nindent 4 }}
+rules:
+  # Node agent: owns the NodePrep status, emits events, reads profiles.
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodepreps]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodepreps/status]
+    verbs: [get, update, patch]
+  - apiGroups: [nodeprep.spectrocloud.com]
+    resources: [nodeprepprofiles]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  # 0.1.62 device-plugin bounce: at the walk's Ready flip the agent deletes
+  # this node's network-operator-sriov-device-plugin pod (nvidia-network-
+  # operator namespace) so the DaemonSet recreates it against the settled
+  # VF state. Without these verbs every bounce 403s.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-controller
+  labels:
+    {{- include "nodeprep.controllerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nodeprep.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nodeprep.fullname" . }}-controller
+    namespace: {{ include "nodeprep.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-agent
+  labels:
+    {{- include "nodeprep.agentLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nodeprep.fullname" . }}-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nodeprep.fullname" . }}-agent
+    namespace: {{ include "nodeprep.namespace" . }}

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-controller
+  namespace: {{ include "nodeprep.namespace" . }}
+  labels:
+    {{- include "nodeprep.controllerLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "nodeprep.fullname" . }}-controller
+  template:
+    metadata:
+      labels:
+        {{- include "nodeprep.controllerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nodeprep.fullname" . }}-controller
+      # Unlike the agent DaemonSet, this Deployment gets no auto-added
+      # tolerations. On a single-control-plane-node cluster it must be able
+      # to run on the one node being prepped (tainted with
+      # spectrocloud.com/nodeprep and carrying the control-plane taint).
+      tolerations:
+        {{- toYaml .Values.controller.tolerations | nindent 8 }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "nodeprep.controllerImage" . }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- with .Values.controller.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            # The image has no USER directive; pin an explicit non-root UID so
+            # runAsNonRoot is satisfied deterministically (nobody).
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}

@@ -1,0 +1,83 @@
+# Node agent DaemonSet. It needs eyes on the host (sysfs, PCI, udev, kubelet
+# state) and — only when an operator flips the flags — hands on the host
+# (-host-mutations, -allow-reboot). Detect-only is the default posture: with
+# the flags off the agent reports Blocked instead of touching anything.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nodeprep-agent
+  namespace: nodeprep-system
+  labels:
+    app.kubernetes.io/name: nodeprep-agent
+    app.kubernetes.io/part-of: nodeprep
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nodeprep-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nodeprep-agent
+        app.kubernetes.io/part-of: nodeprep
+    spec:
+      serviceAccountName: nodeprep-agent
+      hostPID: true # nsenter into PID 1 for nodeprep-initiated reboots
+      # The agent must run on the very nodes the contract taints: the taint
+      # survives reboots in etcd and is only released after the agent's own
+      # boot-verify — without this toleration the agent could never come back
+      # after a reboot to release it. The DaemonSet controller already adds
+      # the standard not-ready/unreachable/unschedulable tolerations; custom
+      # taints are never auto-tolerated. Control-plane taints so the agent can
+      # prep control-plane nodes.
+      tolerations:
+        - key: spectrocloud.com/nodeprep
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      containers:
+        - name: agent
+          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.1-agent
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - -interval=5s
+            # Safety flags (design: experimental gate). Both default false in
+            # the binary; uncomment to let steps mutate the host / reboot it.
+            - -host-mutations
+            - -allow-reboot
+            # Verbose host-exec logging (troubleshooting): every exec and
+            # tool dump is logged in full. Can also be toggled on a running
+            # cluster without editing this file:
+            #   kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE=true
+            #   kubectl -n nodeprep-system set env daemonset/nodeprep-agent NODEPREP_VERBOSE-
+            # - -verbose
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: host
+              mountPath: /host
+            - name: dev
+              mountPath: /dev
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: host
+          hostPath:
+            path: /
+        - name: dev
+          hostPath:
+            path: /dev

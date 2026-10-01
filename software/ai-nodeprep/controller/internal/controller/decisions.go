@@ -1,0 +1,131 @@
+package controller
+
+import (
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"spectrocloud.com/nodeprep/api/v1alpha1"
+	"spectrocloud.com/nodeprep/internal/k8sutil"
+)
+
+// Pure admission/taint decision functions, unit-tested; the reconcile loop
+// only applies their verdicts.
+
+// TaintShouldExist implements the taint contract (design §6.1): the taint is
+// present while the node is owned by nodeprep, and released only when the
+// phase is Ready AND the agent has verified the current boot. Failed nodes
+// keep the taint.
+func TaintShouldExist(phase v1alpha1.Phase, bootVerified bool, policy v1alpha1.PolicySpec) bool {
+	if !policy.TaintsOn() {
+		return false
+	}
+	return !(phase == v1alpha1.PhaseReady && bootVerified)
+}
+
+// AdmitFlashing is the fleet flash window (design §9.1): at most max nodes
+// flash concurrently (max <= 0 means unlimited in v0.1).
+func AdmitFlashing(busyOthers, max int) bool {
+	return max <= 0 || busyOthers < max
+}
+
+// AdmitControlPlane implements the quorum admission window (design §6.4):
+// at most CPMaxConcurrent(expected) control-plane nodes mid-prep at once.
+// Background strategy (single-CP clusters) admits unconditionally — the
+// work must happen even though the math allows zero disruptions.
+func AdmitControlPlane(busyOthers, maxConcurrent int, strategy string) bool {
+	if strategy == "background" {
+		return true
+	}
+	return busyOthers < maxConcurrent
+}
+
+// BusyControlPlane reports whether a control-plane NodePrep consumes the
+// §6.4 maintenance window: any stage past Provisioning (the host is being
+// worked on), or an admission already granted while still queued. Waiting
+// peers (MaintenanceAdmitted=False in Pending/Provisioning) do not count —
+// counting them deadlocks the window, since every member would wait on
+// every other.
+func BusyControlPlane(phase v1alpha1.Phase, maintenanceAdmitted string) bool {
+	switch phase {
+	case v1alpha1.PhaseFlashing, v1alpha1.PhaseConfiguring, v1alpha1.PhaseFinalizing:
+		return true
+	case v1alpha1.PhasePending, v1alpha1.PhaseProvisioning:
+		return maintenanceAdmitted == string(metav1.ConditionTrue)
+	default: // Ready, Failed, "" — converged or not started
+		return false
+	}
+}
+
+// CPMaxConcurrent computes how many control-plane nodes may be mid-prep
+// concurrently: expected − quorum(expected) — 1 for a 3-node CP, 2 for
+// 5 — with a floor of 1 so prep always makes progress (a 2-node CP is
+// pathological either way; document, don't deadlock).
+func CPMaxConcurrent(expected int) int {
+	if expected < 1 {
+		return 1
+	}
+	quorum := expected/2 + 1
+	n := expected - quorum
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// ExcludeLabelMatch reports whether a node is disqualified by the profile's
+// excludeLabel ("key" matches any value, "key=value" an exact one).
+func ExcludeLabelMatch(exclude string, labels map[string]string) bool {
+	if exclude == "" {
+		return false
+	}
+	key, want, hasVal := strings.Cut(exclude, "=")
+	got, ok := labels[key]
+	if !ok {
+		return false
+	}
+	return !hasVal || got == want
+}
+
+// WorkerLabelOp is the tri-state decision for the worker-role label.
+type WorkerLabelOp int
+
+const (
+	WorkerLabelNone WorkerLabelOp = iota
+	WorkerLabelSet
+	WorkerLabelRemove
+)
+
+// WorkerLabelDecision implements design §6.3 as of 0.1.94 (Kevin, dsx-new:
+// the SR-IOV Network Config Daemon's DaemonSet only schedules onto nodes
+// carrying this label, so it must never run while nodeprep owns the node —
+// its pod interferes with the walk). The label is OFF for the entire walk
+// and ON only on a Ready node whose CURRENT boot the agent has verified:
+// phase == Ready, the BootVerified condition True, and the NodePrep's
+// recorded bootId matching the node's running bootID — a fresh boot is
+// unverified until the agent's boot-verify pass passes. All three inputs
+// are durable API state, so an agent pod restart, upgrade or crashloop
+// never flaps the label. Only when policy says manage (empty means manage,
+// matching the legacy controller's unconditional behavior).
+func WorkerLabelDecision(phase v1alpha1.Phase, bootVerified, bootIDMatch bool, policy v1alpha1.PolicySpec) WorkerLabelOp {
+	if policy.WorkerRoleLabel != "" && policy.WorkerRoleLabel != "manage" {
+		return WorkerLabelNone
+	}
+	if phase == v1alpha1.PhaseReady && bootVerified && bootIDMatch {
+		return WorkerLabelSet
+	}
+	return WorkerLabelRemove
+}
+
+// WorkerLabelApplies gates the choreography by node role. Workers always
+// take it. A control-plane node takes it only when it carries no
+// node-role.kubernetes.io/control-plane taint: an untainted CP node is
+// expected to execute workloads, so a completed prep earns the worker
+// label there too (Kevin, 2026-09-08 — live on DSX Air: h00 has the CP
+// role label but no CP taint). A tainted CP node keeps its role identity
+// untouched in both directions — the label must never be gained or lost
+// because of a prep cycle there.
+func WorkerLabelApplies(node *corev1.Node, isCP bool) bool {
+	return !isCP || !k8sutil.HasTaint(node, v1alpha1.ControlPlaneTaintKey)
+}
