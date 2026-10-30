@@ -257,6 +257,10 @@ spec:
   selection:
     excludeLabel: node.spectrocloud.com/ai-worker=false
     mode: allNodes
+    # mode: labelSelector
+    # nodeSelector:
+    #   matchLabels:
+    #     node.spectrocloud.com/ai-worker: "true"
     waitForFipsKernel: false
 ```
 
