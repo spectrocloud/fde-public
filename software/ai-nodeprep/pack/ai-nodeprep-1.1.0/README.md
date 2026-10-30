@@ -21,9 +21,10 @@ RDMA namespace mode and SR-IOV tuned consistently.
   manage. The agent DaemonSet runs privileged with `hostPID` and mounts `/sys`,
   `/dev` and the host root; the namespace is labeled for privileged Pod
   Security enforcement.
-- NVIDIA MFT installed on hosts that will have Mellanox adapters or DPUs
-  configured (`mlxconfig`, `flint`). Firmware and DOCA artifacts must be
-  reachable from the nodes at the URL configured in `firmware.source`.
+- The `mft` package must be part of `firmware.doca.packages`; NodePrep
+  installs MFT from that list when adapters or DPUs are configured
+  (`mlxconfig`, `flint`). Firmware and DOCA artifacts must be reachable from
+  the nodes at the URL configured in `firmware.source`.
 - BlueField-3 DPUs with `rshim` available on hosts where DPU flashing is
   enabled (`northSouth.offloadEngine=true` and `policy.controlDPU=true`).
 - Reboot permission for the agent when the profile may reboot nodes: the pack
@@ -78,9 +79,9 @@ A profile without a `selection` block adopts no nodes.
 | `firmware.aptUpgrade` | Runs `apt-get update` and `apt-get upgrade` before package installation. | Boolean | `false` | No |
 | `firmware.bfb.name` | BFB firmware bundle filename, relative to `firmware.source`. | String | None — no BFB step | No |
 | `firmware.bfb.minVersion` | Firmware floor for the BFB flash gate on BlueField-3. A card below it is flashed; a card at or above it needs no flash. Dot-separated numeric comparison with zero-padding (`32.49` < `32.49.1014`). | String | None (no version gate) | No |
-| `firmware.bfb.sha256` | SHA-256 of the BFB. A cached copy that still matches is reused. | String | None (no verification) | No |
+| `firmware.bfb.sha256` | SHA-256 of the BFB. When set, a cached copy that still matches is reused; when omitted the download is not integrity-checked and any cached copy is downloaded again on every run. | String | None (no verification) | No |
 | `firmware.doca.deb` | DOCA host package filename, relative to `firmware.source`. | String | None — no DOCA install | No |
-| `firmware.doca.sha256` | SHA-256 of the DOCA package. | String | None (no verification) | No |
+| `firmware.doca.sha256` | SHA-256 of the DOCA package. Same behavior as `firmware.bfb.sha256` when omitted. | String | None (no verification) | No |
 | `firmware.doca.packages` | Packages installed with the DOCA package. The placeholder `$(uname -r)` is expanded to the host kernel release. | List of strings | Empty | No |
 
 ### `eastWest` — GPU fabric rail
@@ -108,7 +109,7 @@ A profile without a `selection` block adopts no nodes.
 
 | **Parameter** | **Description** | **Type** | **Default Value** | **Required** |
 |---|---|---|---|---|
-| `rails[].rail` | Rail name, for example `r0` or `r1_p0`. | String matching `r<N>` or `r<N>_p<N>` | None | Yes, per entry |
+| `rails[].rail` | Base rail name, for example `r0`. The PCI function identifies the card; for multi-port cards the agent appends `_p<port>` automatically from the detected ports, so the suffix is not entered here. | String matching `r<N>` (the `_p<N>` suffix is generated) | None | Yes, per entry |
 | `rails[].pciFunction` | PCI function of the adapter without the domain, for example `05:00`. | String | None | Yes, per entry |
 
 Only adapters listed here are configured.
@@ -123,8 +124,8 @@ Only adapters listed here are configured.
 | `hostBoot.hugepages.pages1G` | Number of 1 GiB hugepages. | Integer or numeric string | `0` | No |
 | `hostBoot.hugepages.pages2M` | Number of 2 MiB hugepages. | Integer or numeric string | `0` | No |
 | `hostBoot.bootHook` | Renders the `nodeprep-boot.service` oneshot that carries the kubelet manager-state reset and the Mellanox interface-manager wait into every boot. | Boolean | `true` | No |
-| `hostBoot.kubeletStateReset` | Guarded kubelet CPU/Memory-manager state reset. `always` runs at prep and every boot; `readyCheck` runs only while the kubelet is not running; `off` disables it. | String (`always`, `readyCheck`, `off`) | `off` | No |
-| `hostBoot.mlnxInterfaceMgr` | How the boot hook handles the Mellanox interface manager: wait for it, disable it, or ignore it. | String (`wait`, `disable`, `ignore`) | `ignore` | No |
+| `hostBoot.kubeletStateReset` | Guarded kubelet CPU/Memory-manager state reset. `always` runs at prep and every boot; `readyCheck` runs only while the kubelet is not running; `off` disables it. | String (`always`, `readyCheck`, `off`) | `always` | No |
+| `hostBoot.mlnxInterfaceMgr` | How the boot hook handles the Mellanox interface manager: `wait` for it (hardware-gated), `disable` it, or `ignore` it. | String (`wait`, `disable`, `ignore`) | `wait` (unset; when the boot hook is installed) | No |
 
 ### `policy` — safety and fleet control
 
@@ -162,7 +163,7 @@ Reserved: accepted by the schema but not applied yet.
 | **Parameter** | **Description** | **Type** | **Default Value** | **Required** |
 |---|---|---|---|---|
 | `controlPlane.prep` | Allows control-plane nodes to be prepared. This is the only control-plane gate; `selection` must also include them. | Boolean | `true` | No |
-| `controlPlane.expectedCount` | Expected control-plane size, used to compute the maintenance window. `0` derives the value from the KubeadmControlPlane replicas. | Integer or numeric string | `0` (auto) | No |
+| `controlPlane.expectedCount` | Expected control-plane size, used to compute the maintenance window. `0` derives the value from the KubeadmControlPlane replicas, which only works for PXK CAPI clusters; on other clusters set the count explicitly. | Integer or numeric string | `0` (auto) | No |
 | `controlPlane.strategy` | `serial` admits one control-plane node past provisioning at a time; `background` applies no admission limit. | String (`serial`, `background`) | `serial` | No |
 | `controlPlane.bootstrapGate` | Reserved: accepted by the schema but not applied yet. | String (`auto`, `delay`, `off`) | Unset | No |
 | `controlPlane.bootstrapDelay` | Reserved: accepted by the schema but not applied yet. | String (duration) | Unset | No |
@@ -173,9 +174,9 @@ Reserved: accepted by the schema but not applied yet.
 - **Upgrading to 1.1.0** adds `selection.waitForFipsKernel`. The CRDs are chart templates, so a Helm or Palette upgrade applies the new schema automatically; no manual CRD step is required. Upgrades preserve existing `NodePrep` and `NodePrepProfile` objects and their progress ledgers.
   - Retry behavior also changed: a step now gets 10 counted attempts with a longer exponential backoff, and failures caused by an unavailable Kubernetes API server or a DNS server temporarily failing to respond no longer consume the retry budget.
   - A DNS name that does not resolve (`no such host`, `name or service not known`) is treated as a configuration error and still consumes the budget.
+  - `hostBoot.kubeletStateReset` now defaults to `always`: profiles that omit it install the boot hook and perform the guarded kubelet manager-state reset at prep and on every boot. Set it to `off` to retain the previous behavior.
 - **If `crds.create=false`** because an external system owns the CRDs, that system must apply the updated schema before deploying this version.
 - **The pack enables host mutations and reboots** (`agent.args.hostMutations` and `agent.args.allowReboot`). Confirm that the profile's `policy.hostMutations` and `policy.rebootEnabled` match the intended posture.
-- **From 1.0.0 onward the images are published at** `ghcr.io/spectrocloud/fde-public/ai-nodeprep`. Cluster profiles that pinned an earlier image registry must update the image repositories.
 
 
 ## Usage
@@ -188,28 +189,75 @@ Reserved: accepted by the schema but not applied yet.
 apiVersion: nodeprep.spectrocloud.com/v1alpha1
 kind: NodePrepProfile
 metadata:
-  name: gpu-worker
+  name: basic-profile
 spec:
-  selection:
-    mode: labelSelector
-    nodeSelector:
-      matchLabels:
-        node.spectrocloud.com/ai-worker: "true"
+  controlPlane:
+    bootstrapGate: auto
+    expectedCount: 0
+    prep: false
+    strategy: serial
+  eastWest:
+    eswitchMode: legacy
+    linkType: Ethernet
+    manageOVS: false
+    mtu: 9000
+    nicBreakout: 1
+    numVFs: 0
+    planesNum: 1
+    roceCC: true
+  firmware:
+    aptUpgrade: true
+    bfb:
+      name: bf-fwbundle-3.5.0-89_26.07-prod.bfb
+      sha256: 2d02f198b952b3e6a652beccbd7740ed4ab78ded3d00c3939acd1d707c93391d
+    doca:
+      deb: doca-host_3.5.0-082000-26.07-ubuntu2404_amd64.deb
+      packages:
+      - linux-headers-$(uname -r)
+      - gcc-12
+      - libgcc-12-dev
+      - doca-all
+      - lldpd
+      - mft
+      - netplan.io
+      - pv
+      - psmisc
+      sha256: a2312bb04b980fae370fb5de483fda8cc6bc590553bf3c8dc77f980e3840740a
+    source: http://maas.company.com:5248/rcp
+  hostBoot:
+    hugepages:
+      defaultSize: 2M
+      pages1G: "0"
+      pages2M: "0"
+    iommu: auto
+    kubeletStateReset: always
+    mlnxInterfaceMgr: wait
+    rdmaNetnsMode: exclusive
+  nfsRdma:
+    enabled: true
+  northSouth:
+    linkType: Ethernet
+    numVFs: 0
+    offloadEngine: false
+  policy:
+    capiPause: true
+    controlDPU: false
+    disableACS: true
+    hostMutations: true
+    labelCompat: false
+    maxConcurrentFlashes: 1
+    rebootEnabled: true
+    taintEnabled: true
+    workerRoleLabel: manage
   rails:
     - rail: r0
       pciFunction: "05:00"
     - rail: r1
       pciFunction: "06:00"
-  eastWest:
-    linkType: Ethernet
-    numVFs: 1
-    mtu: 9216
-    eswitchMode: switchdev
-    manageOVS: false
-  policy:
-    hostMutations: true
-    rebootEnabled: true
-    taintEnabled: true
+  selection:
+    excludeLabel: node.spectrocloud.com/ai-worker=false
+    mode: allNodes
+    waitForFipsKernel: false
 ```
 
 4. As soon as a node is adopted, the controller applies the `spectrocloud.com/nodeprep` taint so workloads are not scheduled onto a node that is being prepared. The agent walks the node through the stages and verifies it after every boot; the taint is released only when verification passes.
@@ -221,8 +269,4 @@ spec:
 
 ## References
 
-- [NodePrep controller source](https://github.com/spectrocloud/fde-public/tree/nodeprep-controller/software/ai-nodeprep/controller)
-- [NVIDIA DOCA documentation](https://docs.nvidia.com/doca/)
-- [NVIDIA MFT documentation](https://docs.nvidia.com/networking/display/mftv/)
-- [Kubernetes device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)
-- [Spectro Cloud pack documentation](https://docs.spectrocloud.com/registries-and-packs/)
+- [NodePrep pack source](https://github.com/spectrocloud/fde-public/tree/main/software/ai-nodeprep/pack/ai-nodeprep-1.1.0)

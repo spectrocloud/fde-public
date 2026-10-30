@@ -35,6 +35,15 @@ func TestRenderBootHookAlways(t *testing.T) {
 	}
 }
 
+// An omitted kubeletStateReset takes the default (always): the hook must
+// carry the reset, not render an empty case that never matches.
+func TestRenderBootHookDefaultKubeletReset(t *testing.T) {
+	_, script := renderBootHook("node-7", v1alpha1.HostBootSpec{})
+	if !strings.Contains(script, `case "always" in`) || !strings.Contains(script, "reset_kubelet_state") {
+		t.Fatalf("an unset kubeletStateReset must default to always:\n%s", script)
+	}
+}
+
 func TestRenderBootHookReadyCheck(t *testing.T) {
 	_, script := renderBootHook("node-7", v1alpha1.HostBootSpec{KubeletStateReset: "readyCheck"})
 	for _, want := range []string{`case "readyCheck" in`, "readycheck || reset_kubelet_state", "nodepreps/node-7", "kubelet.conf"} {
@@ -121,9 +130,19 @@ func TestBootHookOn(t *testing.T) {
 func TestStepKubeletStateGates(t *testing.T) {
 	np := &v1alpha1.NodePrep{}
 
-	state, msg := stepKubeletState(&Agent{}, np, &v1alpha1.NodePrepProfile{})
+	// Explicit off is now the only way to skip the reset.
+	offProfile := &v1alpha1.NodePrepProfile{Spec: v1alpha1.NodePrepProfileSpec{
+		HostBoot: v1alpha1.HostBootSpec{KubeletStateReset: "off"},
+	}}
+	state, msg := stepKubeletState(&Agent{}, np, offProfile)
 	if state != v1alpha1.StepDone || !strings.Contains(msg, "skipped") {
-		t.Fatalf("mode off: got %s %q, want Done/skipped", state, msg)
+		t.Fatalf("explicit off: got %s %q, want Done/skipped", state, msg)
+	}
+
+	// Omitted means always (1.1.0): the no-duties skip must not trigger.
+	state, msg = stepKubeletState(&Agent{}, np, &v1alpha1.NodePrepProfile{})
+	if state != v1alpha1.StepDone || strings.Contains(msg, "skipped") {
+		t.Fatalf("unset kubeletStateReset must default to always, got %s %q", state, msg)
 	}
 
 	a := &Agent{hostKubeletDir: t.TempDir()} // detect-only by zero value

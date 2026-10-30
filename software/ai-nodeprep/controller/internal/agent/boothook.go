@@ -129,7 +129,7 @@ fi
 		// nothing to wait for.
 	}
 	b.WriteString(`
-case "` + hb.KubeletStateReset + `" in
+case "` + hb.KubeletStateResetMode() + `" in
   always) reset_kubelet_state ;;
   readyCheck) readycheck || reset_kubelet_state ;;
 esac

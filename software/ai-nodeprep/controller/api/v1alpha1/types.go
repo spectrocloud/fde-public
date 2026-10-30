@@ -303,7 +303,7 @@ type HostBootSpec struct {
 	RDMANetnsMode     string        `json:"rdmaNetnsMode,omitempty"`
 	Hugepages         HugepagesSpec `json:"hugepages,omitempty"`
 	BootHook          *bool         `json:"bootHook,omitempty"`          // nil = on: render nodeprep-boot.service
-	KubeletStateReset string        `json:"kubeletStateReset,omitempty"` // always | readyCheck | off
+	KubeletStateReset string        `json:"kubeletStateReset,omitempty"` // always (default) | readyCheck | off
 	MlnxInterfaceMgr  string        `json:"mlnxInterfaceMgr,omitempty"`  // wait | disable | ignore
 }
 
@@ -313,6 +313,16 @@ type HostBootSpec struct {
 // nodeprep installs.
 func (h HostBootSpec) BootHookOn() bool {
 	return h.BootHook == nil || *h.BootHook
+}
+
+// KubeletStateResetMode applies the default (always) to an absent field: a
+// profile that says nothing still gets the guarded manager-state reset at
+// prep and on every boot.
+func (h HostBootSpec) KubeletStateResetMode() string {
+	if h.KubeletStateReset == "" {
+		return "always"
+	}
+	return h.KubeletStateReset
 }
 
 type HugepagesSpec struct {

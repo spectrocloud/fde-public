@@ -268,9 +268,14 @@ spec:
                       description: Render the nodeprep-boot.service oneshot (design §6.2). Unset means true.
                       type: boolean
                     kubeletStateReset:
-                      description: Guarded kubelet manager-state reset at boot.
+                      description: >
+                        Guarded kubelet manager-state reset at boot. always
+                        (default) resets at prep and on every boot; readyCheck
+                        resets only while the kubelet is not running; off
+                        disables the reset.
                       type: string
                       enum: [always, readyCheck, off, ""]
+                      default: always
                     mlnxInterfaceMgr:
                       description: Handling of the mlnx_interface_mgr wait.
                       type: string
