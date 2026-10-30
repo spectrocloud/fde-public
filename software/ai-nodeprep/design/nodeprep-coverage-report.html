@@ -1142,7 +1142,24 @@
       NodePrep, the tenth does) and
       <code>TestRunStageTransientFailuresDoNotCount</code> (fifteen DNS
       failures leave attempts at 0 and the phase un-failed; the next success
-      completes the step and clears the pacing).</li>
+      completes the step and clears the pacing).
+      <br><br>
+      <b>Controller resilience during an API outage.</b> A single-control-plane
+      repave briefly removed the API server; the controller stayed alive but
+      stopped reconciling — no adoption of a newly joined worker for ten
+      minutes, and no log after startup. Reconciles run inline behind the
+      informer's serial event delivery, so one API call that never returned
+      (a blackholed connection rather than a refusal) wedges every later
+      event. Two changes: each reconcile now runs under a 60-second context
+      (<code>reconcileTimeout</code>), turning a hung call into a logged
+      failure and letting the next resync retry; and the controller serves
+      <code>/healthz</code> and <code>/readyz</code>, both backed by a
+      one-item node list against the API server (5-second timeout). The chart
+      and manifests wire liveness/readiness probes to them (20s period, 3
+      failures), so a controller that has lost its connection is restarted by
+      the kubelet and re-syncs its informers when the API returns.
+      <code>TestHealthHandler</code> covers 200 with a reachable API and 503
+      with a connection-refused failure on both endpoints.</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from

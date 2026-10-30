@@ -32,6 +32,10 @@ var (
 	nodePrepsGVR = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodepreps"}
 )
 
+// reconcileTimeout bounds one node reconcile so a hung API call cannot block
+// the informer's serial event delivery indefinitely (1.1.0).
+const reconcileTimeout = 60 * time.Second
+
 // Controller is the cluster controller. v0.1 runs a single replica without
 // leader election (documented in the README).
 type Controller struct {
@@ -92,7 +96,16 @@ func (c *Controller) enqueue(ctx context.Context, obj interface{}) {
 	// Reconciles are cheap (small clusters, cached reads); run them inline
 	// behind the informer's delivery. A workqueue is warranted when the
 	// flash window and CP admission see production scale.
-	c.reconcileNode(ctx, node.Name)
+	//
+	// Bound each reconcile: informer event delivery is serial, so one call
+	// that never returns (a TCP connection blackholed by a control-plane
+	// outage) would wedge the controller permanently — alive and silent
+	// while no further nodes are processed (1.1.0, Kevin: a single-CP
+	// repave). A bounded context turns that into a logged failure and lets
+	// the next resync retry; the health probe handles a longer outage.
+	rctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
+	c.reconcileNode(rctx, node.Name)
 }
 
 // reprobeMachineCRD re-checks for the Machine CRD at most once a minute,
