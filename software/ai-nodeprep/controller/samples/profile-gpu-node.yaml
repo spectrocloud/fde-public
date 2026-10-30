@@ -12,9 +12,14 @@ kind: NodePrepProfile
 metadata:
   name: gpu-worker-v105
 spec:
-  nodeSelector:
-    matchLabels:
-      node.spectrocloud.com/ai-worker: "true"
+  selection:
+    nodeSelector:
+      matchLabels:
+        node.spectrocloud.com/ai-worker: "true"
+    # 1.1.0: hold every nodeprep action until the node runs a FIPS kernel —
+    # for clusters whose Palette profile installs Ubuntu Pro's FIPS kernel
+    # after the non-FIPS MAAS boot. false/omitted: the kernel is irrelevant.
+    # waitForFipsKernel: true
 
   firmware:
     #source: http://maas.internal:8069/rcp # base URL for artifacts (MAAS mirror)

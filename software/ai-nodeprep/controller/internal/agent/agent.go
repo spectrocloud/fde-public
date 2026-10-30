@@ -110,6 +110,13 @@ type Agent struct {
 	krel      string
 	krelKnown bool
 
+	// fipsWaitLogged / fipsReadyLogged dedup the waitForFipsKernel gate's
+	// log line and event to one occurrence per agent process. A kernel
+	// change only happens across a reboot, and a reboot restarts the pod —
+	// so a fresh process always observes the new kernel.
+	fipsWaitLogged  bool
+	fipsReadyLogged bool
+
 	// noPrepLogged keeps the "no NodePrep yet" line to one occurrence
 	// instead of one per poll cycle.
 	noPrepLogged bool
@@ -502,6 +509,41 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 				a.emit(ctx, corev1.EventTypeNormal, "Resumed", "NodePrep resumed by operator annotation")
 				return
 			}
+		}
+	}
+
+	// FIPS-kernel gate (1.1.0, Kevin): FIPS environments boot the node from
+	// MAAS on a non-FIPS kernel while a Palette cluster-profile action
+	// installs Ubuntu Pro's FIPS kernel. With spec.selection.waitForFipsKernel
+	// set, nothing may touch the host until the running kernel is the FIPS
+	// one — inventory, the boot hook, the walk and boot-verify all wait, so
+	// DOCA and the kernel installation cannot run in parallel. The check is
+	// cheap (uname -r, cached per process) and the hold is silent after the
+	// first line + event. A reboot into the FIPS kernel starts a fresh agent
+	// process, which clears both flags and proceeds normally.
+	if profile.Spec.Selection.GetWaitForFipsKernel() {
+		release, err := a.kernelRelease(nil)
+		if err != nil {
+			if !a.fipsWaitLogged {
+				a.fipsWaitLogged = true
+				msg := fmt.Sprintf("cannot determine the running kernel (%v); holding all nodeprep actions until it is readable", err)
+				a.logf("waitForFipsKernel: %s", msg)
+				a.emit(ctx, corev1.EventTypeWarning, "WaitingForFipsKernel", msg)
+			}
+			return
+		}
+		if !fipsKernel(release) {
+			if !a.fipsWaitLogged {
+				a.fipsWaitLogged = true
+				msg := fmt.Sprintf("running kernel %q is not a FIPS kernel; holding all nodeprep actions until the FIPS kernel boots (spec.selection.waitForFipsKernel)", release)
+				a.logf("waitForFipsKernel: %s", msg)
+				a.emit(ctx, corev1.EventTypeNormal, "WaitingForFipsKernel", msg)
+			}
+			return
+		}
+		if !a.fipsReadyLogged {
+			a.fipsReadyLogged = true
+			a.logf("waitForFipsKernel: running FIPS kernel %q; nodeprep actions enabled", release)
 		}
 	}
 

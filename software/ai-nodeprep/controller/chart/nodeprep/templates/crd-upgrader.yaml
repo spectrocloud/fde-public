@@ -1,0 +1,116 @@
+{{/*
+Pre-upgrade CRD upgrader (1.1.0).
+
+The CRDs render as ordinary templates so `helm upgrade` carries schema
+changes, but a pre-upgrade hook guarantees the schema is in place before any
+other resource of the new release is applied — and it works even when the
+CRDs were previously applied by an earlier release whose templates differ.
+Existing clusters therefore pick up a NodePrepProfile schema change by
+deploying the newer chart, with no manual `kubectl apply`.
+
+Why pre-upgrade and not pre-install: a pre-install hook runs before the
+release's own resources, including the namespace this Job lives in — on a
+fresh install with namespace.create=true the hook would fail to schedule.
+Fresh installs get the CRDs from the release templates instead; upgrades are
+the case that needs the job.
+
+The job runs the controller image itself: the CRDs are embedded in the
+binary (manifests/embed.go), so there is no kubectl image to mirror, no
+ConfigMap to mount, and the schema applied is exactly the one the image was
+built with. Applying is create-or-update and idempotent; the live object's
+identity and Helm ownership metadata are preserved.
+
+Skipped when an external system owns the CRDs (crds.create=false) or when
+crds.upgradeJob=false.
+*/}}
+{{- if and .Values.crds.create .Values.crds.upgradeJob }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+  namespace: {{ include "nodeprep.namespace" . }}
+  labels:
+    {{- include "nodeprep.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+  labels:
+    {{- include "nodeprep.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  # CRDs are cluster-scoped; the job needs to create and replace their
+  # schemas and nothing else.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+  labels:
+    {{- include "nodeprep.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+    namespace: {{ include "nodeprep.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+  namespace: {{ include "nodeprep.namespace" . }}
+  labels:
+    {{- include "nodeprep.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "nodeprep.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "nodeprep.fullname" . }}-crd-upgrader
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "nodeprep.fullname" . }}-crd-upgrader
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+        - name: crd-upgrader
+          image: {{ include "nodeprep.controllerImage" . }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          command: ["/usr/local/bin/controller", "crd-upgrade"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+{{- end }}
