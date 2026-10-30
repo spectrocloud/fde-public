@@ -19,9 +19,6 @@ RUN go mod download
 COPY api/ api/
 COPY internal/ internal/
 COPY cmd/ cmd/
-# The CRD manifests are embedded into the controller binary: the chart's
-# pre-upgrade hook job applies them via the `crd-upgrade` subcommand.
-COPY manifests/ manifests/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -o /out/controller ./cmd/controller && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

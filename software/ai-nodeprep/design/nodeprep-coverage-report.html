@@ -1088,8 +1088,8 @@
       <code>boot-verify step ovsSetup/ovsBridges: Done — skipped by policy
       (eastWest.manageOVS=false)</code> and passed BootVerified cleanly — worker label
       present, no taints, sriov daemon 2/2 desired/ready.</li>
-  <li><b>1.1.0 — FIPS-kernel gate (<code>selection.waitForFipsKernel</code>) and a
-      chart CRD upgrader (Kevin, MAAS/FIPS edge case).</b> In this environment
+  <li><b>1.1.0 — FIPS-kernel gate (<code>selection.waitForFipsKernel</code>)
+      (Kevin, MAAS/FIPS edge case).</b> In this environment
       MAAS boots the node on a non-FIPS kernel and a Palette cluster-profile
       action then enables Ubuntu Pro and installs the FIPS kernel as a
       post-install step; nodeprep's DOCA install running in parallel is the
@@ -1112,31 +1112,10 @@
       cycle-level cases against fake clients: gate on + a generic kernel runs
       <em>no</em> step and execs only <code>uname -r</code>, emitting the
       event; gate on + a FIPS kernel walks; gate off + a generic kernel walks.
-      <br><br>
-      <b>CRD upgrade.</b> The new field is a schema change, so existing
-      clusters need the CRD updated. The chart now ships a pre-upgrade hook
-      job (<code>crd-upgrader.yaml</code>: ServiceAccount + ClusterRole +
-      ClusterRoleBinding + Job) that runs the controller image as
-      <code>controller crd-upgrade</code>. The CRDs are embedded into the
-      controller binary (<code>manifests/embed.go</code>; <code>manifests/</code>
-      remains the externally-enforced source), so the job needs no kubectl
-      image to mirror and no ConfigMap to mount, and the schema it applies is
-      exactly the one its image was built with — the new image is pulled
-      before the upgrade proceeds. Apply is create-or-update and idempotent,
-      and it preserves the live CRD's identity plus the Helm ownership
-      annotations/labels another manager wrote (dropping those would break the
-      next release's ownership checks). The job is gated on
-      <code>crds.create</code> and <code>crds.upgradeJob</code> (both default
-      true); it is skipped when an external system (Palette) owns the CRDs,
-      and it does not run on fresh installs — a pre-install hook cannot precede
-      the namespace it lives in, and the release templates create the CRDs
-      there. Tests: <code>TestApplyCreatesMissingCRDs</code> and
-      <code>TestApplyUpdatesSchemaAndPreservesOwnershipMetadata</code> (create,
-      update, Helm metadata preserved, <code>waitForFipsKernel</code> present
-      in the applied schema). The subcommand was also run against the test
-      cluster's API server before the workloads were deployed: both CRDs
-      applied, the new field read back, and a second run was a clean no-op
-      update.
+      The schema change needs no separate upgrader: the CRDs render as chart
+      templates (not under <code>crds/</code>), so <code>helm upgrade</code>
+      carries <code>waitForFipsKernel</code> automatically, and Helm applies
+      CustomResourceDefinitions before the workloads of the same release.
       <br><br>
       <b>Retry robustness (same release).</b> Nodes were failing prep after
       five counted step attempts while the control plane was still forming or

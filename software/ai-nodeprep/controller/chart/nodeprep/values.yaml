@@ -14,13 +14,6 @@ fullnameOverride: ""
 # enforces the CRDs — two owners would otherwise fight.
 crds:
   create: true
-  # Render the pre-upgrade hook job that applies the CRDs embedded in the
-  # controller image (1.1.0). Existing clusters then pick up a schema change
-  # by deploying the newer chart, without a manual kubectl apply. Only runs
-  # when crds.create is true — an external CRD owner (e.g. Palette) stays
-  # the single writer. Fresh installs do not need it (the release templates
-  # create the CRDs); pre-install hooks cannot run before the namespace.
-  upgradeJob: true
 
 # All nodeprep resources live in one namespace. The agent DaemonSet runs
 # privileged with hostPID and hostPath mounts by design (host mutations,

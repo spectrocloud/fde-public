@@ -43,16 +43,6 @@ Helm "owns" objects other tools may also manage. On clusters where an external
 system (e.g. Palette) enforces the CRDs, set `crds.create=false` to avoid two
 owners fighting.
 
-Since 1.1.0 the chart also ships a **pre-upgrade hook job** (`crd-upgrader.yaml`)
-that applies the CRDs embedded in the controller image. It runs before any
-other resource of the upgrade, so the new schema is in place even when a
-`NodePrepProfile` field was added — no manual `kubectl apply` needed. The
-controller binary owns the apply logic (`controller crd-upgrade`); there is no
-kubectl sidecar image to mirror and no ConfigMap to mount. It is skipped when
-`crds.create=false` or `crds.upgradeJob=false`, and it does not run on fresh
-installs (the release templates create the CRDs; a pre-install hook cannot run
-before the namespace it lives in exists).
-
 Manual `kubectl apply` of the raw CRD manifests on a chart-managed cluster
 re-stamps Helm's ownership markers afterwards (`make crd-apply` does it) —
 without `meta.helm.sh/release-*` and `app.kubernetes.io/managed-by: Helm` the
@@ -65,7 +55,6 @@ validation.
 |---|---|---|
 | `namespace.yaml` | Namespace | PSA `privileged` (agent needs it). Kept on uninstall. Skippable via `namespace.create=false`. |
 | `crd-nodeprep*.yaml` | 2 CRDs | Rendered templates (`crds.create=false` to skip); upgraded on every `helm upgrade` — see the section above for the trade-offs. |
-| `crd-upgrader.yaml` | SA + ClusterRole/Binding + Job (hooks) | Pre-**upgrade** hook that applies the CRDs embedded in the controller image, so a schema change reaches existing clusters by deploying the newer chart. Runs only when `crds.create` and `crds.upgradeJob` are true. |
 | `serviceaccounts.yaml` | 2 SAs | controller + agent. |
 | `clusterroles.yaml` | 2 ClusterRoles + 2 bindings | Mirrors `manifests/rbac.yaml` (the agent's `pods list/delete` backs the 0.1.62 device-plugin bounce). |
 | `controller-deployment.yaml` | Deployment | Hardened (non-root, read-only fs, caps dropped), tolerates the nodeprep + control-plane taints. |
@@ -83,7 +72,6 @@ validation.
 | `agent.args.verbose` / `NODEPREP_VERBOSE` env | off | Full host-exec trace for troubleshooting; the env toggle works without a rollout. |
 | `agent.args.rebootCommand` | binary default | `nsenter -t 1 -m -u -i -n -- systemctl reboot`. |
 | `namespace.create` | `true` | false when the namespace (and its PSA labels) is external. |
-| `crds.upgradeJob` | `true` | Render the pre-upgrade CRD upgrader job (1.1.0). Only active with `crds.create=true`; an external CRD owner stays the single writer. |
 
 ## Versioning
 
