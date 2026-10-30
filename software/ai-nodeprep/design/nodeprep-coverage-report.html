@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v1.0.1</span>
+    <span>nodeprep-v105.sh → controller v1.1.0</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 1.0.1</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 1.1.0</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1088,6 +1088,55 @@
       <code>boot-verify step ovsSetup/ovsBridges: Done — skipped by policy
       (eastWest.manageOVS=false)</code> and passed BootVerified cleanly — worker label
       present, no taints, sriov daemon 2/2 desired/ready.</li>
+  <li><b>1.1.0 — FIPS-kernel gate (<code>selection.waitForFipsKernel</code>) and a
+      chart CRD upgrader (Kevin, MAAS/FIPS edge case).</b> In this environment
+      MAAS boots the node on a non-FIPS kernel and a Palette cluster-profile
+      action then enables Ubuntu Pro and installs the FIPS kernel as a
+      post-install step; nodeprep's DOCA install running in parallel is the
+      clash. The profile gains <code>spec.selection.waitForFipsKernel</code>
+      (boolean, default <strong>false</strong>). When true the agent resolves
+      its running kernel (<code>uname -r</code>, cached per process — containers
+      share the host kernel, so no nsenter is needed) and holds
+      <em>every</em> action until the release names a FIPS kernel (Ubuntu Pro
+      ships <code>-fips</code> releases: <code>6.8.0-1015-fips</code>,
+      <code>5.15.0-1070-fips</code>): no inventory refresh, no boot-hook
+      install, no walk, no boot-verify, and no host exec beyond the kernel
+      probe. The hold is announced once per process (log + a
+      <code>WaitingForFipsKernel</code> event) so an operator sees why nothing
+      moves; the boot bookkeeping and phase sync still run, so the ledger stays
+      truthful. A reboot into the FIPS kernel restarts the pod, and the fresh
+      process observes the new kernel and proceeds. With the setting false or
+      omitted, the kernel version is irrelevant — the pre-1.1.0 behavior.
+      Tests: <code>TestFipsKernel</code> (release classification, mixed case
+      and prefixes) and <code>TestCycleWaitsForFipsKernel</code> — three
+      cycle-level cases against fake clients: gate on + a generic kernel runs
+      <em>no</em> step and execs only <code>uname -r</code>, emitting the
+      event; gate on + a FIPS kernel walks; gate off + a generic kernel walks.
+      <br><br>
+      <b>CRD upgrade.</b> The new field is a schema change, so existing
+      clusters need the CRD updated. The chart now ships a pre-upgrade hook
+      job (<code>crd-upgrader.yaml</code>: ServiceAccount + ClusterRole +
+      ClusterRoleBinding + Job) that runs the controller image as
+      <code>controller crd-upgrade</code>. The CRDs are embedded into the
+      controller binary (<code>manifests/embed.go</code>; <code>manifests/</code>
+      remains the externally-enforced source), so the job needs no kubectl
+      image to mirror and no ConfigMap to mount, and the schema it applies is
+      exactly the one its image was built with — the new image is pulled
+      before the upgrade proceeds. Apply is create-or-update and idempotent,
+      and it preserves the live CRD's identity plus the Helm ownership
+      annotations/labels another manager wrote (dropping those would break the
+      next release's ownership checks). The job is gated on
+      <code>crds.create</code> and <code>crds.upgradeJob</code> (both default
+      true); it is skipped when an external system (Palette) owns the CRDs,
+      and it does not run on fresh installs — a pre-install hook cannot precede
+      the namespace it lives in, and the release templates create the CRDs
+      there. Tests: <code>TestApplyCreatesMissingCRDs</code> and
+      <code>TestApplyUpdatesSchemaAndPreservesOwnershipMetadata</code> (create,
+      update, Helm metadata preserved, <code>waitForFipsKernel</code> present
+      in the applied schema). The subcommand was also run against the test
+      cluster's API server before the workloads were deployed: both CRDs
+      applied, the new field read back, and a second run was a clean no-op
+      update.</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from
@@ -2322,7 +2371,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 1.0.1 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 1.1.0 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
