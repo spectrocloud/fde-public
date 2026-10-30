@@ -25,7 +25,11 @@ import (
 
 var nodePrepsGVR = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodepreps"}
 
-const maxStepAttempts = 5
+// maxStepAttempts is the counted retry budget for a step. Failures that look
+// like transient infrastructure (DNS down, API server unreachable while the
+// control plane forms) are paced but NOT counted against it — see
+// transientRetryError and the StepFailed arm of runStage (1.1.0).
+const maxStepAttempts = 10
 
 // Agent is the node-side engine. It is stateless across restarts: all
 // progress lives in the NodePrep status (design §2 principle 1).
@@ -134,6 +138,13 @@ type Agent struct {
 	// cleared on success and on the resume annotation.
 	backoffUntil map[string]time.Time
 
+	// transientFailures counts consecutive transient (infrastructure)
+	// failures per step for pacing only. They never feed the counted retry
+	// budget, so an API-server outage or a DNS failure cannot exhaust a step
+	// (1.1.0). In-memory like backoffUntil: an agent restart resets the
+	// pacing, never any durable state.
+	transientFailures map[string]int
+
 	// fwResetChips dedups the mlxfwreset firmware reset (0.1.59) to one run
 	// per physical chip per step pass — the mezz's two PFs share one
 	// firmware, so a reset staged for either function reinitializes both,
@@ -194,16 +205,17 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, nodeName, ns string
 	return &Agent{
 		client: client, dyn: dyn, nodeName: nodeName, ns: ns,
 		interval: interval, allowReboot: allowReboot, hostMutations: hostMutations,
-		verbose:        verbose,
-		rebootCommand:  rebootCommand,
-		backoffUntil:   map[string]time.Time{},
-		mftCache:       map[string]mftInfo{},
-		hostKubeletDir: "/host/var/lib/kubelet",
-		hostEtcUdev:    "/host/etc/udev/rules.d",
-		hostRunDir:     "/host/run",
-		bfbDir:         func() string { return "/host/opt/spectrocloud/spcx/bfb" },
-		spcxDir:        func() string { return "/host/opt/spectrocloud/spcx" },
-		hostEtcDir:     func() string { return "/host/etc" },
+		verbose:           verbose,
+		rebootCommand:     rebootCommand,
+		backoffUntil:      map[string]time.Time{},
+		transientFailures: map[string]int{},
+		mftCache:          map[string]mftInfo{},
+		hostKubeletDir:    "/host/var/lib/kubelet",
+		hostEtcUdev:       "/host/etc/udev/rules.d",
+		hostRunDir:        "/host/run",
+		bfbDir:            func() string { return "/host/opt/spectrocloud/spcx/bfb" },
+		spcxDir:           func() string { return "/host/opt/spectrocloud/spcx" },
+		hostEtcDir:        func() string { return "/host/etc" },
 	}
 }
 
@@ -747,27 +759,44 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		state, msg := def.run(a, np, profile)
 		s.Message = msg
 		var wait time.Duration
+		transient := false
 		switch state {
 		case v1alpha1.StepDone:
 			s.State = v1alpha1.StepDone
 			now := metav1.Now()
 			s.CompletedAt = &now
 			delete(a.backoffUntil, s.Name)
+			delete(a.transientFailures, s.Name)
 		case v1alpha1.StepBlocked:
 			s.State = v1alpha1.StepBlocked
 			blocked = true
 			allDone = false
 		case v1alpha1.StepFailed:
-			s.Attempts++
 			s.State = v1alpha1.StepFailed
 			allDone = false
+			// Infrastructure-level failures (DNS down, API server unreachable
+			// while the control plane forms) are expected to heal. Pace them
+			// with their own in-memory counter and retry indefinitely: they
+			// must not consume the counted budget, or a short control-plane
+			// outage fails a node that would have converged (1.1.0).
+			if transientRetryError(s.Message) {
+				transient = true
+				if a.transientFailures == nil {
+					a.transientFailures = map[string]int{}
+				}
+				a.transientFailures[s.Name]++
+				wait = stepBackoff(a.interval, a.transientFailures[s.Name])
+				a.backoffUntil[s.Name] = time.Now().Add(wait)
+				break
+			}
+			// A real failure restarts the transient pacing (that counter is
+			// for pacing only) and consumes one counted attempt.
+			delete(a.transientFailures, s.Name)
+			s.Attempts++
 			// Pacing: hold the step back for a doubling interval so a
 			// flaky mirror cannot burn the whole budget in one poll window
 			// (in-memory only; an agent restart just resets the pacing).
-			wait = a.interval << min(s.Attempts-1, 5)
-			if wait > 2*time.Minute {
-				wait = 2 * time.Minute
-			}
+			wait = stepBackoff(a.interval, s.Attempts)
 			a.backoffUntil[s.Name] = time.Now().Add(wait)
 			if s.Attempts >= maxStepAttempts {
 				failed = true
@@ -776,7 +805,15 @@ func (a *Agent) runStage(ctx context.Context, np *v1alpha1.NodePrep, profile *v1
 		// Every step result change is logged, so pod logs alone tell an
 		// operator what ran and why (design §2). Unchanged results stay
 		// silent to keep the 5s poll from spamming.
-		if s.State != prev.State || s.Message != prev.Message || s.Attempts != prev.Attempts {
+		switch {
+		case transient:
+			// Log every occurrence: during an outage this paced line is the
+			// evidence that the walk is alive and waiting rather than wedged.
+			if s.State != prev.State {
+				a.stageProgressed = true
+			}
+			a.logf("step %s failed transiently (not counted, retry in %s): %s", def.name, wait, s.Message)
+		case s.State != prev.State || s.Message != prev.Message || s.Attempts != prev.Attempts:
 			// Message-only churn is not progress (a blocked step re-reports
 			// the same wall every cycle); state and attempt changes are.
 			if s.State != prev.State || s.Attempts != prev.Attempts {
