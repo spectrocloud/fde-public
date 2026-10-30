@@ -1159,7 +1159,23 @@
       failures), so a controller that has lost its connection is restarted by
       the kubelet and re-syncs its informers when the API returns.
       <code>TestHealthHandler</code> covers 200 with a reachable API and 503
-      with a connection-refused failure on both endpoints.</li>
+      with a connection-refused failure on both endpoints.
+      <br><br>
+      <b>Control-plane adoption race.</b> A repaved control plane registers
+      with its <code>node-role.kubernetes.io/control-plane</code> taint before
+      kubeadm applies the role label. <code>isControlPlane</code> checked only
+      labels, so the controller adopted <code>vm-cp-pool-03</code> as a worker
+      and created a NodePrep despite <code>controlPlane.prep=false</code>; the
+      agent walks its NodePrep without consulting the profile gate, so it
+      started provisioning the control plane. Both sides now treat a node
+      carrying the control-plane (or legacy master) taint as a control plane,
+      and the agent freezes a retained NodePrep when
+      <code>controlPlane.prep=false</code> — the controller's gate only stops
+      new adoption, while its retained NodePrep is meant to stay frozen. Tests:
+      <code>TestIsControlPlane</code> (label, legacy label, taint-only, worker),
+      <code>TestNodeIsControlPlane</code>, and
+      <code>TestCycleHoldsControlPlaneWhenPrepDisabled</code> (a taint-only CP
+      with a retained NodePrep runs no step and execs nothing).</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from

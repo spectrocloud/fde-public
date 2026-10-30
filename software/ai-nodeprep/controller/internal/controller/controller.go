@@ -662,8 +662,20 @@ func isControlPlane(node *corev1.Node) bool {
 	if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
 		return true
 	}
-	_, ok := node.Labels["node-role.kubernetes.io/master"]
-	return ok
+	if _, ok := node.Labels["node-role.kubernetes.io/master"]; ok {
+		return true
+	}
+	// A node registers with its control-plane taint before kubeadm applies
+	// the role label. Checking only labels let the controller adopt a
+	// freshly repaved control plane as a worker and walk it despite
+	// controlPlane.prep=false (1.1.0, vm-cp-pool-03). The label still
+	// matters: an untainted control plane must count too.
+	for _, t := range node.Spec.Taints {
+		if t.Key == "node-role.kubernetes.io/control-plane" || t.Key == "node-role.kubernetes.io/master" {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeInto converts an unstructured object into a typed struct via JSON.

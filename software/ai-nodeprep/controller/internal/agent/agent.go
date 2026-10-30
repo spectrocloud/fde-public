@@ -384,6 +384,17 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		return
 	}
 
+	// Control-plane prep gate (1.1.0): the controller enforces
+	// controlPlane.prep at adoption, but a NodePrep created while the CP role
+	// was not yet visible (or before the profile set prep=false) would
+	// otherwise keep walking on the agent side. Freeze it here too — the
+	// controller's gate only stops new adoption, and its retained NodePrep
+	// is meant to stay frozen.
+	if !profile.Spec.ControlPlane.PrepOn() && a.nodeIsControlPlane(ctx) {
+		a.logOnce("profile %s sets controlPlane.prep=false; holding this control-plane node", np.Spec.ProfileRef.Name)
+		return
+	}
+
 	// Profile edit (design §5.1, the coarse v0.1 form of inputsHash): a new
 	// profile generation invalidates every step — the machine re-walks from
 	// Provisioning and each step re-converges. All steps are idempotent
@@ -626,7 +637,21 @@ func (a *Agent) nodeIsControlPlane(ctx context.Context) bool {
 		}
 		return a.cpRole // stale but recent answer
 	}
-	_, cp := node.Labels["node-role.kubernetes.io/control-plane"]
+	cp := false
+	if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
+		cp = true
+	}
+	if _, ok := node.Labels["node-role.kubernetes.io/master"]; ok {
+		cp = true
+	}
+	// The role label lands after registration; the control-plane taint does
+	// not. Checking both is what keeps a freshly repaved CP out of worker
+	// treatment (1.1.0, vm-cp-pool-03).
+	for _, t := range node.Spec.Taints {
+		if t.Key == "node-role.kubernetes.io/control-plane" || t.Key == "node-role.kubernetes.io/master" {
+			cp = true
+		}
+	}
 	a.cpRole, a.cpRoleKnown, a.cpRoleUntil = cp, true, time.Now().Add(time.Minute)
 	return cp
 }
