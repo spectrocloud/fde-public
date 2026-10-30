@@ -81,13 +81,13 @@ spec:
                     waitForFipsKernel:
                       description: >
                         Hold every nodeprep action until the node runs a FIPS
-                        kernel (1.1.0). FIPS environments boot the node from
-                        MAAS on a non-FIPS kernel while a Palette cluster-profile
-                        action installs Ubuntu Pro's FIPS kernel; enabling this
-                        keeps DOCA and the kernel installation from running in
-                        parallel. The agent checks its running kernel release
-                        (uname -r, which carries "fips" for FIPS kernels) on
-                        every cycle and performs no inventory, boot-hook, walk
+                        kernel (1.1.0). In environments where the node boots
+                        with a non-FIPS kernel initially and then installs a FIPS
+                        kernel afterwards through actions in the clusterprofile;
+                        enabling this keeps DOCA and the kernel installation from
+                        running in parallel. The agent checks its running kernel
+                        release (uname -r, which carries "fips" for FIPS kernels)
+                        on every cycle and performs no inventory, boot-hook, walk
                         or boot-verify action until it sees one. false/omitted
                         (default): the kernel version does not matter.
                       type: boolean
