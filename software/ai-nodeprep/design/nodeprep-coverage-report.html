@@ -1144,8 +1144,11 @@
       own. The budget is now 10 attempts, paced more steeply: 10s, 20s, 40s,
       80s, then a 2-minute cap, so three retries span ~70s instead of ~15s.
       On top of that, failures whose message reads as transient infrastructure
-      (<code>transientRetryError</code>: DNS — "no such host", "temporary
-      failure in name resolution", …; Kubernetes API server / control plane —
+      (<code>transientRetryError</code>: DNS server unavailable —
+      "temporary failure in name resolution", "server misbehaving", "could not
+      resolve host"; deliberately <em>not</em> a missing record — "no such
+      host" and "name or service not known" are structural, e.g. a mistyped
+      FQDN, and must keep failing; Kubernetes API server / control plane —
       "connection refused", "connection reset by peer", "TLS handshake
       timeout", 503/unavailable, etcd timeouts, "context deadline exceeded",
       "i/o timeout", …) are paced but <em>never counted</em>: the step keeps

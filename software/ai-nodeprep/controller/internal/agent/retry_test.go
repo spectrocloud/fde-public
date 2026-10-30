@@ -18,7 +18,6 @@ import (
 
 func TestTransientRetryError(t *testing.T) {
 	transient := []string{
-		`Get "https://api.example.com:6443/api": dial tcp: lookup api.example.com on 10.0.0.2:53: no such host`,
 		`lookup registry.example.com: Temporary failure in name resolution`,
 		`Get "https://10.0.0.1:6443/apis": dial tcp 10.0.0.1:6443: connect: connection refused`,
 		`read tcp 10.0.0.5:41234->10.0.0.1:6443: read: connection reset by peer`,
@@ -36,6 +35,8 @@ func TestTransientRetryError(t *testing.T) {
 		}
 	}
 	permanent := []string{
+		`Get "https://api.example.com:6443/api": dial tcp: lookup api.example.com on 10.0.0.2:53: no such host`,
+		`lookup registry.example.com: Name or service not known`,
 		`mlxconfig reset failed: device busy`,
 		`key LINK_TYPE_P1 absent from query`,
 		`unsupported shell expression "$(hostname)"`,
@@ -140,7 +141,7 @@ func TestRunStageTransientFailuresDoNotCount(t *testing.T) {
 		name: "waitsForAPI", stage: v1alpha1.PhaseConfiguring,
 		run: func(a *Agent, np *v1alpha1.NodePrep, p *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 			if fail {
-				return v1alpha1.StepFailed, `Get "https://api.example.com:6443/api": dial tcp: lookup api.example.com on 10.0.0.2:53: no such host`
+				return v1alpha1.StepFailed, `lookup api.example.com on 10.0.0.2:53: Temporary failure in name resolution`
 			}
 			return v1alpha1.StepDone, "apiserver reachable"
 		},

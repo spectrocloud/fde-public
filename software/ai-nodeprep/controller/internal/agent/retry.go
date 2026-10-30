@@ -36,11 +36,13 @@ func stepBackoff(interval time.Duration, n int) time.Duration {
 // not here, because the agent's own long-running host units (apt, dpkg)
 // report timeouts that are not necessarily self-healing.
 var transientPatterns = []string{
-	// DNS resolution.
-	"no such host",
+	// DNS server unavailable — NOT a name that does not exist. "no such
+	// host" (Go) and "name or service not known" (glibc, EAI_NONAME) mean
+	// the record is absent, which is structural (a mistyped FQDN, a missing
+	// zone entry); they are deliberately not transient. EAI_AGAIN and
+	// resolver timeouts are, because the infrastructure can heal.
 	"server misbehaving",
 	"temporary failure in name resolution",
-	"name or service not known",
 	"could not resolve host",
 
 	// Kubernetes API server / control plane unreachable.
