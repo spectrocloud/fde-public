@@ -89,6 +89,125 @@ The CRD templates must stay byte-identical to `manifests/crd-*.yaml`:
 make chart-sync-crds
 ```
 
+## NodePrepProfile reference
+
+A `NodePrepProfile` is cluster-scoped (`nodeprep.spectrocloud.com/v1alpha1`). It
+selects nodes and declares how to prep them; every setting lives under `spec`.
+A field is **optional** unless the table says required, and "default" describes
+the behavior when it is omitted. Integer fields marked *(int/string)* also
+accept a numeric string (e.g. `"8"`), because Palette templating delivers
+values as strings. The `status` section is written by the controller/agent, not
+by the operator.
+
+### `selection` — which nodes are adopted
+
+A profile with no `selection` block adopts **no nodes** (this is the one
+effectively required section).
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `mode` | How the node set is chosen. `allWorkers` skips control-plane nodes; `allNodes` includes them (subject to `controlPlane.prep`). | `labelSelector`, `allWorkers`, `allNodes` | `labelSelector` |
+| `nodeSelector` | Label gate used with `labelSelector` mode; standard `matchLabels` and `matchExpressions` (`In`, `NotIn`, `Exists`, `DoesNotExist`). | LabelSelector object | empty — matches every node |
+| `excludeLabel` | Disqualifies nodes in every mode. `key` excludes any value; `key=value` excludes that exact one. | string | none |
+| `waitForFipsKernel` | Holds every nodeprep action (inventory, boot hook, walk, boot-verify) until the node runs a FIPS kernel — `uname -r` contains `fips`. For FIPS environments where the node boots non-FIPS and a cluster-profile action installs the FIPS kernel afterwards, so DOCA and the kernel install never race. Applied per cycle; a reboot into the FIPS kernel starts a fresh agent that proceeds. | boolean | `false` |
+
+### `firmware` — BFB and DOCA artifacts
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `source` | Base URL for BFB/DOCA downloads (e.g. a MAAS/TFTP mirror). | URL string | unset — download steps skip |
+| `aptUpgrade` | Run `apt-get update && apt-get upgrade` before package installation. | boolean | `false` |
+| `bfb.name` | BFB firmware bundle filename, relative to `source`. | string | unset — no BFB step |
+| `bfb.minVersion` | Firmware floor for the BFB flash gate (BlueField-3 only). A card whose running firmware sorts below it is flashed; one at or above needs no flash. Dot-separated numeric comparison with zero-padding (`32.49` < `32.49.1014`). ConnectX-class adapters are never compared. | numeric dotted string | unset — no version gate |
+| `bfb.sha256` | SHA-256 of the BFB; a cached copy that still matches is reused. | 64-char hex string | unset — no checksum verification |
+| `doca.deb` | DOCA host package filename, relative to `source`. | string | unset — no DOCA install |
+| `doca.sha256` | SHA-256 of the DOCA deb. | 64-char hex string | unset — no checksum verification |
+| `doca.packages` | Packages installed in the deb's apt transaction. Only the placeholder `$(uname -r)` is expanded (to the host kernel release); any other shell expression fails the step. | list of package names | empty |
+
+### `eastWest` — the GPU fabric rail
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `linkType` | Link type applied to the rail adapters. | `InfiniBand`, `Ethernet` | unset — link type left unmanaged |
+| `numVFs` | SR-IOV VFs per rail-mapped PF. | *(int/string)* ≥ 0 | `0` |
+| `mtu` | Rail MTU. In switchdev the bridges/VFs/representors get `mtu - 50` (bash headroom). | *(int/string)* > 0 | unset/`0` — MTU left unmanaged (the bash default for a configured fabric is `9216`) |
+| `eswitchMode` | Eswitch mode applied through devlink. Only `switchdev` engages the switchdev-specific work (VFs, OVS other_config, bridges). | `switchdev`, `legacy` | unset — eswitch mode left unmanaged |
+| `manageOVS` | OVS ownership gate. `false` leaves services, conf.db, bridges, PF attachment and the ownership record to an external manager (e.g. Spectrum-X controller) while nodeprep still applies the five switchdev `other_config` parameters; `true` is full DOCA OVS management. | boolean | `false` |
+| `roceCC` | Applies the RoCE congestion-control / adaptive-routing keys (`ROCE_ADAPTIVE_ROUTING_EN`, `USER_PROGRAMMABLE_CC`, …) on SuperNIC and ConnectX-7/8/9 adapters. | boolean | `false` |
+| `planesNum` | Multi-plane east-west topology (one port per plane per SuperNIC). **Reserved:** declared in the schema, not yet applied by any step. | *(int/string)* `1`, `2`, `4` | `1` |
+| `nicBreakout` | Port breakout on ConnectX-8 and above (one physical port into multiple PFs). **Reserved:** declared, not yet applied. | *(int/string)* `1`, `2`, `4` | `1` |
+
+### `northSouth` — DPUs
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `linkType` | Link type for the DPU functions. | `InfiniBand`, `Ethernet` | unset — left unmanaged |
+| `numVFs` | VFs per DPU function when DPU management is enabled. | *(int/string)* ≥ 0 | `0` |
+| `offloadEngine` | Master DPU gate: `true` flashes and configures BlueField DPUs (BFB, mlxconfig, VFs); `false` leaves DPUs entirely alone. | boolean | `false` |
+
+### `rails` — which adapters form the fabric
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `rails[].rail` | Rail name. | string matching `r<N>` or `r<N>_p<N>` (e.g. `r0`, `r1_p0`) | **required** per entry |
+| `rails[].pciFunction` | PCI function of the adapter (`DDDD:BB:DD.F` without the domain, e.g. `05:00`). | string | **required** per entry |
+
+The list itself is optional; only rail-mapped devices are configured.
+
+### `hostBoot` — OS-level boot behavior
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `iommu` | IOMMU kernel setting staged for the host. | `auto`, `intel`, `amd`, `off` | unset — left unmanaged |
+| `rdmaNetnsMode` | `ib_core` netns mode: `exclusive` (netns_mode=0) or `shared` (=1). Legacy `"0"`/`"1"` values in stored profiles are still read. | `exclusive`, `shared` | unset — left unmanaged |
+| `hugepages.defaultSize` | Default hugepage size. | string, e.g. `2M`, `1G` | unset — left unmanaged |
+| `hugepages.pages1G` | Number of 1 GiB hugepages. | *(int/string)* ≥ 0 | `0` |
+| `hugepages.pages2M` | Number of 2 MiB hugepages. | *(int/string)* ≥ 0 | `0` |
+| `bootHook` | Render the `nodeprep-boot.service` oneshot that carries the kubelet manager-state reset and the `mlnx_interface_mgr` wait into every boot. | boolean | unset = `true` |
+| `kubeletStateReset` | Guarded kubelet CPU/Memory-manager state reset: `always` (at prep and every boot), `readyCheck` (only when the kubelet is not running), `off`. | `always`, `readyCheck`, `off` | unset = `off` |
+| `mlnxInterfaceMgr` | Handling of the Mellanox interface manager in the boot hook: `wait` for it, `disable` it, or `ignore` it. | `wait`, `disable`, `ignore` | unset = `ignore` |
+
+### `policy` — safety and fleet control
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `controlDPU` | Allows DPU control at all (required in addition to `northSouth.offloadEngine=true`). | boolean | `false` |
+| `disableACS` | Disables PCIe ACS on the adapters (required for peer-to-peer GPU traffic). | boolean | `false` |
+| `maxConcurrentFlashes` | Fleet-wide flash window: how many nodes may flash at once. `0` = unlimited. | *(int/string)* ≥ 0 | `0` |
+| `capiPause` | Pauses the CAPI Machine while the node is being prepped. | boolean | `false` |
+| `workerRoleLabel` | Adds/restores the Kubernetes worker role label when the node is Ready; `ignore` leaves it untouched. | `manage`, `ignore` | `manage` |
+| `labelCompat` | Legacy migration shim: mirrors the old `spectrocloud.com/nodeprep` label. `false` removes it when present. | boolean | `false` |
+| `taintEnabled` | Applies the `spectrocloud.com/nodeprep` taint at adoption, releasing it only after boot-verify. Set `false` for a non-disruptive/observe-only run. | boolean | `true` |
+| `rebootEnabled` | Allows the profile to request reboots (the agent also requires `-allow-reboot`). | boolean | `false` |
+| `hostMutations` | Allows any step that mutates the host (the agent also requires `-host-mutations`). With it false the walk is detect-only and mutating steps report Blocked. | boolean | `false` |
+
+### `dpuBMC` — DPU BMC/CEC flashing
+
+**Reserved:** the schema declares these settings, but no step consumes them yet.
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `credentialsSecretRef.name` | Secret containing the DPU BMC credentials. | string | **required** when this block is used |
+| `credentialsSecretRef.namespace` | Namespace of that Secret. | string | secret's own default |
+| `updateBMC` | Update the DPU BMC firmware. | boolean | `false` |
+| `updateCEC` | Update the DPU CEC firmware. | boolean | `false` |
+
+### `nfsRdma`
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `enabled` | Configures NFS over RDMA on the node. | boolean | `false` |
+
+### `controlPlane` — control-plane choreography
+
+| Setting | What it is for | Allowed values | Default |
+|---|---|---|---|
+| `prep` | Whether control-plane nodes may be prepped at all. Omitted means they may; this is the sole control-plane gate (selection still has to include them). | boolean | unset = `true` |
+| `expectedCount` | Expected control-plane size; used to compute the maintenance window (expected − quorum). `0` derives it from the KubeadmControlPlane replicas. | *(int/string)* ≥ 0 | `0` (auto) |
+| `strategy` | `serial` admits one control-plane node past Provisioning at a time; `background` applies no admission limit. | `serial`, `background` | `serial` |
+| `bootstrapGate` | **Reserved:** declared in the schema, not yet applied. | `auto`, `delay`, `off` | unset |
+| `bootstrapDelay` | **Reserved:** declared in the schema, not yet applied. | duration string, e.g. `5m` | unset |
+
 ## Example NodePrepProfile
 
 In order to trigger nodeprep on nodes, deploy a NodePrepProfile resource:
