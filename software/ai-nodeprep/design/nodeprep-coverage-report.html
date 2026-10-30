@@ -1175,7 +1175,18 @@
       <code>TestIsControlPlane</code> (label, legacy label, taint-only, worker),
       <code>TestNodeIsControlPlane</code>, and
       <code>TestCycleHoldsControlPlaneWhenPrepDisabled</code> (a taint-only CP
-      with a retained NodePrep runs no step and execs nothing).</li>
+      with a retained NodePrep runs no step and execs nothing).
+      <br><br>
+      <b>Boot hook before the FIPS hold.</b> The hook was installed after the
+      FIPS gate, so a node waiting for its FIPS kernel never received the
+      pre-kubelet oneshot. The FIPS reboot then found stale kubelet
+      manager-state files and kubelet refused to start ("the expected machine
+      state is different from the real one"), losing the node — the agent
+      cannot repair that, because a pod cannot run until kubelet does. The
+      install now happens before the gate: two files and a unit are not a
+      firmware or kernel operation, so they are deliberately outside the
+      hold. <code>TestCycleInstallsBootHookWhileFipsHeld</code> asserts the
+      hook exists and the walk is still held.</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from

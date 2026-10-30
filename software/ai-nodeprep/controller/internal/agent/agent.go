@@ -535,11 +535,27 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 		}
 	}
 
+	// Install the boot hook before anything can reboot the node — including
+	// the FIPS wait below. The hook is the only thing that clears stale
+	// kubelet manager state BEFORE kubelet starts; a node whose hook was
+	// still uninstalled when the FIPS action rebooted it came back with
+	// kubelet refusing to start ("the expected machine state is different
+	// from the real one") and was lost. Installing two files plus a unit is
+	// not a firmware/kernel operation, so it is deliberately outside the
+	// FIPS hold (1.1.0, Kevin). Mutations-gated like every host write.
+	if a.mutationsAllowed(profile) {
+		if msg, err := a.ensureBootHook(profile); err != nil {
+			a.logf("boot hook install failed: %v", err)
+		} else if msg != "" {
+			a.logf("boot hook: %s", msg)
+		}
+	}
+
 	// FIPS-kernel gate (1.1.0, Kevin): FIPS environments boot the node from
 	// MAAS on a non-FIPS kernel while a Palette cluster-profile action
 	// installs Ubuntu Pro's FIPS kernel. With spec.selection.waitForFipsKernel
 	// set, nothing may touch the host until the running kernel is the FIPS
-	// one — inventory, the boot hook, the walk and boot-verify all wait, so
+	// one — inventory, the walk and boot-verify all wait, so
 	// DOCA and the kernel installation cannot run in parallel. The check is
 	// cheap (uname -r, cached per process) and the hold is silent after the
 	// first line + event. A reboot into the FIPS kernel starts a fresh agent
@@ -573,20 +589,6 @@ func (a *Agent) cycle(ctx context.Context, bootID string) {
 	// Refresh inventory each cycle (cheap, sysfs-only in v0.1).
 	if err := a.refreshInventory(ctx, np, profile); err != nil {
 		a.logf("inventory scan failed: %v", err)
-	}
-
-	// Install the boot hook before any stage can request a reboot (design
-	// §6.2): the hook carries the guarded kubelet manager-state reset into
-	// every future boot, and machines with stale memory-manager state
-	// crashloop kubelet on a reboot that happens before the Finalizing
-	// kubeletState step would have installed it. Mutations-gated like every
-	// host write; detect-only runs keep the status quo.
-	if a.mutationsAllowed(profile) {
-		if msg, err := a.ensureBootHook(profile); err != nil {
-			a.logf("boot hook install failed: %v", err)
-		} else if msg != "" {
-			a.logf("boot hook: %s", msg)
-		}
 	}
 
 	// A requested reboot is in flight (design §5.2 config→reboot→precomplete):
