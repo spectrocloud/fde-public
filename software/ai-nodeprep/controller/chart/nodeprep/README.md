@@ -79,7 +79,7 @@ A profile without a `selection` block adopts no nodes.
 | `firmware.aptUpgrade` | Runs `apt-get update` and `apt-get upgrade` before package installation. | Boolean | `false` | No |
 | `firmware.bfb.name` | BFB firmware bundle filename, relative to `firmware.source`. | String | None — no BFB step | No |
 | `firmware.bfb.minVersion` | Firmware floor for the BFB flash gate on BlueField-3. A card below it is flashed; a card at or above it needs no flash. Dot-separated numeric comparison with zero-padding (`32.49` < `32.49.1014`). | String | None (no version gate) | No |
-| `firmware.bfb.sha256` | SHA-256 of the BFB. When set, a cached copy that still matches is reused; when omitted the download is not integrity-checked and any cached copy is downloaded again on every run. | String | None (no verification) | No |
+| `firmware.bfb.sha256` | SHA-256 of the BFB. When set, a cached copy that still matches is reused. When omitted the download is not integrity-checked, and a cached copy is downloaded again whenever the download step runs again (for example after a profile change re-opens the steps). | String | None (no verification) | No |
 | `firmware.doca.deb` | DOCA host package filename, relative to `firmware.source`. | String | None — no DOCA install | No |
 | `firmware.doca.sha256` | SHA-256 of the DOCA package. Same behavior as `firmware.bfb.sha256` when omitted. | String | None (no verification) | No |
 | `firmware.doca.packages` | Packages installed with the DOCA package. The placeholder `$(uname -r)` is expanded to the host kernel release. | List of strings | Empty | No |
