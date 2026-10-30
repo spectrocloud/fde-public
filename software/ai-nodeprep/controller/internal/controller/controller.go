@@ -265,6 +265,15 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 		return
 	}
 
+	if np == nil && !nodeReady(node) {
+		// A node registers before kubelet reports Ready and, on a control
+		// plane, before kubeadm's role label and taint are visible. Adopting
+		// on the first Add event races those signals: vm-cp-pool-02 was
+		// adopted as a worker in the same second it was created, leaving a
+		// Pending NodePrep despite controlPlane.prep=false (1.1.0). Wait for
+		// the first Ready status — the informer fires again on that update.
+		return
+	}
 	if np == nil {
 		np, err = c.adoptNode(ctx, node, profile)
 		if err != nil {
@@ -656,6 +665,17 @@ func readyFor(phase v1alpha1.Phase, np *v1alpha1.NodePrep) (status, reason, mess
 		}
 		return "False", v1alpha1.ReasonConverging, fmt.Sprintf("nodeprep converging at phase %s", phase)
 	}
+}
+
+// nodeReady reports the kubelet-reported Ready condition. Adoption waits for
+// it so a node's role label and taint are in place before it can be classed.
+func nodeReady(node *corev1.Node) bool {
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func isControlPlane(node *corev1.Node) bool {

@@ -1186,7 +1186,17 @@
       install now happens before the gate: two files and a unit are not a
       firmware or kernel operation, so they are deliberately outside the
       hold. <code>TestCycleInstallsBootHookWhileFipsHeld</code> asserts the
-      hook exists and the walk is still held.</li>
+      hook exists and the walk is still held.
+      <br><br>
+      <b>Adoption settling guard.</b> Even with taint-or-label control-plane
+      detection, a node's very first Add event can carry neither signal, so
+      <code>vm-cp-pool-02</code> was adopted in the same second it was created
+      and received a Pending NodePrep despite <code>controlPlane.prep=false</code>
+      (the agent's new gate then froze it). The controller now refuses to
+      create a NodePrep for a node that is not yet Ready; the informer fires
+      again on the Ready update, by which time kubeadm's role label and taint
+      are in place. <code>TestAdoptionWaitsForReady</code> covers absent,
+      Unknown, False and True conditions.</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from

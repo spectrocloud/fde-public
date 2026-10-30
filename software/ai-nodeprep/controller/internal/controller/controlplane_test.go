@@ -33,3 +33,30 @@ func TestIsControlPlane(t *testing.T) {
 		}
 	}
 }
+
+// Adoption waits for the node's first Ready status so the control-plane
+// role signals are in place; a registration-time adoption used to race
+// them (vm-cp-pool-02, 1.1.0).
+func TestAdoptionWaitsForReady(t *testing.T) {
+	cases := []struct {
+		name string
+		cond *corev1.NodeCondition
+		want bool
+	}{
+		{"no condition", nil, false},
+		{"unknown", &corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionUnknown}, false},
+		{"false", &corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionFalse}, false},
+		{"true", &corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionTrue}, true},
+	}
+	for _, c := range cases {
+		node := &corev1.Node{}
+		// Decoys must not satisfy the check.
+		node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue}}
+		if c.cond != nil {
+			node.Status.Conditions = append(node.Status.Conditions, *c.cond)
+		}
+		if got := nodeReady(node); got != c.want {
+			t.Errorf("%s: nodeReady = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
