@@ -1136,7 +1136,31 @@
       in the applied schema). The subcommand was also run against the test
       cluster's API server before the workloads were deployed: both CRDs
       applied, the new field read back, and a second run was a clean no-op
-      update.</li>
+      update.
+      <br><br>
+      <b>Retry robustness (same release).</b> Nodes were failing prep after
+      five counted step attempts while the control plane was still forming or
+      DNS was briefly unavailable — failures that would have healed on their
+      own. The budget is now 10 attempts, paced more steeply: 10s, 20s, 40s,
+      80s, then a 2-minute cap, so three retries span ~70s instead of ~15s.
+      On top of that, failures whose message reads as transient infrastructure
+      (<code>transientRetryError</code>: DNS — "no such host", "temporary
+      failure in name resolution", …; Kubernetes API server / control plane —
+      "connection refused", "connection reset by peer", "TLS handshake
+      timeout", 503/unavailable, etcd timeouts, "context deadline exceeded",
+      "i/o timeout", …) are paced but <em>never counted</em>: the step keeps
+      retrying (capped at 2 minutes) until the infrastructure heals. The
+      transient pacing counter is in-memory and cleared on success and on the
+      first counted failure; a bare "timeout" is deliberately not transient,
+      because the agent's own apt/dpkg host units report timeouts that are not
+      necessarily self-healing. Tests:
+      <code>TestTransientRetryError</code> (classification both ways),
+      <code>TestStepBackoff</code> (schedule and cap),
+      <code>TestRunStageCountsTenAttempts</code> (nine failures do not fail the
+      NodePrep, the tenth does) and
+      <code>TestRunStageTransientFailuresDoNotCount</code> (fifteen DNS
+      failures leave attempts at 0 and the phase un-failed; the next success
+      completes the step and clears the pacing).</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from
