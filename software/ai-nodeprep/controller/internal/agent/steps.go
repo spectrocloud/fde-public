@@ -110,19 +110,35 @@ func stepDownloads(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepPr
 	if !a.mutationsAllowed(profile) {
 		return v1alpha1.StepBlocked, "downloads require -host-mutations and policy.hostMutations"
 	}
+	configured, unverified := 0, false
 	if fw.BFB.Name != "" {
+		configured++
+		if fw.BFB.SHA256 == "" {
+			unverified = true
+		}
 		url := strings.TrimSuffix(fw.Source, "/") + "/firmware/bfb/" + fw.BFB.Name
 		if err := a.downloadFile(url, filepath.Join(a.bfbDir(), fw.BFB.Name), fw.BFB.SHA256); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("BFB download: %v", err)
 		}
 	}
 	if fw.DOCA.Deb != "" {
+		configured++
+		if fw.DOCA.SHA256 == "" {
+			unverified = true
+		}
 		url := strings.TrimSuffix(fw.Source, "/") + "/" + fw.DOCA.Deb
 		if err := a.downloadFile(url, filepath.Join(a.spcxDir(), fw.DOCA.Deb), fw.DOCA.SHA256); err != nil {
 			return v1alpha1.StepFailed, fmt.Sprintf("DOCA deb download: %v", err)
 		}
 	}
-	return v1alpha1.StepDone, "firmware artifacts present and checksum-verified"
+	switch {
+	case configured == 0:
+		return v1alpha1.StepDone, "skipped: no BFB or DOCA artifact configured"
+	case unverified:
+		return v1alpha1.StepDone, "firmware artifacts present (no checksum configured for one or more artifacts: not integrity-verified)"
+	default:
+		return v1alpha1.StepDone, "firmware artifacts present and checksum-verified"
+	}
 }
 
 // downloadFile ensures url's payload is present at dest with wantSHA
@@ -2190,7 +2206,7 @@ func ovsPortConverged(a *Agent, br, pf string, mtu int) (bool, string) {
 // fresh manager state cannot cause a reset loop.
 func stepKubeletState(a *Agent, np *v1alpha1.NodePrep, profile *v1alpha1.NodePrepProfile) (v1alpha1.StepState, string) {
 	hb := profile.Spec.HostBoot
-	mode := hb.KubeletStateReset
+	mode := hb.KubeletStateResetMode()
 	resetWanted := mode == "always" || mode == "readyCheck"
 	// The boot hook carries two duties (design §6.2): the guarded kubelet
 	// manager-state reset and the mlnx_interface_mgr wait. Install it when

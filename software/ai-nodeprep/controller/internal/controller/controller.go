@@ -32,6 +32,10 @@ var (
 	nodePrepsGVR = schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "nodepreps"}
 )
 
+// reconcileTimeout bounds one node reconcile so a hung API call cannot block
+// the informer's serial event delivery indefinitely (1.1.0).
+const reconcileTimeout = 60 * time.Second
+
 // Controller is the cluster controller. v0.1 runs a single replica without
 // leader election (documented in the README).
 type Controller struct {
@@ -92,7 +96,16 @@ func (c *Controller) enqueue(ctx context.Context, obj interface{}) {
 	// Reconciles are cheap (small clusters, cached reads); run them inline
 	// behind the informer's delivery. A workqueue is warranted when the
 	// flash window and CP admission see production scale.
-	c.reconcileNode(ctx, node.Name)
+	//
+	// Bound each reconcile: informer event delivery is serial, so one call
+	// that never returns (a TCP connection blackholed by a control-plane
+	// outage) would wedge the controller permanently — alive and silent
+	// while no further nodes are processed (1.1.0, Kevin: a single-CP
+	// repave). A bounded context turns that into a logged failure and lets
+	// the next resync retry; the health probe handles a longer outage.
+	rctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
+	c.reconcileNode(rctx, node.Name)
 }
 
 // reprobeMachineCRD re-checks for the Machine CRD at most once a minute,
@@ -252,6 +265,15 @@ func (c *Controller) reconcileNode(ctx context.Context, nodeName string) {
 		return
 	}
 
+	if np == nil && !nodeReady(node) {
+		// A node registers before kubelet reports Ready and, on a control
+		// plane, before kubeadm's role label and taint are visible. Adopting
+		// on the first Add event races those signals: vm-cp-pool-02 was
+		// adopted as a worker in the same second it was created, leaving a
+		// Pending NodePrep despite controlPlane.prep=false (1.1.0). Wait for
+		// the first Ready status — the informer fires again on that update.
+		return
+	}
 	if np == nil {
 		np, err = c.adoptNode(ctx, node, profile)
 		if err != nil {
@@ -645,12 +667,35 @@ func readyFor(phase v1alpha1.Phase, np *v1alpha1.NodePrep) (status, reason, mess
 	}
 }
 
+// nodeReady reports the kubelet-reported Ready condition. Adoption waits for
+// it so a node's role label and taint are in place before it can be classed.
+func nodeReady(node *corev1.Node) bool {
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 func isControlPlane(node *corev1.Node) bool {
 	if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
 		return true
 	}
-	_, ok := node.Labels["node-role.kubernetes.io/master"]
-	return ok
+	if _, ok := node.Labels["node-role.kubernetes.io/master"]; ok {
+		return true
+	}
+	// A node registers with its control-plane taint before kubeadm applies
+	// the role label. Checking only labels let the controller adopt a
+	// freshly repaved control plane as a worker and walk it despite
+	// controlPlane.prep=false (1.1.0, vm-cp-pool-03). The label still
+	// matters: an untainted control plane must count too.
+	for _, t := range node.Spec.Taints {
+		if t.Key == "node-role.kubernetes.io/control-plane" || t.Key == "node-role.kubernetes.io/master" {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeInto converts an unstructured object into a typed struct via JSON.

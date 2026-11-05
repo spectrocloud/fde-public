@@ -29,8 +29,29 @@ spec:
           operator: Exists
       containers:
         - name: controller
-          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.0.1-controller
+          image: ghcr.io/spectrocloud/fde-public/ai-nodeprep:1.1.0-controller
           imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 8080
+          # Both probes ask the API server for a one-item node list. A
+          # controller that lost its connection stays alive but stops
+          # reconciling, so liveness must fail rather than show process-only
+          # health; the kubelet then restarts it and the informers re-sync.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            timeoutSeconds: 6
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 20
+            timeoutSeconds: 6
+            failureThreshold: 3
           securityContext:
             runAsNonRoot: true
             # The image has no USER directive; pin an explicit non-root UID so

@@ -78,6 +78,20 @@ spec:
                         Disqualifying label ("key" matches any value, "key=value"
                         an exact one) — nodes carrying it are never adopted.
                       type: string
+                    waitForFipsKernel:
+                      description: >
+                        Hold every nodeprep action until the node runs a FIPS
+                        kernel (1.1.0). In environments where the node boots
+                        with a non-FIPS kernel initially and then installs a FIPS
+                        kernel afterwards through actions in the clusterprofile;
+                        enabling this keeps DOCA and the kernel installation from
+                        running in parallel. The agent checks its running kernel
+                        release (uname -r, which carries "fips" for FIPS kernels)
+                        on every cycle and performs no inventory, boot-hook, walk
+                        or boot-verify action until it sees one. false/omitted
+                        (default): the kernel version does not matter.
+                      type: boolean
+                      default: false
                 firmware:
                   type: object
                   properties:
@@ -254,9 +268,14 @@ spec:
                       description: Render the nodeprep-boot.service oneshot (design §6.2). Unset means true.
                       type: boolean
                     kubeletStateReset:
-                      description: Guarded kubelet manager-state reset at boot.
+                      description: >
+                        Guarded kubelet manager-state reset at boot. always
+                        (default) resets at prep and on every boot; readyCheck
+                        resets only while the kubelet is not running; off
+                        disables the reset.
                       type: string
                       enum: [always, readyCheck, off, ""]
+                      default: always
                     mlnxInterfaceMgr:
                       description: Handling of the mlnx_interface_mgr wait.
                       type: string

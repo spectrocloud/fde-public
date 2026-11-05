@@ -19,11 +19,14 @@ const (
 	bootHookUnitPath   = "/etc/systemd/system/nodeprep-boot.service"
 	bootHookScriptPath = "/usr/local/sbin/nodeprep-boot-hook"
 	bootHookUnitName   = "nodeprep-boot.service"
+)
 
-	// hostEtcSystemd / hostUsrLocalSbin are the /host-mounted roots of the
-	// two paths above inside the agent container.
+// Host-mounted roots of the paths above inside the agent container. Variables
+// so tests can redirect them to a temporary directory.
+var (
 	hostEtcSystemd   = "/host/etc/systemd/system"
 	hostUsrLocalSbin = "/host/usr/local/sbin"
+	hostTmpDir       = "/host/tmp"
 )
 
 // renderBootHook renders the nodeprep-boot.service unit and its script from
@@ -129,7 +132,7 @@ fi
 		// nothing to wait for.
 	}
 	b.WriteString(`
-case "` + hb.KubeletStateReset + `" in
+case "` + hb.KubeletStateResetMode() + `" in
   always) reset_kubelet_state ;;
   readyCheck) readycheck || reset_kubelet_state ;;
 esac
@@ -201,7 +204,7 @@ func (a *Agent) ensureBootHook(profile *v1alpha1.NodePrepProfile) (string, error
 	// reboot). The candidate is validated by the HOST's /bin/sh — the same
 	// shell that will execute it — via nsenter, and only then moved into
 	// place; an enabled unit can never point at an unvalidated script.
-	candDir := "/host/tmp"
+	candDir := hostTmpDir
 	candPath := filepath.Join(candDir, "nodeprep-boot-hook.candidate")
 	if err := os.MkdirAll(candDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %v", candDir, err)

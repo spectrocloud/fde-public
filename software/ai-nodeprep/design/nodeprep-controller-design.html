@@ -305,9 +305,11 @@ kind: NodePrepProfile
 metadata:
   name: spectrumx-2x-a100
 spec:
-  nodeSelector:                      <span class="c"># adoption gate: only these nodes get a NodePrep object</span>
-    matchLabels:
-      spectrocloud.com/ai-node: <span class="s">"true"</span>
+  selection:                         <span class="c"># adoption gate: only these nodes get a NodePrep object</span>
+    nodeSelector:
+      matchLabels:
+        spectrocloud.com/ai-node: <span class="s">"true"</span>
+    waitForFipsKernel: <span class="s">false</span>         <span class="c"># 1.1.0: true = hold every nodeprep action until the running kernel is a FIPS kernel (Ubuntu Pro post-install)</span>
 
   firmware:                          <span class="c"># replaces MAAS, BFB, BFB_FW, DOCA_DEB, APT_UPDATE</span>
     source: <span class="s">http://maas.internal:8069/rcp</span>

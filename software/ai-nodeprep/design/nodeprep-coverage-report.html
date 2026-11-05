@@ -120,7 +120,7 @@
   <div class="docline">
     <span><b>NP-COV-001</b></span>
     <span>Live coverage report</span>
-    <span>nodeprep-v105.sh → controller v1.0.1</span>
+    <span>nodeprep-v105.sh → controller v1.1.0</span>
     <span>2026-09-07</span>
   </div>
   <h1>What the fresh-node run actually covered</h1>
@@ -164,7 +164,7 @@
    <code>firmware.aptUpgrade</code> and <code>nfsRdma.enabled</code> to <code>true</code> for their first real
    runs, followed by an operator audit that closed three more every-node gaps (0.1.30). Run 4 (2026-09-03) turned the
    profile's <code>eastWest.numVFs</code> up to 4 and walked the real VF pipeline — grub assembly, firmware NV
-   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 1.0.1</code>.</p>
+   writes, the reboot protocol under load, and a firmware quirk that no warm reboot can clear. NodePrep versions <code>0.1.24 → 1.1.0</code>.</p>
 
 <div class="count">
   <span><b>12</b> bash functions fully covered</span>
@@ -1088,6 +1088,115 @@
       <code>boot-verify step ovsSetup/ovsBridges: Done — skipped by policy
       (eastWest.manageOVS=false)</code> and passed BootVerified cleanly — worker label
       present, no taints, sriov daemon 2/2 desired/ready.</li>
+  <li><b>1.1.0 — FIPS-kernel gate (<code>selection.waitForFipsKernel</code>)
+      (Kevin, MAAS/FIPS edge case).</b> In this environment
+      MAAS boots the node on a non-FIPS kernel and a Palette cluster-profile
+      action then enables Ubuntu Pro and installs the FIPS kernel as a
+      post-install step; nodeprep's DOCA install running in parallel is the
+      clash. The profile gains <code>spec.selection.waitForFipsKernel</code>
+      (boolean, default <strong>false</strong>). When true the agent resolves
+      its running kernel (<code>uname -r</code>, cached per process — containers
+      share the host kernel, so no nsenter is needed) and holds
+      <em>every</em> action until the release names a FIPS kernel (Ubuntu Pro
+      ships <code>-fips</code> releases: <code>6.8.0-1015-fips</code>,
+      <code>5.15.0-1070-fips</code>): no inventory refresh, no boot-hook
+      install, no walk, no boot-verify, and no host exec beyond the kernel
+      probe. The hold is announced once per process (log + a
+      <code>WaitingForFipsKernel</code> event) so an operator sees why nothing
+      moves; the boot bookkeeping and phase sync still run, so the ledger stays
+      truthful. A reboot into the FIPS kernel restarts the pod, and the fresh
+      process observes the new kernel and proceeds. With the setting false or
+      omitted, the kernel version is irrelevant — the pre-1.1.0 behavior.
+      Tests: <code>TestFipsKernel</code> (release classification, mixed case
+      and prefixes) and <code>TestCycleWaitsForFipsKernel</code> — three
+      cycle-level cases against fake clients: gate on + a generic kernel runs
+      <em>no</em> step and execs only <code>uname -r</code>, emitting the
+      event; gate on + a FIPS kernel walks; gate off + a generic kernel walks.
+      The schema change needs no separate upgrader: the CRDs render as chart
+      templates (not under <code>crds/</code>), so <code>helm upgrade</code>
+      carries <code>waitForFipsKernel</code> automatically, and Helm applies
+      CustomResourceDefinitions before the workloads of the same release.
+      <br><br>
+      <b>Retry robustness (same release).</b> Nodes were failing prep after
+      five counted step attempts while the control plane was still forming or
+      DNS was briefly unavailable — failures that would have healed on their
+      own. The budget is now 10 attempts, paced more steeply: 10s, 20s, 40s,
+      80s, then a 2-minute cap, so three retries span ~70s instead of ~15s.
+      On top of that, failures whose message reads as transient infrastructure
+      (<code>transientRetryError</code>: DNS server unavailable —
+      "temporary failure in name resolution", "server misbehaving", "could not
+      resolve host"; deliberately <em>not</em> a missing record — "no such
+      host" and "name or service not known" are structural, e.g. a mistyped
+      FQDN, and must keep failing; Kubernetes API server / control plane —
+      "connection refused", "connection reset by peer", "TLS handshake
+      timeout", 503/unavailable, etcd timeouts, "context deadline exceeded",
+      "i/o timeout", …) are paced but <em>never counted</em>: the step keeps
+      retrying (capped at 2 minutes) until the infrastructure heals. The
+      transient pacing counter is in-memory and cleared on success and on the
+      first counted failure; a bare "timeout" is deliberately not transient,
+      because the agent's own apt/dpkg host units report timeouts that are not
+      necessarily self-healing. Tests:
+      <code>TestTransientRetryError</code> (classification both ways),
+      <code>TestStepBackoff</code> (schedule and cap),
+      <code>TestRunStageCountsTenAttempts</code> (nine failures do not fail the
+      NodePrep, the tenth does) and
+      <code>TestRunStageTransientFailuresDoNotCount</code> (fifteen DNS
+      failures leave attempts at 0 and the phase un-failed; the next success
+      completes the step and clears the pacing).
+      <br><br>
+      <b>Controller resilience during an API outage.</b> A single-control-plane
+      repave briefly removed the API server; the controller stayed alive but
+      stopped reconciling — no adoption of a newly joined worker for ten
+      minutes, and no log after startup. Reconciles run inline behind the
+      informer's serial event delivery, so one API call that never returned
+      (a blackholed connection rather than a refusal) wedges every later
+      event. Two changes: each reconcile now runs under a 60-second context
+      (<code>reconcileTimeout</code>), turning a hung call into a logged
+      failure and letting the next resync retry; and the controller serves
+      <code>/healthz</code> and <code>/readyz</code>, both backed by a
+      one-item node list against the API server (5-second timeout). The chart
+      and manifests wire liveness/readiness probes to them (20s period, 3
+      failures), so a controller that has lost its connection is restarted by
+      the kubelet and re-syncs its informers when the API returns.
+      <code>TestHealthHandler</code> covers 200 with a reachable API and 503
+      with a connection-refused failure on both endpoints.
+      <br><br>
+      <b>Control-plane adoption race.</b> A repaved control plane registers
+      with its <code>node-role.kubernetes.io/control-plane</code> taint before
+      kubeadm applies the role label. <code>isControlPlane</code> checked only
+      labels, so the controller adopted <code>vm-cp-pool-03</code> as a worker
+      and created a NodePrep despite <code>controlPlane.prep=false</code>; the
+      agent walks its NodePrep without consulting the profile gate, so it
+      started provisioning the control plane. Both sides now treat a node
+      carrying the control-plane (or legacy master) taint as a control plane,
+      and the agent freezes a retained NodePrep when
+      <code>controlPlane.prep=false</code> — the controller's gate only stops
+      new adoption, while its retained NodePrep is meant to stay frozen. Tests:
+      <code>TestIsControlPlane</code> (label, legacy label, taint-only, worker),
+      <code>TestNodeIsControlPlane</code>, and
+      <code>TestCycleHoldsControlPlaneWhenPrepDisabled</code> (a taint-only CP
+      with a retained NodePrep runs no step and execs nothing).
+      <br><br>
+      <b>Boot hook before the FIPS hold.</b> The hook was installed after the
+      FIPS gate, so a node waiting for its FIPS kernel never received the
+      pre-kubelet oneshot. The FIPS reboot then found stale kubelet
+      manager-state files and kubelet refused to start ("the expected machine
+      state is different from the real one"), losing the node — the agent
+      cannot repair that, because a pod cannot run until kubelet does. The
+      install now happens before the gate: two files and a unit are not a
+      firmware or kernel operation, so they are deliberately outside the
+      hold. <code>TestCycleInstallsBootHookWhileFipsHeld</code> asserts the
+      hook exists and the walk is still held.
+      <br><br>
+      <b>Adoption settling guard.</b> Even with taint-or-label control-plane
+      detection, a node's very first Add event can carry neither signal, so
+      <code>vm-cp-pool-02</code> was adopted in the same second it was created
+      and received a Pending NodePrep despite <code>controlPlane.prep=false</code>
+      (the agent's new gate then froze it). The controller now refuses to
+      create a NodePrep for a node that is not yet Ready; the informer fires
+      again on the Ready update, by which time kubeadm's role label and taint
+      are in place. <code>TestAdoptionWaitsForReady</code> covers absent,
+      Unknown, False and True conditions.</li>
   <li><b>1.0.1 — the selective verify query skips keys the device is known
       not to carry (Kevin, demo cluster ConnectX-4 Lx rails).</b> The 0.1.96
       selective read derives its candidate list from
@@ -2322,7 +2431,7 @@
 <footer>
   NP-COV-001 · generated from live cluster evidence (NodePrep ledger, Kubernetes events, agent pod logs,
   host journal) · nodes bm-a-rtx6k-7 / bm-a-rtx6k-6, bl-r1-c2-02 / bl-r1-c2-04; run 3: bl-r1-c2-05 /
-  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 1.0.1 · sibling document to
+  bl-r1-c2-06, vm-cp-pool-13 / -15 / -14 · controller/agent 0.1.10 → 1.1.0 · sibling document to
   design/nodeprep-controller-design.html (NP-CTRL-001)
 </footer>
 
