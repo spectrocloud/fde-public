@@ -1,0 +1,33 @@
+id: pail-claude
+display_name: PAIL - Claude
+description: PaletteAI Inference Launchpad - Claude Code CLI
+category: agent
+inference_capable: true
+credentials:
+  - name: api_key
+    description: PAIL API key used by Claude Code
+    env_vars: [ANTHROPIC_AUTH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+files:
+  - path: settings.json
+    content: |  
+      { "env": {
+        "ANTHROPIC_BASE_URL": "{{config.ANTHROPIC_BASE_URL}}",
+        "ANTHROPIC_MODEL": "{{config.ANTHROPIC_MODEL}}",
+        "CLAUDE_CODE_EFFORT_LEVEL": "{{config.CLAUDE_CODE_EFFORT_LEVEL}}",
+        "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000"
+        }
+      }
+    env_var: CLAUDE_CONFIG_FILE
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: pail.company.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/bin/claude, /usr/local/bin/claude]
